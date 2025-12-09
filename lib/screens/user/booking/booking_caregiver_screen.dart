@@ -1,0 +1,1651 @@
+import 'dart:async';
+import 'dart:math';
+import 'dart:ui';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
+import 'package:flutter_polyline_points/flutter_polyline_points.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+
+import '../../../models/caregiver_model.dart';
+import 'booking_person_screen.dart';
+import 'booking_summary_screen.dart';
+
+enum CaregiverCategory { forYou, recommendation, unavailable }
+
+const Color _bookingAppBarText = Color(0xFF1B1D29);
+
+class CaregiverOption {
+  CaregiverOption({
+    required this.id,
+    required this.name,
+    required this.rating,
+    required this.distanceKm,
+    required this.services,
+    required this.price,
+    required this.priceValue,
+    required this.category,
+    required this.available,
+    required this.addressLine,
+    required this.matchCount,
+    this.latLng,
+    this.avatarUrl,
+    this.score = 0,
+    required this.rawData,
+  });
+
+  final String id;
+  final String name;
+  final double rating;
+  final double distanceKm;
+  final List<String> services;
+  final String price;
+  final double priceValue;
+  final CaregiverCategory category;
+  final bool available;
+  final String addressLine;
+  final int matchCount;
+  final LatLng? latLng;
+  final String? avatarUrl;
+  final double score;
+  final Map<String, dynamic> rawData;
+
+  CaregiverOption copyWith({CaregiverCategory? category}) {
+    return CaregiverOption(
+      id: id,
+      name: name,
+      rating: rating,
+      distanceKm: distanceKm,
+      services: services,
+      price: price,
+      priceValue: priceValue,
+      category: category ?? this.category,
+      available: available,
+      addressLine: addressLine,
+      matchCount: matchCount,
+      latLng: latLng,
+      avatarUrl: avatarUrl,
+      score: score,
+      rawData: Map<String, dynamic>.from(rawData),
+    );
+  }
+}
+
+class BookingCaregiverScreen extends StatefulWidget {
+  const BookingCaregiverScreen({
+    super.key,
+    required this.person,
+    required this.selectedAddress,
+    this.note,
+  });
+
+  final PersonProfile person;
+  final AddressItem selectedAddress;
+  final String? note;
+
+  @override
+  State<BookingCaregiverScreen> createState() => _BookingCaregiverScreenState();
+}
+
+class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
+    with TickerProviderStateMixin {
+  static const double _minSheetSize = 0.45;
+  static const double _maxSheetSize = 0.85;
+  static const SpringDescription _panelSpring = SpringDescription(
+    mass: 1,
+    stiffness: 260,
+    damping: 22,
+  );
+
+  GoogleMapController? _mapController;
+  late final AnimationController _panelController;
+  double _backdropOpacity = 0.0;
+  double _panelBlend = 0.0;
+  bool _hideFrontPanel = false;
+  double _lastDragDelta = 0;
+  final ScrollController _listController = ScrollController();
+  final GlobalKey _listKey = GlobalKey();
+  bool _isProgrammaticScroll = false;
+  CaregiverCategory _activeCategory = CaregiverCategory.forYou;
+
+  List<CaregiverOption> _caregivers = [];
+  bool _loadingCaregivers = true;
+  CaregiverOption? _selectedCaregiver;
+  Set<Polyline> _route = {};
+  Set<Marker> _markers = {};
+  String? _errorMessage;
+  int _routeAnimToken = 0;
+  bool _routingInProgress = false;
+  final Map<String, List<LatLng>> _routeCache = {};
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _caregiverSub;
+  DateTime? _lastTap;
+  late final AnimationController _shineController;
+  static const String _mapsApiKey = String.fromEnvironment(
+    'AIzaSyDADYhy-AAeikw72w9jq22FnMDCVXRJark',
+    defaultValue: 'AIzaSyDADYhy-AAeikw72w9jq22FnMDCVXRJark',
+  );
+
+  final Map<CaregiverCategory, GlobalKey> _sectionKeys = {
+    CaregiverCategory.forYou: GlobalKey(),
+    CaregiverCategory.recommendation: GlobalKey(),
+    CaregiverCategory.unavailable: GlobalKey(),
+  };
+  // Keys removed from tiles to avoid duplicate GlobalKey issues.
+
+  late LatLng _currentLatLng;
+  List<String> _clientServicePrefs = [];
+  CaregiverCategory _selectedCategory = CaregiverCategory.forYou;
+
+  CaregiverModel? get _selectedCaregiverModel {
+    final selected = _selectedCaregiver;
+    if (selected == null) return null;
+    return CaregiverModel.safeFromMap(selected.id, selected.rawData);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _panelController = AnimationController(
+      vsync: this,
+      lowerBound: 0,
+      upperBound: 1,
+      value: 0,
+      duration: const Duration(milliseconds: 320),
+    )..addListener(_updatePanelVisuals);
+
+    _currentLatLng = LatLng(
+      widget.person.latitude ?? 3.1390,
+      widget.person.longitude ?? 101.6869,
+    );
+    _markers = {_selectedMarker()};
+    _listController.addListener(_handleScrollCategoryDetection);
+    _updatePanelVisuals();
+    _loadClientPreferences();
+    _shineController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _shineController.dispose();
+    _panelController.dispose();
+    _listController
+      ..removeListener(_handleScrollCategoryDetection)
+      ..dispose();
+    _mapController?.dispose();
+    _caregiverSub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadClientPreferences() async {
+    try {
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid != null) {
+        final doc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .get();
+        final data = doc.data();
+        final dynamic raw =
+            data?['servicePreferences'] ?? data?['services'] ?? data?['skills'];
+        _clientServicePrefs = _stringListFromField(raw);
+      }
+    } catch (_) {
+      _clientServicePrefs = [];
+    } finally {
+      _fetchCaregivers();
+    }
+  }
+
+  void _fetchCaregivers() {
+    _caregiverSub?.cancel();
+    setState(() {
+      _loadingCaregivers = true;
+      _errorMessage = null;
+      _caregivers = [];
+      _selectedCaregiver = null;
+      _markers = {_selectedMarker()};
+      _route = {};
+    });
+    _caregiverSub = FirebaseFirestore.instance
+        .collection('caregivers')
+        .snapshots()
+        .listen(_handleCaregiverSnapshot, onError: _handleCaregiverError);
+  }
+
+  void _handleCaregiverSnapshot(QuerySnapshot<Map<String, dynamic>> snapshot) {
+    final list = snapshot.docs.map(_mapDocToCaregiverOption).toList();
+    if (list.isEmpty) {
+      setState(() {
+        _caregivers = [];
+        _loadingCaregivers = false;
+        _selectedCaregiver = null;
+        _markers = {_selectedMarker()};
+        _route = {};
+        _errorMessage = 'Tiada caregiver ditemui';
+      });
+      return;
+    }
+
+    final ranked = _applyCategories(list);
+    final selected = ranked.firstWhere(
+      (c) => c.category == CaregiverCategory.forYou,
+      orElse: () => ranked.first,
+    );
+    setState(() {
+      _caregivers = ranked;
+      _loadingCaregivers = false;
+      _selectedCaregiver = selected;
+      _selectedCategory = CaregiverCategory.forYou;
+      _errorMessage = null;
+    });
+    _updateRouteAndMap(selected, sourceCategory: CaregiverCategory.forYou);
+  }
+
+  void _handleCaregiverError(Object error) {
+    setState(() {
+      _caregivers = [];
+      _loadingCaregivers = false;
+      _selectedCaregiver = null;
+      _markers = {_selectedMarker()};
+      _route = {};
+      _errorMessage = 'Gagal dapat caregiver: $error';
+    });
+  }
+
+  CaregiverOption _mapDocToCaregiverOption(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data() ?? {};
+    final List<String> services = _stringListFromField(data['services']);
+    final List<Map<String, dynamic>> addresses = _extractAddressList(
+      data['address'] ?? data['addresses'],
+    );
+    final Map<String, dynamic>? primaryAddress = addresses.isNotEmpty
+        ? addresses.first
+        : null;
+    final LatLng? loc =
+        _latLngFromMap(primaryAddress) ?? _latLngFromDocument(data);
+    final double distanceKm = loc != null
+        ? _distanceKm(_currentLatLng, loc)
+        : 0.0;
+    final double rating = (data['rating'] as num?)?.toDouble() ?? 4.5;
+    final String addressLine = _buildAddressLine(primaryAddress);
+
+    final bool available =
+        (data['availability'] as bool?) ??
+        (data['isAvailable'] as bool?) ??
+        true;
+    final double priceValue = (6.0 + distanceKm * 1.6 - (available ? 0 : -2))
+        .clamp(0.0, double.infinity);
+    final String price = 'RM${priceValue.toStringAsFixed(2)}';
+
+    final int matchCount = _matchCount(services);
+    final double score = _score(
+      distanceKm: distanceKm,
+      rating: rating,
+      serviceCount: services.length,
+      price: priceValue,
+      matchCount: matchCount,
+    );
+
+    return CaregiverOption(
+      id: doc.id,
+      name: data['name'] as String? ?? 'Caregiver',
+      rating: rating,
+      distanceKm: distanceKm,
+      services: services.isNotEmpty ? services : ['Service'],
+      price: price,
+      priceValue: priceValue,
+      category: available
+          ? CaregiverCategory.forYou
+          : CaregiverCategory.unavailable,
+      available: available,
+      addressLine: addressLine,
+      matchCount: matchCount,
+      latLng: loc,
+      avatarUrl: data['avatarUrl'] as String? ?? data['photoUrl'] as String?,
+      score: score,
+      rawData: Map<String, dynamic>.from(data),
+    );
+  }
+
+  List<CaregiverOption> _applyCategories(List<CaregiverOption> source) {
+    final available = source.where((c) => c.available).toList()
+      ..sort((a, b) {
+        // priority: matchCount desc, rating desc, price asc, distance asc
+        final matchCmp = b.matchCount.compareTo(a.matchCount);
+        if (matchCmp != 0) return matchCmp;
+        final ratingCmp = b.rating.compareTo(a.rating);
+        if (ratingCmp != 0) return ratingCmp;
+        final priceCmp = a.priceValue.compareTo(b.priceValue);
+        if (priceCmp != 0) return priceCmp;
+        return a.distanceKm.compareTo(b.distanceKm);
+      });
+    final topForRecommendation = available.take(3).map((c) {
+      return c.copyWith(category: CaregiverCategory.recommendation);
+    }).toList();
+    final remaining = available.skip(3).map((c) {
+      return c.copyWith(category: CaregiverCategory.forYou);
+    }).toList();
+    final unavailable = source
+        .where((c) => !c.available)
+        .map((c) => c.copyWith(category: CaregiverCategory.unavailable));
+    return [...topForRecommendation, ...remaining, ...unavailable];
+  }
+
+  int _matchCount(List<String> services) {
+    if (_clientServicePrefs.isEmpty) return 0;
+    final prefs = _clientServicePrefs
+        .map((e) => e.toLowerCase().trim())
+        .toSet();
+    return services.where((s) => prefs.contains(s.toLowerCase().trim())).length;
+  }
+
+  double _score({
+    required double distanceKm,
+    required double rating,
+    required int serviceCount,
+    required double price,
+    required int matchCount,
+  }) {
+    final double distanceScore = max(0, 5 - min(distanceKm, 5)) * 5;
+    final double ratingScore = rating * 10;
+    final double matchScore = matchCount * 1000;
+    final double serviceScore = min(serviceCount, 6) * 2;
+    final double priceScore = -price * 8; // lower price => higher score
+    return distanceScore + ratingScore + serviceScore + priceScore + matchScore;
+  }
+
+  double _distanceKm(LatLng a, LatLng b) {
+    const earthRadius = 6371;
+    final dLat = _degToRad(b.latitude - a.latitude);
+    final dLon = _degToRad(b.longitude - a.longitude);
+    final lat1 = _degToRad(a.latitude);
+    final lat2 = _degToRad(b.latitude);
+    final sinDLat = sin(dLat / 2);
+    final sinDLon = sin(dLon / 2);
+    final h = sinDLat * sinDLat + sinDLon * sinDLon * cos(lat1) * cos(lat2);
+    final c = 2 * atan2(sqrt(h), sqrt(1 - h));
+    return earthRadius * c;
+  }
+
+  double _degToRad(double deg) => deg * pi / 180;
+
+  double _panelRangePx(BuildContext context) {
+    final h = MediaQuery.of(context).size.height;
+    return (_maxSheetSize - _minSheetSize) * h;
+  }
+
+  double _currentSheetHeight(BuildContext context) {
+    return lerpDouble(_minSheetSize, _maxSheetSize, _panelController.value)! *
+        MediaQuery.of(context).size.height;
+  }
+
+  double _minSheetHeightPx(BuildContext context) {
+    return _minSheetSize * MediaQuery.of(context).size.height;
+  }
+
+  void _updatePanelVisuals() {
+    final double t = _panelController.value;
+    setState(() {
+      _backdropOpacity = t * 0.22;
+      _panelBlend = t;
+      _hideFrontPanel = t > 0.55;
+    });
+  }
+
+  void _onHandleDragStart(DragStartDetails details) {
+    _panelController.stop();
+    _lastDragDelta = 0;
+  }
+
+  void _onHandleDragUpdate(DragUpdateDetails details) {
+    _lastDragDelta = details.primaryDelta ?? 0;
+  }
+
+  void _onHandleDragEnd(DragEndDetails details) {
+    final range = _panelRangePx(context);
+    final dy = details.velocity.pixelsPerSecond.dy;
+    final velocityValue = -dy / range;
+    final bool dragUp = _lastDragDelta < 0;
+    final bool fastUp = dy < -400;
+    final bool fastDown = dy > 400;
+    final double target = (fastUp || (!fastDown && dragUp)) ? 1.0 : 0.0;
+    _animatePanelTo(target, velocity: velocityValue);
+    _lastDragDelta = 0;
+  }
+
+  TickerFuture _animatePanelTo(double target, {double velocity = 0}) {
+    final simulation = SpringSimulation(
+      _panelSpring,
+      _panelController.value,
+      target.clamp(0.0, 1.0),
+      velocity,
+    );
+    return _panelController.animateWith(simulation);
+  }
+
+  void _handleScrollCategoryDetection() {
+    if (_isProgrammaticScroll) return;
+    final listBox = _listKey.currentContext?.findRenderObject() as RenderBox?;
+    if (listBox == null) return;
+    final double anchorY = listBox.localToGlobal(Offset.zero).dy + 20;
+    CaregiverCategory current = _activeCategory;
+    for (final cat in CaregiverCategory.values) {
+      final ctx = _sectionKeys[cat]?.currentContext;
+      if (ctx == null) continue;
+      final RenderBox box = ctx.findRenderObject() as RenderBox;
+      final double offsetY = box.localToGlobal(Offset.zero).dy;
+      if (offsetY <= anchorY) {
+        current = cat;
+      }
+    }
+    if (current != _activeCategory) setState(() => _activeCategory = current);
+  }
+
+  void _scrollToCategory(CaregiverCategory category) {
+    final key = _sectionKeys[category];
+    _activeCategory = category;
+    _selectedCategory = category;
+    // set selection to first item in the category to show blue band immediately
+    final first = _firstInCategory(category);
+    if (first != null) {
+      _selectedCaregiver = first;
+    }
+    setState(() {});
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final ctx = key?.currentContext;
+      if (ctx == null || !ctx.mounted) return;
+      _isProgrammaticScroll = true;
+      Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOut,
+        alignment: 0.08,
+      ).whenComplete(() {
+        _isProgrammaticScroll = false;
+      });
+    });
+  }
+
+  CaregiverOption? _firstInCategory(CaregiverCategory category) {
+    if (category == CaregiverCategory.forYou) {
+      final list =
+          _caregivers
+              .where((c) => c.category != CaregiverCategory.unavailable)
+              .toList()
+            ..sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
+      return list.isNotEmpty ? list.first : null;
+    }
+    if (category == CaregiverCategory.recommendation) {
+      final list = _caregivers
+          .where((c) => c.category == CaregiverCategory.recommendation)
+          .toList();
+      return list.isNotEmpty ? list.first : null;
+    }
+    final list = _caregivers
+        .where((c) => c.category == CaregiverCategory.unavailable)
+        .toList();
+    return list.isNotEmpty ? list.first : null;
+  }
+
+  Widget _calendarButton() {
+    return AnimatedBuilder(
+      animation: _shineController,
+      builder: (context, child) {
+        final double t = _shineController.value;
+        return Container(
+          height: 48,
+          width: 48,
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: Color(0x22000000),
+                blurRadius: 8,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+          child: ShaderMask(
+            shaderCallback: (Rect rect) {
+              return LinearGradient(
+                begin: Alignment(-1 + t * 2, -1),
+                end: Alignment(0 + t * 2, 1),
+                colors: [
+                  Colors.yellow.withOpacity(0.0),
+                  Colors.yellow.withOpacity(0.35),
+                  Colors.yellow.withOpacity(0.0),
+                ],
+                stops: const [0.0, 0.5, 1.0],
+              ).createShader(rect);
+            },
+            blendMode: BlendMode.srcATop,
+            child: child,
+          ),
+        );
+      },
+      child: IconButton(
+        tooltip: 'Schedule',
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+        icon: const Icon(
+          Icons.calendar_today_rounded,
+          size: 18,
+          color: Color(0xFFF4B63D),
+        ),
+        splashRadius: 24,
+        onPressed: () {
+          _openScheduleSheet();
+        },
+      ),
+    );
+  }
+
+  List<LatLng> _simplifyPoints(List<LatLng> points, {int maxPoints = 80}) {
+    if (points.length <= maxPoints) return points;
+    final stride = (points.length / maxPoints).ceil();
+    return [
+      for (int i = 0; i < points.length; i += stride) points[i],
+      if (points.last != points.first) points.last,
+    ];
+  }
+
+  void _animateRoute(List<LatLng> points) {
+    _routeAnimToken++;
+    final int token = _routeAnimToken;
+    if (points.length < 2) return;
+
+    final simplified = _simplifyPoints(points);
+
+    // build gradual polyline
+    _route = {
+      Polyline(
+        polylineId: const PolylineId('route'),
+        color: const Color(0xFF0FB56C),
+        width: 7,
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
+        jointType: JointType.round,
+        geodesic: true,
+        points: [simplified.first],
+      ),
+    };
+    setState(() {});
+
+    final int total = simplified.length;
+    const int steps = 16; // fewer frames for smoother CPU use
+    final int stepSize = (total / steps).ceil().clamp(1, total);
+
+    Future<void> addChunk(int end) async {
+      if (!mounted || token != _routeAnimToken) return;
+      final chunk = simplified.take(end).toList();
+      setState(() {
+        _route = {
+          Polyline(
+            polylineId: const PolylineId('route'),
+            color: const Color(0xFF0FB56C),
+            width: 7,
+            startCap: Cap.roundCap,
+            endCap: Cap.roundCap,
+            jointType: JointType.round,
+            geodesic: true,
+            points: chunk,
+          ),
+        };
+      });
+      if (end < total) {
+        await Future.delayed(const Duration(milliseconds: 28));
+        await addChunk((end + stepSize).clamp(2, total));
+      }
+    }
+
+    addChunk(stepSize);
+  }
+
+  void _openScheduleSheet() {
+    DateTime selected = DateTime.now().add(const Duration(minutes: 30));
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) {
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 12),
+              Container(
+                width: 38,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey[400],
+                  borderRadius: BorderRadius.circular(24),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Choose date and time',
+                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17),
+              ),
+              SizedBox(
+                height: 220,
+                child: CupertinoDatePicker(
+                  minimumDate: DateTime.now(),
+                  initialDateTime: selected,
+                  mode: CupertinoDatePickerMode.dateAndTime,
+                  onDateTimeChanged: (v) => selected = v,
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                child: Text(
+                  'By booking, you agree to our Advance Booking terms.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.black54, fontSize: 12),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () {
+                      Navigator.of(ctx).pop();
+                      final startTime = TimeOfDay.fromDateTime(selected);
+                      _goToSummary(
+                        scheduleDate: selected,
+                        startTime: startTime,
+                        endTime: _endTimeFromStart(startTime),
+                        showSchedule: true,
+                      );
+                    },
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      backgroundColor: const Color(0xFFF4B63D),
+                      foregroundColor: Colors.black,
+                      textStyle: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 15,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                    ),
+                    child: const Text('Book in advance'),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final String subtitle = widget.person.address.isNotEmpty
+        ? widget.person.address
+        : 'Care location';
+    final double panelHeight = _currentSheetHeight(context);
+    final double bottomInset = MediaQuery.of(context).padding.bottom;
+    final double frontBottom = _hideFrontPanel
+        ? -110
+        : (bottomInset + 2).clamp(4.0, double.infinity);
+    const BorderRadius panelBorderRadius = BorderRadius.vertical(
+      top: Radius.circular(18),
+    );
+    return Scaffold(
+      backgroundColor: Colors.grey[50],
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        elevation: 0,
+        centerTitle: true,
+        automaticallyImplyLeading: false,
+        flexibleSpace: Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.08),
+                blurRadius: 8,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+        ),
+        leading: IconButton(
+          onPressed: () => Navigator.of(context).maybePop(),
+          icon: const Icon(
+            Icons.arrow_back_ios_new_rounded,
+            color: _bookingAppBarText,
+            size: 20,
+          ),
+        ),
+        title: const Text(
+          'Booking',
+          style: TextStyle(
+            color: _bookingAppBarText,
+            fontWeight: FontWeight.w600,
+            fontSize: 18,
+          ),
+        ),
+      ),
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: _minSheetHeightPx(context),
+              child: GoogleMap(
+                initialCameraPosition: CameraPosition(
+                  target: _currentLatLng,
+                  zoom: 14.5,
+                ),
+                myLocationEnabled: false,
+                zoomControlsEnabled: false,
+                markers: _markers.isNotEmpty ? _markers : {_selectedMarker()},
+                polylines: _route,
+                onMapCreated: (c) {
+                  _mapController = c;
+                },
+              ),
+            ),
+            IgnorePointer(
+              ignoring: true,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                color: Colors.black.withValues(alpha: _backdropOpacity),
+              ),
+            ),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              height: panelHeight,
+              child: ClipRRect(
+                borderRadius: panelBorderRadius,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Color.lerp(
+                      Colors.grey[200],
+                      Colors.white,
+                      _panelBlend,
+                    ),
+                    borderRadius: panelBorderRadius,
+                    border: Border.all(color: Colors.grey[200]!),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x1F000000),
+                        blurRadius: 14,
+                        offset: Offset(0, -3),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.max,
+                    children: [
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onVerticalDragStart: _onHandleDragStart,
+                        onVerticalDragUpdate: _onHandleDragUpdate,
+                        onVerticalDragEnd: _onHandleDragEnd,
+                        child: SizedBox(
+                          height: 42,
+                          width: double.infinity,
+                          child: Center(
+                            child: Container(
+                              width: 38,
+                              height: 4,
+                              decoration: BoxDecoration(
+                                color: Colors.grey[400],
+                                borderRadius: BorderRadius.circular(24),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      _categoryTabs(show: _panelController.value > 0.05),
+                      const Divider(height: 1),
+                      Expanded(
+                        child: NotificationListener<ScrollNotification>(
+                          onNotification: (notification) {
+                            if (notification is ScrollUpdateNotification ||
+                                notification is ScrollEndNotification) {
+                              _handleScrollCategoryDetection();
+                            }
+                            return false;
+                          },
+                          child: ListView(
+                            key: _listKey,
+                            controller: _listController,
+                            padding: EdgeInsets.only(
+                              left: 12,
+                              right: 12,
+                              top: 8,
+                              bottom:
+                                  MediaQuery.of(context).padding.bottom + 160,
+                            ),
+                            children: [
+                              if (_loadingCaregivers)
+                                const Padding(
+                                  padding: EdgeInsets.all(24),
+                                  child: Center(
+                                    child: CircularProgressIndicator(),
+                                  ),
+                                )
+                              else if (_caregivers.isEmpty)
+                                Padding(
+                                  padding: EdgeInsets.all(24),
+                                  child: Center(
+                                    child: Text(
+                                      _errorMessage ??
+                                          'No caregivers available',
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                        color: Colors.black54,
+                                      ),
+                                    ),
+                                  ),
+                                )
+                              else
+                                ...CaregiverCategory.values.map(
+                                  _categorySection,
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 240),
+              curve: Curves.easeOut,
+              left: 8,
+              right: 8,
+              bottom: frontBottom,
+              child: _frontSheet(subtitle),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _frontSheet(String subtitle) {
+    final String name = widget.person.name;
+    final selectedAddress = widget.selectedAddress;
+    final labelFallback = widget.person.label?.trim() ?? '';
+    final addressLabel = selectedAddress.label?.trim().isNotEmpty == true
+        ? selectedAddress.label!.trim()
+        : labelFallback;
+    final trimmedAddressLine = selectedAddress.addressLine?.trim().isNotEmpty == true
+        ? selectedAddress.addressLine!.trim()
+        : (selectedAddress.subtitle.trim().isNotEmpty
+            ? selectedAddress.subtitle.trim()
+            : subtitle);
+    final frontSubtitle = addressLabel.isNotEmpty
+        ? '$addressLabel · $trimmedAddressLine'
+        : (trimmedAddressLine.isNotEmpty ? trimmedAddressLine : subtitle);
+    const Color primary = Color(0xFFF4B63D);
+    return Material(
+      color: Colors.white,
+      elevation: 12,
+      shadowColor: Colors.black.withValues(alpha: 0.2),
+      borderRadius: BorderRadius.circular(14),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                CircleAvatar(
+                  radius: 18,
+                  backgroundColor: const Color(0xFFE4F4FF),
+                  child: const Icon(
+                    Icons.person_pin_circle_rounded,
+                    size: 16,
+                    color: Color(0xFF00B8C6),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 13,
+                          color: Colors.black87,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        frontSubtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.black54,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                _calendarButton(),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: _selectedCaregiver != null ? _goToSummary : null,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: primary,
+                      foregroundColor: const Color.fromARGB(255, 20, 20, 20),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      textStyle: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 15,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                      elevation: 0,
+                    ),
+                    child: const Text('Book caregiver'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+void _goToSummary({
+    DateTime? scheduleDate,
+    TimeOfDay? startTime,
+    TimeOfDay? endTime,
+    bool showSchedule = false,
+  }) {
+    final caregiver = _selectedCaregiverModel;
+    if (caregiver == null) return;
+    final date = scheduleDate ?? DateTime.now();
+    final start = startTime ?? TimeOfDay.fromDateTime(DateTime.now());
+    final end = endTime ?? _endTimeFromStart(start);
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => BookingSummaryScreen(
+          person: widget.person,
+          caregiver: caregiver,
+          scheduleDate: date,
+          startTime: start,
+          endTime: end,
+          price: _caregiverPrice(caregiver),
+          selectedAddress: widget.selectedAddress,
+          showScheduleSection: showSchedule,
+        ),
+      ),
+    );
+  }
+
+  TimeOfDay _endTimeFromStart(TimeOfDay startTime) {
+    final totalMinutes = startTime.hour * 60 + startTime.minute + 120;
+    final normalized = totalMinutes % (24 * 60);
+    final hour = normalized ~/ 60;
+    final minute = normalized % 60;
+    return TimeOfDay(hour: hour, minute: minute);
+  }
+
+  double _caregiverPrice(CaregiverModel caregiver) {
+    final dynamic raw = caregiver.price;
+    if (raw is num) {
+      return raw.toDouble();
+    }
+    if (raw is String) {
+      final cleaned = raw
+          .replaceAll("RM", "")
+          .replaceAll("rm", "")
+          .replaceAll(" ", "")
+          .trim();
+
+      final parsed = double.tryParse(cleaned);
+      if (parsed != null) return parsed;
+    }
+    return 90.0;
+  }
+
+  Widget _categoryTabs({required bool show}) {
+    if (!show) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.04),
+              blurRadius: 6,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: CaregiverCategory.values.map((cat) {
+              final bool active = _activeCategory == cat;
+              return Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: ChoiceChip(
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  selected: active,
+                  onSelected: (_) => _scrollToCategory(cat),
+                  label: Text(
+                    _labelFor(cat),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 11,
+                      color: active ? Colors.black : Colors.black87,
+                    ),
+                  ),
+                  selectedColor: const Color(0xFFE7F7EE),
+                  backgroundColor: Colors.grey[200],
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
+                  side: BorderSide(
+                    color: active
+                        ? const Color(0xFF0FB56C)
+                        : Colors.transparent,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _categorySection(CaregiverCategory category) {
+    List<CaregiverOption> items;
+    if (category == CaregiverCategory.forYou) {
+      items =
+          _caregivers
+              .where((c) => c.category != CaregiverCategory.unavailable)
+              .toList()
+            ..sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
+    } else if (category == CaregiverCategory.recommendation) {
+      items = _caregivers
+          .where((c) => c.category == CaregiverCategory.recommendation)
+          .toList();
+    } else {
+      items = _caregivers
+          .where((c) => c.category == CaregiverCategory.unavailable)
+          .toList();
+    }
+    if (items.isEmpty && category != CaregiverCategory.unavailable) {
+      return const SizedBox.shrink();
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(key: _sectionKeys[category], height: 0),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(6, 8, 6, 6),
+          child: Text(
+            _labelFor(category),
+            style: const TextStyle(
+              fontWeight: FontWeight.w800,
+              fontSize: 12,
+              color: Colors.black87,
+            ),
+          ),
+        ),
+        if (items.isNotEmpty)
+          ...items.map(
+            (c) => _caregiverTile(
+              c,
+              tileCategory: category,
+              showRecommendationBadges:
+                  category == CaregiverCategory.recommendation,
+            ),
+          ),
+        const SizedBox(height: 3),
+      ],
+    );
+  }
+
+  Widget _caregiverTile(
+    CaregiverOption caregiver, {
+    bool showRecommendationBadges = true,
+    required CaregiverCategory tileCategory,
+  }) {
+    final bool isSelected =
+        _selectedCaregiver?.id == caregiver.id &&
+        _selectedCategory == tileCategory;
+    final bool isRecommendation =
+        showRecommendationBadges &&
+        caregiver.category == CaregiverCategory.recommendation;
+    final Color accent = isSelected
+        ? const Color(0xFF00B8C6)
+        : Colors.grey.withValues(alpha: 0.08);
+    final String initials = caregiver.name.trim().isNotEmpty
+        ? caregiver.name.trim()[0].toUpperCase()
+        : 'C';
+    final bool hasAvatar = caregiver.avatarUrl?.trim().isNotEmpty == true;
+    final servicesDisplay = _servicesForDisplay(
+      caregiver,
+      matchedOnly: isRecommendation,
+    );
+    final prefsLower = _clientServicePrefs
+        .map((e) => e.toLowerCase().trim())
+        .toSet();
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 5),
+      constraints: const BoxConstraints(minHeight: 70, maxHeight: 80),
+      decoration: BoxDecoration(
+        color: isSelected ? const Color(0xFFE3F2FF) : Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isSelected ? const Color(0xFF00B8C6) : Colors.grey[200]!,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 4,
+            offset: const Offset(0, 1),
+          ),
+        ],
+      ),
+      child: InkWell(
+        onTap: () =>
+            _updateRouteAndMap(caregiver, sourceCategory: tileCategory),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              CircleAvatar(
+                radius: 18,
+                backgroundColor: accent.withValues(alpha: 0.18),
+                backgroundImage: hasAvatar
+                    ? NetworkImage(caregiver.avatarUrl!.trim())
+                    : null,
+                child: hasAvatar
+                    ? null
+                    : Text(
+                        initials,
+                        style: const TextStyle(
+                          color: Colors.black54,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      caregiver.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Row(
+                      children: [
+                        const Icon(Icons.star, size: 12, color: Colors.orange),
+                        const SizedBox(width: 4),
+                        Text(
+                          caregiver.rating.toStringAsFixed(1),
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 10,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        const Icon(
+                          Icons.timer,
+                          size: 12,
+                          color: Colors.black54,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Est. ${(max(caregiver.distanceKm, 0.6) / 0.6).ceil()} mins',
+                          style: const TextStyle(
+                            color: Colors.black54,
+                            fontSize: 10,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        const Icon(
+                          Icons.place,
+                          size: 12,
+                          color: Colors.black45,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${caregiver.distanceKm.toStringAsFixed(1)} km',
+                          style: const TextStyle(
+                            color: Colors.black54,
+                            fontSize: 10,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    SizedBox(
+                      height: 24,
+                      child: ListView(
+                        scrollDirection: Axis.horizontal,
+                        children: _serviceChips(
+                          servicesDisplay,
+                          prefsLower: prefsLower,
+                          isRecommendation: isRecommendation,
+                          matchCount: caregiver.matchCount,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              SizedBox(
+                width: 64,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Container(
+                          height: 32,
+                          width: 1,
+                          color: Colors.grey.withValues(alpha: 0.25),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          caregiver.price,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (isRecommendation)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          _bestIn(caregiver),
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 9.5,
+                            color: Colors.black54,
+                            height: 1.1,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _updateRouteAndMap(
+    CaregiverOption? caregiver, {
+    CaregiverCategory? sourceCategory,
+  }) async {
+    if (caregiver == null) return;
+    final now = DateTime.now();
+    final bool sameCaregiver = _selectedCaregiver?.id == caregiver.id;
+    final bool tappedTooFast =
+        _lastTap != null && now.difference(_lastTap!).inMilliseconds < 220;
+    _lastTap = now;
+    setState(() {
+      _selectedCaregiver = caregiver;
+      final cat = sourceCategory ?? caregiver.category;
+      _activeCategory = cat;
+      _selectedCategory = cat;
+    });
+
+    if (sameCaregiver && _route.isNotEmpty) {
+      // only update scroll highlight
+      return;
+    }
+
+    if (caregiver.latLng == null || _routingInProgress) {
+      setState(() {
+        _markers = {_selectedMarker()};
+        _route = {};
+      });
+      return;
+    }
+
+    final LatLng caregiverLoc = caregiver.latLng!;
+    final Marker personMarker = Marker(
+      markerId: const MarkerId('person'),
+      position: _currentLatLng,
+      icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+    );
+    final Marker caregiverMarker = Marker(
+      markerId: const MarkerId('caregiver'),
+      position: caregiverLoc,
+      icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+    );
+    final String cacheKey =
+        '${_currentLatLng.latitude.toStringAsFixed(5)},${_currentLatLng.longitude.toStringAsFixed(5)}:${caregiverLoc.latitude.toStringAsFixed(5)},${caregiverLoc.longitude.toStringAsFixed(5)}';
+    final cached = _routeCache[cacheKey];
+
+    if (tappedTooFast && cached == null) {
+      // avoid hammering API if user spam taps; keep selection only
+      return;
+    }
+
+    _routingInProgress = true;
+    final List<LatLng> points =
+        cached ?? await _buildRoadRoutePoints(_currentLatLng, caregiverLoc);
+    _routingInProgress = false;
+    _routeCache[cacheKey] = points;
+
+    setState(() {
+      _markers = {personMarker, caregiverMarker};
+    });
+    _animateRoute(points);
+
+    _fitMapToPins(_currentLatLng, caregiverLoc);
+    if (_panelController.value > 0.01) {
+      _animatePanelTo(0);
+    }
+  }
+
+  void _fitMapToPins(LatLng a, LatLng b) {
+    if (_mapController == null) return;
+    if (a.latitude == b.latitude && a.longitude == b.longitude) {
+      _mapController!.animateCamera(CameraUpdate.newLatLngZoom(a, 16));
+      return;
+    }
+    final southWest = LatLng(
+      min(a.latitude, b.latitude),
+      min(a.longitude, b.longitude),
+    );
+    final northEast = LatLng(
+      max(a.latitude, b.latitude),
+      max(a.longitude, b.longitude),
+    );
+    final bounds = LatLngBounds(southwest: southWest, northeast: northEast);
+    _mapController!.animateCamera(CameraUpdate.newLatLngBounds(bounds, 70));
+  }
+
+  Future<List<LatLng>> _buildRoadRoutePoints(LatLng start, LatLng end) async {
+    if (_mapsApiKey.isNotEmpty) {
+      try {
+        final result = await PolylinePoints().getRouteBetweenCoordinates(
+          request: PolylineRequest(
+            origin: PointLatLng(start.latitude, start.longitude),
+            destination: PointLatLng(end.latitude, end.longitude),
+            mode: TravelMode.driving,
+          ),
+          googleApiKey: _mapsApiKey,
+        );
+        debugPrint(
+          'Directions status=${result.status}; error=${result.errorMessage}; points=${result.points.length}',
+        );
+        if (result.points.isNotEmpty) {
+          return result.points
+              .map((p) => LatLng(p.latitude, p.longitude))
+              .toList();
+        }
+      } catch (e, st) {
+        debugPrint('Directions request failed; using fallback polyline. $e');
+        debugPrint('$st');
+      }
+    }
+    return _buildCurvedRoutePoints(start, end);
+  }
+
+  List<LatLng> _buildCurvedRoutePoints(LatLng start, LatLng end) {
+    final double latOffset = (end.latitude - start.latitude);
+    final double lngOffset = (end.longitude - start.longitude);
+    // scale offset by distance so curve is visible even on long spans
+    final double base = (latOffset.abs() + lngOffset.abs() + 1);
+    final double curveScale = 0.02 * base;
+
+    // two control points along the path, bent perpendicularly to the line
+    final LatLng control1 = LatLng(
+      start.latitude + latOffset * 0.35 - lngOffset.sign * curveScale * 0.6,
+      start.longitude + lngOffset * 0.35 + latOffset.sign * curveScale * 0.6,
+    );
+    final LatLng control2 = LatLng(
+      start.latitude + latOffset * 0.7 - lngOffset.sign * curveScale * 0.4,
+      start.longitude + lngOffset * 0.7 + latOffset.sign * curveScale * 0.4,
+    );
+
+    return [start, control1, control2, end];
+  }
+
+  List<String> _stringListFromField(dynamic raw) {
+    if (raw is Iterable) {
+      return raw
+          .whereType<String>()
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
+    }
+    if (raw is String && raw.trim().isNotEmpty) {
+      return [raw.trim()];
+    }
+    return [];
+  }
+
+  List<Map<String, dynamic>> _extractAddressList(dynamic raw) {
+    if (raw is Map) {
+      final nested = raw.values
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      if (nested.isNotEmpty) return nested;
+      return [Map<String, dynamic>.from(raw)];
+    }
+    if (raw is Iterable) {
+      return raw
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    }
+    return [];
+  }
+
+  LatLng? _latLngFromMap(Map<String, dynamic>? map) {
+    final double? lat = _safeDouble(map?['latitude'] ?? map?['lat']);
+    final double? lng = _safeDouble(
+      map?['longitude'] ?? map?['long'] ?? map?['lng'],
+    );
+    if (lat != null && lng != null) return LatLng(lat, lng);
+    return null;
+  }
+
+  LatLng? _latLngFromDocument(Map<String, dynamic> data) {
+    final geo = data['location'];
+    if (geo is GeoPoint) {
+      return LatLng(geo.latitude, geo.longitude);
+    }
+    final double? lat = _safeDouble(data['lat'] ?? data['latitude']);
+    final double? lng = _safeDouble(
+      data['lng'] ?? data['longitude'] ?? data['long'],
+    );
+    if (lat != null && lng != null) return LatLng(lat, lng);
+    return null;
+  }
+
+  double? _safeDouble(dynamic value) {
+    if (value is num) return value.toDouble();
+    if (value is String && value.trim().isNotEmpty) {
+      return double.tryParse(value.trim());
+    }
+    return null;
+  }
+
+  String _buildAddressLine(Map<String, dynamic>? map) {
+    if (map == null) return '';
+    final candidates = [
+      map['addressLine'],
+      map['address'],
+      map['buildingName'],
+      map['deliveryAddress'],
+      map['street'],
+      map['city'],
+      map['state'],
+      map['postcode'] ?? map['postalCode'],
+    ];
+    final parts = candidates
+        .whereType<String>()
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+    return parts.join(', ');
+  }
+
+  List<Widget> _serviceChips(
+    List<String> services, {
+    required Set<String> prefsLower,
+    required bool isRecommendation,
+    required int matchCount,
+  }) {
+    final List<Widget> chips = [];
+    for (final s in services) {
+      final matched = prefsLower.contains(s.toLowerCase().trim());
+      chips.add(
+        Container(
+          margin: const EdgeInsets.only(right: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: (isRecommendation && matched)
+                ? const Color(0xFFE7F7EE)
+                : Colors.grey[100],
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Text(
+            s,
+            style: const TextStyle(
+              color: Colors.black87,
+              fontSize: 10,
+              height: 1.1,
+            ),
+          ),
+        ),
+      );
+    }
+    if (isRecommendation) {
+      chips.add(
+        Container(
+          margin: const EdgeInsets.only(right: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: const Color(0xFFE7F7EE),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Text(
+            'Matched $matchCount svc',
+            style: const TextStyle(
+              color: Color(0xFF0F9F5C),
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      );
+    }
+    return chips;
+  }
+
+  String _bestIn(CaregiverOption c) {
+    if (c.matchCount > 0) return 'Best in prefs';
+    if (c.rating >= 4.7) return 'Best rating';
+    if (c.distanceKm <= 1.2) return 'Best distance';
+    return 'Best price';
+  }
+
+  List<String> _servicesForDisplay(
+    CaregiverOption caregiver, {
+    required bool matchedOnly,
+  }) {
+    final prefs = _clientServicePrefs
+        .map((e) => e.toLowerCase().trim())
+        .toSet();
+    if (matchedOnly && prefs.isNotEmpty) {
+      final matched = caregiver.services
+          .where((s) => prefs.contains(s.toLowerCase().trim()))
+          .toList();
+      if (matched.isNotEmpty) return matched.take(4).toList();
+    }
+    return caregiver.services.take(matchedOnly ? 3 : 4).toList();
+  }
+
+  String _labelFor(CaregiverCategory cat) {
+    switch (cat) {
+      case CaregiverCategory.forYou:
+        return 'For you';
+      case CaregiverCategory.recommendation:
+        return 'Recommendation';
+      case CaregiverCategory.unavailable:
+        return 'Unavailable';
+    }
+  }
+
+  Marker _selectedMarker() {
+    return Marker(
+      markerId: const MarkerId('selected'),
+      position: _currentLatLng,
+      icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+    );
+  }
+}

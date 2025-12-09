@@ -1,0 +1,213 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+@layer base {
+  :root {
+    /* Medical Care Theme Colors (HSL) */
+    --background: 0 0% 98%;
+    --foreground: 220 13% 18%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 13% 18%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 13% 18%;
+
+    /* Primary Blue - Medical Highlight */
+    --primary: 207 79% 51%;
+    --primary-foreground: 0 0% 100%;
+    --primary-light: 207 79% 95%;
+
+    /* Secondary - Soft Grey */
+    --secondary: 0 0% 88%;
+    --secondary-foreground: 220 13% 18%;
+
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
+
+    --accent: 207 79% 95%;
+    --accent-foreground: 207 79% 40%;
+
+    /* Success Green */
+    --success: 158 100% 33%;
+    --success-foreground: 0 0% 100%;
+    --success-light: 158 60% 92%;
+
+    /* Emergency Red */
+    --emergency: 0 65% 51%;
+    --emergency-foreground: 0 0% 100%;
+    --emergency-light: 0 65% 95%;
+
+    /* Warning Orange */
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+
+    --destructive: 0 65% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 0 0% 88%;
+    --input: 0 0% 88%;
+    --ring: 207 79% 51%;
+
+    --radius: 1.125rem;
+    --radius-lg: 1.5rem;
+    --radius-sm: 0.75rem;
+
+    /* Sidebar for Admin */
+    --sidebar-background: 220 13% 18%;
+    --sidebar-foreground: 0 0% 98%;
+    --sidebar-primary: 207 79% 51%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 13% 25%;
+    --sidebar-accent-foreground: 0 0% 98%;
+    --sidebar-border: 220 13% 25%;
+    --sidebar-ring: 207 79% 51%;
+
+    /* Shadows */
+    --shadow-sm: 0 1px 2px 0 hsl(220 13% 18% / 0.05);
+    --shadow-md: 0 4px 6px -1px hsl(220 13% 18% / 0.1), 0 2px 4px -2px hsl(220 13% 18% / 0.1);
+    --shadow-lg: 0 10px 15px -3px hsl(220 13% 18% / 0.1), 0 4px 6px -4px hsl(220 13% 18% / 0.1);
+    --shadow-xl: 0 20px 25px -5px hsl(220 13% 18% / 0.1), 0 8px 10px -6px hsl(220 13% 18% / 0.1);
+
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(207 79% 51%), hsl(207 79% 40%));
+    --gradient-success: linear-gradient(135deg, hsl(158 100% 33%), hsl(158 100% 28%));
+    --gradient-emergency: linear-gradient(135deg, hsl(0 65% 51%), hsl(0 65% 45%));
+  }
+
+  .dark {
+    --background: 220 13% 10%;
+    --foreground: 0 0% 98%;
+    --card: 220 13% 14%;
+    --card-foreground: 0 0% 98%;
+    --popover: 220 13% 14%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 207 79% 55%;
+    --primary-foreground: 0 0% 100%;
+    --primary-light: 207 79% 20%;
+    --secondary: 220 13% 20%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 220 13% 18%;
+    --muted-foreground: 220 9% 60%;
+    --accent: 207 79% 20%;
+    --accent-foreground: 207 79% 70%;
+    --success: 158 80% 40%;
+    --success-foreground: 0 0% 100%;
+    --success-light: 158 40% 15%;
+    --emergency: 0 70% 55%;
+    --emergency-foreground: 0 0% 100%;
+    --emergency-light: 0 50% 15%;
+    --border: 220 13% 25%;
+    --input: 220 13% 25%;
+    --ring: 207 79% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;
+  }
+
+  /* Elderly-friendly base font size */
+  html {
+    font-size: 16px;
+  }
+}
+
+@layer utilities {
+  /* Custom medical shadows */
+  .shadow-card {
+    box-shadow: var(--shadow-md);
+  }
+  
+  .shadow-card-hover {
+    box-shadow: var(--shadow-lg);
+  }
+
+  .shadow-bottom-nav {
+    box-shadow: 0 -4px 20px -4px hsl(220 13% 18% / 0.1);
+  }
+
+  /* Pulse animation for SOS */
+  .pulse-emergency {
+    animation: pulse-emergency 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  @keyframes pulse-emergency {
+    0%, 100% {
+      transform: scale(1);
+      box-shadow: 0 0 0 0 hsl(0 65% 51% / 0.4);
+    }
+    50% {
+      transform: scale(1.05);
+      box-shadow: 0 0 0 20px hsl(0 65% 51% / 0);
+    }
+  }
+
+  /* Fade in animation */
+  .animate-fade-in {
+    animation: fade-in 0.3s ease-out;
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Slide up animation for bottom sheets */
+  .animate-slide-up {
+    animation: slide-up 0.3s ease-out;
+  }
+
+  @keyframes slide-up {
+    from {
+      transform: translateY(100%);
+    }
+    to {
+      transform: translateY(0);
+    }
+  }
+
+  /* Scale in animation */
+  .animate-scale-in {
+    animation: scale-in 0.2s ease-out;
+  }
+
+  @keyframes scale-in {
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  /* Gradient backgrounds */
+  .bg-gradient-primary {
+    background: var(--gradient-primary);
+  }
+
+  .bg-gradient-success {
+    background: var(--gradient-success);
+  }
+
+  .bg-gradient-emergency {
+    background: var(--gradient-emergency);
+  }
+}
