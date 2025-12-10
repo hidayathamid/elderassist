@@ -14,9 +14,11 @@ import '../../../models/caregiver_model.dart';
 import 'booking_person_screen.dart';
 import 'booking_summary_screen.dart';
 
-enum CaregiverCategory { forYou, recommendation }
+enum CaregiverCategory { forYou, recommendation, nearby }
 
 const Color _bookingAppBarText = Color(0xFF1B1D29);
+const Color _caregiverMatchAccent = Color(0xFF00A8A7);
+const Color _caregiverMatchBackground = Color(0xFFE4F4FF);
 
 class CaregiverOption {
   CaregiverOption({
@@ -112,6 +114,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   CaregiverCategory _activeCategory = CaregiverCategory.forYou;
 
   List<CaregiverOption> _caregivers = [];
+  List<CaregiverOption> _recommendations = [];
+  List<CaregiverOption> _nearbyCaregivers = [];
   bool _loadingCaregivers = true;
   CaregiverOption? _selectedCaregiver;
   Set<Polyline> _route = {};
@@ -131,6 +135,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   final Map<CaregiverCategory, GlobalKey> _sectionKeys = {
     CaregiverCategory.forYou: GlobalKey(),
     CaregiverCategory.recommendation: GlobalKey(),
+    CaregiverCategory.nearby: GlobalKey(),
   };
   // Keys removed from tiles to avoid duplicate GlobalKey issues.
 
@@ -222,6 +227,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     if (list.isEmpty) {
       setState(() {
         _caregivers = [];
+        _recommendations = [];
+        _nearbyCaregivers = [];
         _loadingCaregivers = false;
         _selectedCaregiver = null;
         _markers = {_selectedMarker()};
@@ -232,12 +239,26 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     }
 
     final ranked = _applyCategories(list);
-    final selected = ranked.firstWhere(
-      (c) => c.category == CaregiverCategory.forYou,
-      orElse: () => ranked.first,
-    );
+    if (ranked.isEmpty) {
+      setState(() {
+        _caregivers = [];
+        _recommendations = [];
+        _nearbyCaregivers = [];
+        _loadingCaregivers = false;
+        _selectedCaregiver = null;
+        _markers = {_selectedMarker()};
+        _route = {};
+        _errorMessage = 'Tiada caregiver ditemui';
+      });
+      return;
+    }
+    final recommendations = _buildRecommendationList(ranked);
+    final nearby = _buildNearbyList(ranked);
+    final selected = ranked.first;
     setState(() {
       _caregivers = ranked;
+      _recommendations = recommendations;
+      _nearbyCaregivers = nearby;
       _loadingCaregivers = false;
       _selectedCaregiver = selected;
       _selectedCategory = CaregiverCategory.forYou;
@@ -249,6 +270,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   void _handleCaregiverError(Object error) {
     setState(() {
       _caregivers = [];
+      _recommendations = [];
+      _nearbyCaregivers = [];
       _loadingCaregivers = false;
       _selectedCaregiver = null;
       _markers = {_selectedMarker()};
@@ -313,24 +336,32 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   }
 
   List<CaregiverOption> _applyCategories(List<CaregiverOption> source) {
-    final available = source.where((c) => c.available).toList()
-      ..sort((a, b) {
-        // priority: matchCount desc, rating desc, price asc, distance asc
-        final matchCmp = b.matchCount.compareTo(a.matchCount);
-        if (matchCmp != 0) return matchCmp;
-        final ratingCmp = b.rating.compareTo(a.rating);
-        if (ratingCmp != 0) return ratingCmp;
-        final priceCmp = a.priceValue.compareTo(b.priceValue);
-        if (priceCmp != 0) return priceCmp;
-        return a.distanceKm.compareTo(b.distanceKm);
-      });
-    final topForRecommendation = available.take(3).map((c) {
-      return c.copyWith(category: CaregiverCategory.recommendation);
-    }).toList();
-    final remaining = available.skip(3).map((c) {
-      return c.copyWith(category: CaregiverCategory.forYou);
-    }).toList();
-    return [...remaining, ...topForRecommendation];
+    final available = source.where((c) => c.available).toList();
+    available.sort((a, b) {
+      // priority: matchCount desc, rating desc, price asc, distance asc
+      final matchCmp = b.matchCount.compareTo(a.matchCount);
+      if (matchCmp != 0) return matchCmp;
+      final ratingCmp = b.rating.compareTo(a.rating);
+      if (ratingCmp != 0) return ratingCmp;
+      final priceCmp = a.priceValue.compareTo(b.priceValue);
+      if (priceCmp != 0) return priceCmp;
+      return a.distanceKm.compareTo(b.distanceKm);
+    });
+    return available;
+  }
+
+  List<CaregiverOption> _buildRecommendationList(
+    List<CaregiverOption> available,
+  ) {
+    final matched = available.where((c) => c.matchCount > 0).toList();
+    final fallback = available.take(3).toList();
+    return (matched.isNotEmpty ? matched : fallback).take(3).toList();
+  }
+
+  List<CaregiverOption> _buildNearbyList(List<CaregiverOption> available) {
+    final nearby = List<CaregiverOption>.from(available)
+      ..sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
+    return nearby;
   }
 
   int _matchCount(List<String> services) {
@@ -440,7 +471,14 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         current = cat;
       }
     }
-    if (current != _activeCategory) setState(() => _activeCategory = current);
+    if (current != _activeCategory) {
+      final first = _firstInCategory(current);
+      setState(() {
+        _activeCategory = current;
+        _selectedCategory = current;
+        _selectedCaregiver = first;
+      });
+    }
   }
 
   void _scrollToCategory(CaregiverCategory category) {
@@ -471,17 +509,13 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
 
   CaregiverOption? _firstInCategory(CaregiverCategory category) {
     if (category == CaregiverCategory.forYou) {
-      final list = _caregivers
-          .where((c) => c.category == CaregiverCategory.forYou)
-          .toList()
-        ..sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
-      return list.isNotEmpty ? list.first : null;
+      return _caregivers.isNotEmpty ? _caregivers.first : null;
     }
     if (category == CaregiverCategory.recommendation) {
-      final list = _caregivers
-          .where((c) => c.category == CaregiverCategory.recommendation)
-          .toList();
-      return list.isNotEmpty ? list.first : null;
+      return _recommendations.isNotEmpty ? _recommendations.first : null;
+    }
+    if (category == CaregiverCategory.nearby) {
+      return _nearbyCaregivers.isNotEmpty ? _nearbyCaregivers.first : null;
     }
     return null;
   }
@@ -560,7 +594,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     _route = {
       Polyline(
         polylineId: const PolylineId('route'),
-        color: const Color(0xFF0FB56C),
+        color: _caregiverMatchAccent,
         width: 7,
         startCap: Cap.roundCap,
         endCap: Cap.roundCap,
@@ -582,7 +616,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         _route = {
           Polyline(
             polylineId: const PolylineId('route'),
-            color: const Color(0xFF0FB56C),
+            color: _caregiverMatchAccent,
             width: 7,
             startCap: Cap.roundCap,
             endCap: Cap.roundCap,
@@ -689,9 +723,14 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
 
   @override
   Widget build(BuildContext context) {
-    final String subtitle = widget.person.address.isNotEmpty
-        ? widget.person.address
-        : 'Care location';
+    final selectedAddress = widget.selectedAddress;
+    final String subtitle = selectedAddress.addressLine?.trim().isNotEmpty == true
+        ? selectedAddress.addressLine!.trim()
+        : (selectedAddress.subtitle.trim().isNotEmpty
+            ? selectedAddress.subtitle.trim()
+            : (widget.person.address.isNotEmpty
+                ? widget.person.address
+                : 'Care location'));
     final double panelHeight = _currentSheetHeight(context);
     final double bottomInset = MediaQuery.of(context).padding.bottom;
     final double frontBottom = _hideFrontPanel
@@ -1042,7 +1081,7 @@ void _goToSummary({
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: _caregiverMatchBackground,
           borderRadius: BorderRadius.circular(14),
           boxShadow: [
             BoxShadow(
@@ -1071,16 +1110,15 @@ void _goToSummary({
                       color: active ? Colors.black : Colors.black87,
                     ),
                   ),
-                  selectedColor: const Color(0xFFE7F7EE),
-                  backgroundColor: Colors.grey[200],
+                  selectedColor: _caregiverMatchBackground,
+                  backgroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 6,
                     vertical: 2,
                   ),
                   side: BorderSide(
-                    color: active
-                        ? const Color(0xFF0FB56C)
-                        : Colors.transparent,
+                    color: active ? _caregiverMatchAccent : Colors.transparent,
+                    width: active ? 1.2 : 0,
                   ),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(14),
@@ -1097,14 +1135,11 @@ void _goToSummary({
   Widget _categorySection(CaregiverCategory category) {
     List<CaregiverOption> items;
     if (category == CaregiverCategory.forYou) {
-      items = _caregivers
-          .where((c) => c.category == CaregiverCategory.forYou)
-          .toList()
-        ..sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
+      items = _caregivers;
     } else if (category == CaregiverCategory.recommendation) {
-      items = _caregivers
-          .where((c) => c.category == CaregiverCategory.recommendation)
-          .toList();
+      items = _recommendations;
+    } else if (category == CaregiverCategory.nearby) {
+      items = _nearbyCaregivers;
     } else {
       items = [];
     }
@@ -1149,8 +1184,7 @@ void _goToSummary({
         _selectedCaregiver?.id == caregiver.id &&
         _selectedCategory == tileCategory;
     final bool isRecommendation =
-        showRecommendationBadges &&
-        caregiver.category == CaregiverCategory.recommendation;
+        showRecommendationBadges && tileCategory == CaregiverCategory.recommendation;
     final Color accent = isSelected
         ? const Color(0xFF00B8C6)
         : Colors.grey.withValues(alpha: 0.08);
@@ -1338,7 +1372,7 @@ void _goToSummary({
     _lastTap = now;
     setState(() {
       _selectedCaregiver = caregiver;
-      final cat = sourceCategory ?? caregiver.category;
+      final cat = sourceCategory ?? CaregiverCategory.forYou;
       _activeCategory = cat;
       _selectedCategory = cat;
     });
@@ -1556,7 +1590,7 @@ void _goToSummary({
           alignment: Alignment.center,
           decoration: BoxDecoration(
             color: (isRecommendation && matched)
-                ? const Color(0xFFE7F7EE)
+                ? _caregiverMatchBackground
                 : Colors.grey[100],
             borderRadius: BorderRadius.circular(10),
           ),
@@ -1577,13 +1611,13 @@ void _goToSummary({
           margin: const EdgeInsets.only(right: 6),
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           decoration: BoxDecoration(
-            color: const Color(0xFFE7F7EE),
+            color: _caregiverMatchBackground,
             borderRadius: BorderRadius.circular(14),
           ),
           child: Text(
             'Matched $matchCount svc',
             style: const TextStyle(
-              color: Color(0xFF0F9F5C),
+              color: _caregiverMatchAccent,
               fontSize: 10,
               fontWeight: FontWeight.w700,
             ),
@@ -1623,6 +1657,8 @@ void _goToSummary({
         return 'For you';
       case CaregiverCategory.recommendation:
         return 'Recommendation';
+      case CaregiverCategory.nearby:
+        return 'Nearby';
     }
   }
 

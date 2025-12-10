@@ -10,6 +10,8 @@ import '../../../models/caregiver_model.dart';
 
 const Color _tealAccent = Color(0xFF00A8A7);
 const Color _actionGold = Color(0xFFF4B63D);
+const TextStyle _dialogTitleStyle = TextStyle(fontWeight: FontWeight.w700);
+const TextStyle _dialogContentStyle = TextStyle(color: Colors.black87);
 
 const Color _bookingAppBarText = Color(0xFF1B1D29);
 const TextStyle _sectionLabelTextStyle = TextStyle(
@@ -191,12 +193,12 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         title: const Text(
           'Success',
           textAlign: TextAlign.center,
-          style: TextStyle(fontWeight: FontWeight.w700),
+          style: _dialogTitleStyle,
         ),
         content: const Text(
           'Booking stored successfully.',
           textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.black87),
+          style: _dialogContentStyle,
         ),
         actionsAlignment: MainAxisAlignment.center,
         actionsPadding: const EdgeInsets.only(bottom: 12),

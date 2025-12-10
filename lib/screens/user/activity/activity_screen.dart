@@ -21,6 +21,8 @@ const Color activityCancelButtonColor = Color(0xFFF4B63D);
 const double activitySegmentRadius = 26.0;
 const double _pillButtonHeight = 34.0;
 const Color _avatarFallbackBackground = Color(0xFFB5D4D4);
+const TextStyle _activityDialogTitleStyle = TextStyle(fontWeight: FontWeight.w700);
+const TextStyle _activityDialogContentStyle = TextStyle(color: Colors.black87);
 
 final Color _activityCardBorderColor = Colors.black12.withValues(alpha: 0.05);
 final BoxShadow _activityCardShadow = BoxShadow(
@@ -346,12 +348,12 @@ class _ActivityScreenState extends State<ActivityScreen>
         title: const Text(
           'Remove from history',
           textAlign: TextAlign.center,
-          style: TextStyle(fontWeight: FontWeight.w700),
+          style: _activityDialogTitleStyle,
         ),
         content: const Text(
           'This only hides the booking from your history list.',
           textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.black87),
+          style: _activityDialogContentStyle,
         ),
         actionsAlignment: MainAxisAlignment.center,
         actionsPadding: const EdgeInsets.only(bottom: 12),
@@ -365,6 +367,7 @@ class _ActivityScreenState extends State<ActivityScreen>
                   borderRadius: BorderRadius.circular(14),
                 ),
                 side: BorderSide(color: Colors.grey.shade300),
+                padding: const EdgeInsets.symmetric(vertical: 12),
               ),
               child: const Text(
                 'Cancel',
@@ -380,9 +383,11 @@ class _ActivityScreenState extends State<ActivityScreen>
               style: ElevatedButton.styleFrom(
                 backgroundColor: activityButtonYellow,
                 foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(vertical: 12),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
                 ),
+                textStyle: const TextStyle(fontWeight: FontWeight.w700),
               ),
               child: const Text(
                 'Remove',

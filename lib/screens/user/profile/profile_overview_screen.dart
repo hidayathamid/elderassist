@@ -17,6 +17,8 @@ const Color _accentGold = Color(0xFFF4B63D);
 const Color _tealAccent = Color(0xFF00A8A7);
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _serviceChipBorder = Color(0xFFCCCCCC);
+const TextStyle _profileDialogTitleStyle = TextStyle(fontWeight: FontWeight.w700);
+const TextStyle _profileDialogContentStyle = TextStyle(color: Colors.black87);
 
 class ProfileOverviewScreen extends StatelessWidget {
   const ProfileOverviewScreen({super.key});
@@ -522,8 +524,10 @@ class ProfileOverviewScreen extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 24),
             child: SizedBox(
               width: double.infinity,
-              child: ElevatedButton(
+                child: ElevatedButton(
                 onPressed: () async {
+                  final shouldLogout = await _confirmLogout(context);
+                  if (!shouldLogout) return;
                   await AuthService().signOut();
                   if (!context.mounted) return;
                   Navigator.pushAndRemoveUntil(
@@ -554,6 +558,66 @@ class ProfileOverviewScreen extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  Future<bool> _confirmLogout(BuildContext context) async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: const Text(
+          'Log out?',
+          textAlign: TextAlign.center,
+          style: _profileDialogTitleStyle,
+        ),
+        content: const Text(
+          'Are you sure you want to log out?',
+          textAlign: TextAlign.center,
+          style: _profileDialogContentStyle,
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actionsPadding: const EdgeInsets.only(bottom: 12),
+        actions: [
+          SizedBox(
+            width: 120,
+            child: OutlinedButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              style: OutlinedButton.styleFrom(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                side: BorderSide(color: Colors.grey.shade300),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+              child: const Text(
+                'Cancel',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 120,
+            child: ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _accentGold,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                textStyle: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              child: const Text('Log out'),
+            ),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
   }
 }
 

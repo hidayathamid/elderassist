@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/gestures.dart' show DragStartBehavior;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -125,7 +126,7 @@ class PersonProfile {
 }
 
 class _BookingPersonScreenState extends State<BookingPersonScreen>
-    with SingleTickerProviderStateMixin {
+    implements TickerProvider {
   static const Color _primaryColor = Color(0xFFF4B63D);
   static const Color _accentBlue = Color(0xFF00B8C6);
   static const Color _disabledColor = Color(0xFFE5E5E5);
@@ -166,8 +167,16 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   );
   late final AnimationController _panelController;
   double _lastDragDelta = 0;
+  final List<Ticker> _tickers = [];
   String? _currentLocationName;
   String? _userFullName;
+
+  @override
+  Ticker createTicker(TickerCallback onTick) {
+    final ticker = Ticker(onTick);
+    _tickers.add(ticker);
+    return ticker;
+  }
 
   void _handleAddressScroll() {
     if (_isProgrammaticScroll) return;
@@ -204,16 +213,14 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       duration: const Duration(milliseconds: 520),
       reverseDuration: const Duration(milliseconds: 420),
     );
-    _noteSheetOffset = Tween<Offset>(
-      begin: const Offset(0, 1),
-      end: Offset.zero,
-    ).animate(
-      CurvedAnimation(
-        parent: _noteSheetController,
-        curve: Curves.easeOutCubic,
-        reverseCurve: Curves.easeInCubic,
-      ),
-    );
+    _noteSheetOffset =
+        Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero).animate(
+          CurvedAnimation(
+            parent: _noteSheetController,
+            curve: Curves.easeOutCubic,
+            reverseCurve: Curves.easeInCubic,
+          ),
+        );
     _panelController = AnimationController(
       vsync: this,
       lowerBound: 0,
@@ -308,6 +315,9 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
 
   @override
   void dispose() {
+    for (final ticker in _tickers) {
+      ticker.dispose();
+    }
     _panelController.dispose();
     _addressScrollController
       ..removeListener(_handleAddressScroll)
@@ -692,8 +702,10 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     if (!_noteSheetVisible) return;
     final delta = details.primaryDelta ?? 0;
     final progress = delta / 200;
-    _noteSheetController.value =
-        (_noteSheetController.value - progress).clamp(0.0, 1.0);
+    _noteSheetController.value = (_noteSheetController.value - progress).clamp(
+      0.0,
+      1.0,
+    );
   }
 
   void _onNotePanelDragEnd(DragEndDetails details) {
@@ -720,8 +732,10 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         child: AnimatedBuilder(
           animation: _noteSheetController,
           builder: (context, child) {
-            final overlayOpacity =
-                (_noteSheetController.value * 0.35).clamp(0.0, 0.35);
+            final overlayOpacity = (_noteSheetController.value * 0.35).clamp(
+              0.0,
+              0.35,
+            );
             return Stack(
               children: [
                 GestureDetector(
@@ -839,10 +853,8 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                 child: ElevatedButton(
                   onPressed: canSave ? _confirmNoteSheet : null,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor:
-                        canSave ? _primaryColor : _disabledColor,
-                    foregroundColor:
-                        canSave ? Colors.black : Colors.white70,
+                    backgroundColor: canSave ? _primaryColor : _disabledColor,
+                    foregroundColor: canSave ? Colors.black : Colors.white70,
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(16),
