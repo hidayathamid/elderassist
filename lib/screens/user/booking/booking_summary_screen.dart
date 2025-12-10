@@ -99,6 +99,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     );
   }
 
+  bool get _canConfirmBooking => !_isLoading && _selectedPaymentMethod != null;
+
   Future<void> _confirmBooking() async {
     if (_isLoading) return;
     final user = FirebaseAuth.instance.currentUser;
@@ -111,7 +113,10 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
 
     if (_selectedPaymentMethod == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select a payment method')),
+        const SnackBar(
+          content: Text('Please select a payment method'),
+          behavior: SnackBarBehavior.floating,
+        ),
       );
       return;
     }
@@ -127,7 +132,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       final bookingRef = firestore.collection('bookings').doc();
       final startTimeValue = _timeOptions[_selectedTimeIndex];
       final personAddress =
-          (widget.selectedAddress.addressLine ?? widget.selectedAddress.subtitle)
+          (widget.selectedAddress.addressLine ??
+                  widget.selectedAddress.subtitle)
               .trim();
       final bookingData = {
         'bookingId': bookingRef.id,
@@ -152,10 +158,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       await bookingRef.set(bookingData);
 
       if (!mounted) return;
-      await _showBookingResultDialog(
-        success: true,
-        message: 'Booking stored successfully.',
-      );
+      await _showBookingSuccessDialog();
       if (!mounted) return;
       Navigator.of(context).pushAndRemoveUntil(
         MaterialPageRoute(builder: (_) => const UserRootScreen(initialIndex: 3)),
@@ -163,9 +166,12 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       );
     } catch (e) {
       if (!mounted) return;
-      await _showBookingResultDialog(
-        success: false,
-        message: 'Booking unsuccessful. Please try again.',
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Booking unsuccessful. Please try again.'),
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+        ),
       );
     } finally {
       if (mounted) {
@@ -174,10 +180,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     }
   }
 
-  Future<void> _showBookingResultDialog({
-    required bool success,
-    required String message,
-  }) async {
+  Future<void> _showBookingSuccessDialog() async {
     if (!mounted) return;
     await showDialog<void>(
       context: context,
@@ -185,25 +188,15 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       builder: (_) => AlertDialog(
         backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              success ? Icons.check_circle : Icons.error_outline,
-              color: success ? _actionGold : Colors.redAccent,
-              size: 24,
-            ),
-            const SizedBox(width: 6),
-            Text(
-              success ? 'Success' : 'Unsuccessful',
-              style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-            ),
-          ],
-        ),
-        content: Text(
-          message,
+        title: const Text(
+          'Success',
           textAlign: TextAlign.center,
-          style: const TextStyle(color: Colors.black87),
+          style: TextStyle(fontWeight: FontWeight.w700),
+        ),
+        content: const Text(
+          'Booking stored successfully.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.black87),
         ),
         actionsAlignment: MainAxisAlignment.center,
         actionsPadding: const EdgeInsets.only(bottom: 12),
@@ -213,17 +206,15 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
             child: ElevatedButton(
               onPressed: () => Navigator.of(context).pop(),
               style: ElevatedButton.styleFrom(
-                backgroundColor: success ? _actionGold : Colors.grey.shade200,
-                foregroundColor: success ? Colors.black : Colors.black87,
+                backgroundColor: _actionGold,
+                foregroundColor: Colors.black,
                 padding: const EdgeInsets.symmetric(vertical: 12),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
                 ),
+                textStyle: const TextStyle(fontWeight: FontWeight.w700),
               ),
-              child: Text(
-                success ? 'OK' : 'Try Again',
-                style: const TextStyle(fontWeight: FontWeight.w700),
-              ),
+              child: const Text('OK'),
             ),
           ),
         ],
@@ -257,9 +248,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Scaffold(
-      backgroundColor: Colors.grey[100],
+      backgroundColor: Colors.white,
       appBar: AppBar(
         backgroundColor: Colors.white,
         elevation: 0,
@@ -349,6 +339,11 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                 const SizedBox(height: 12),
                 const Text('Payment Method', style: _sectionLabelTextStyle),
                 const SizedBox(height: 6),
+                const Text(
+                  'Select ToyyibPay or PayPal to continue.',
+                  style: TextStyle(fontSize: 10, color: Colors.black54),
+                ),
+                const SizedBox(height: 6),
                 _buildAddPaymentCard(),
                 if (_showPaymentMethods) ...[
                   const SizedBox(height: 8),
@@ -362,7 +357,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       bottomSheet: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: theme.cardColor,
+          color: Colors.white,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
           boxShadow: [
             BoxShadow(
@@ -374,8 +369,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         ),
         child: SafeArea(
           top: false,
-          child: ElevatedButton(
-            onPressed: _isLoading ? null : _confirmBooking,
+            child: ElevatedButton(
+              onPressed: _canConfirmBooking ? _confirmBooking : null,
             style: ElevatedButton.styleFrom(
               backgroundColor: _actionGold,
               foregroundColor: Colors.black,

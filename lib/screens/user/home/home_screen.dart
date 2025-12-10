@@ -199,7 +199,7 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
     final theme = Theme.of(context);
     final chipColor = theme.colorScheme.primaryContainer;
     return Scaffold(
-      backgroundColor: theme.colorScheme.surface,
+      backgroundColor: Colors.white,
       body: SafeArea(
         child: SingleChildScrollView(
           physics: const BouncingScrollPhysics(),
@@ -304,7 +304,7 @@ class _HomeHeader extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
+        color: Colors.white,
         border: Border(
           bottom: BorderSide(color: theme.dividerColor),
         ),

@@ -7,10 +7,7 @@ import 'profile/profile_overview_screen.dart';
 import 'sos/sos_activate_screen.dart';
 
 class UserRootScreen extends StatefulWidget {
-  const UserRootScreen({
-    Key? key,
-    this.initialIndex = 0,
-  }) : super(key: key);
+  const UserRootScreen({super.key, this.initialIndex = 0});
 
   final int initialIndex;
 

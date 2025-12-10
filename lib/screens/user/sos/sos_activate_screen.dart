@@ -18,6 +18,7 @@ class SosActivateScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(
+      backgroundColor: Colors.white,
       appBar: AppBar(
         backgroundColor: Colors.white,
         elevation: 0,
@@ -43,63 +44,67 @@ class SosActivateScreen extends StatelessWidget {
           ),
         ),
       ),
-      body: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 24.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Text(
-              'Trigger an emergency SOS alert so nearby caregivers can respond quickly.',
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 32),
-            SizedBox(
-              width: 200,
-              height: 200,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: RadialGradient(
-                    colors: [
-                      theme.colorScheme.error,
-                      theme.colorScheme.primary,
+      body: Container(
+        color: Colors.white,
+        width: double.infinity,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Text(
+                'Trigger an emergency SOS alert so nearby caregivers can respond quickly.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 32),
+              SizedBox(
+                width: 200,
+                height: 200,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(
+                      colors: [
+                        theme.colorScheme.error,
+                        theme.colorScheme.primary,
+                      ],
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: theme.colorScheme.error.withValues(alpha: 153),
+                        blurRadius: 20,
+                        spreadRadius: 8,
+                      ),
                     ],
                   ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: theme.colorScheme.error.withOpacity(0.6),
-                      blurRadius: 20,
-                      spreadRadius: 8,
-                    ),
-                  ],
-                ),
-                child: Center(
-                  child: Text(
-                    'SOS',
-                    style: theme.textTheme.headlineLarge?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
+                  child: Center(
+                    child: Text(
+                      'SOS',
+                      style: theme.textTheme.headlineLarge?.copyWith(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-            const SizedBox(height: 24),
-            Text(
-              'Stay calm and provide your location details once responders are on the way.',
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodySmall,
-            ),
-            const SizedBox(height: 32),
-            ElevatedButton(
-              onPressed: () => _startCountdown(context),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: theme.colorScheme.error,
-                minimumSize: const Size.fromHeight(56),
+              const SizedBox(height: 24),
+              Text(
+                'Stay calm and provide your location details once responders are on the way.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall,
               ),
-              child: const Text('Activate SOS'),
-            ),
-          ],
+              const SizedBox(height: 32),
+              ElevatedButton(
+                onPressed: () => _startCountdown(context),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: theme.colorScheme.error,
+                  minimumSize: const Size.fromHeight(56),
+                ),
+                child: const Text('Activate SOS'),
+              ),
+            ],
+          ),
         ),
       ),
     );

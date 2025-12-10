@@ -14,7 +14,7 @@ import '../../../models/caregiver_model.dart';
 import 'booking_person_screen.dart';
 import 'booking_summary_screen.dart';
 
-enum CaregiverCategory { forYou, recommendation, unavailable }
+enum CaregiverCategory { forYou, recommendation }
 
 const Color _bookingAppBarText = Color(0xFF1B1D29);
 
@@ -131,7 +131,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   final Map<CaregiverCategory, GlobalKey> _sectionKeys = {
     CaregiverCategory.forYou: GlobalKey(),
     CaregiverCategory.recommendation: GlobalKey(),
-    CaregiverCategory.unavailable: GlobalKey(),
   };
   // Keys removed from tiles to avoid duplicate GlobalKey issues.
 
@@ -302,9 +301,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       services: services.isNotEmpty ? services : ['Service'],
       price: price,
       priceValue: priceValue,
-      category: available
-          ? CaregiverCategory.forYou
-          : CaregiverCategory.unavailable,
+      category: CaregiverCategory.forYou,
       available: available,
       addressLine: addressLine,
       matchCount: matchCount,
@@ -333,10 +330,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     final remaining = available.skip(3).map((c) {
       return c.copyWith(category: CaregiverCategory.forYou);
     }).toList();
-    final unavailable = source
-        .where((c) => !c.available)
-        .map((c) => c.copyWith(category: CaregiverCategory.unavailable));
-    return [...topForRecommendation, ...remaining, ...unavailable];
+    return [...remaining, ...topForRecommendation];
   }
 
   int _matchCount(List<String> services) {
@@ -477,11 +471,10 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
 
   CaregiverOption? _firstInCategory(CaregiverCategory category) {
     if (category == CaregiverCategory.forYou) {
-      final list =
-          _caregivers
-              .where((c) => c.category != CaregiverCategory.unavailable)
-              .toList()
-            ..sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
+      final list = _caregivers
+          .where((c) => c.category == CaregiverCategory.forYou)
+          .toList()
+        ..sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
       return list.isNotEmpty ? list.first : null;
     }
     if (category == CaregiverCategory.recommendation) {
@@ -490,10 +483,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
           .toList();
       return list.isNotEmpty ? list.first : null;
     }
-    final list = _caregivers
-        .where((c) => c.category == CaregiverCategory.unavailable)
-        .toList();
-    return list.isNotEmpty ? list.first : null;
+    return null;
   }
 
   Widget _calendarButton() {
@@ -1107,21 +1097,18 @@ void _goToSummary({
   Widget _categorySection(CaregiverCategory category) {
     List<CaregiverOption> items;
     if (category == CaregiverCategory.forYou) {
-      items =
-          _caregivers
-              .where((c) => c.category != CaregiverCategory.unavailable)
-              .toList()
-            ..sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
+      items = _caregivers
+          .where((c) => c.category == CaregiverCategory.forYou)
+          .toList()
+        ..sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
     } else if (category == CaregiverCategory.recommendation) {
       items = _caregivers
           .where((c) => c.category == CaregiverCategory.recommendation)
           .toList();
     } else {
-      items = _caregivers
-          .where((c) => c.category == CaregiverCategory.unavailable)
-          .toList();
+      items = [];
     }
-    if (items.isEmpty && category != CaregiverCategory.unavailable) {
+    if (items.isEmpty) {
       return const SizedBox.shrink();
     }
     return Column(
@@ -1636,8 +1623,6 @@ void _goToSummary({
         return 'For you';
       case CaregiverCategory.recommendation:
         return 'Recommendation';
-      case CaregiverCategory.unavailable:
-        return 'Unavailable';
     }
   }
 

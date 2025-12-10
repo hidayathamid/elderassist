@@ -1,7 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
-import 'activity_booking_card.dart';
+import 'package:emergencies_disability_assistance_app/models/activity_booking.dart';
 
 class ActivityEditBookingScreen extends StatefulWidget {
   const ActivityEditBookingScreen({super.key, required this.booking});

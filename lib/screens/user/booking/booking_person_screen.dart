@@ -139,6 +139,10 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   List<Map<String, dynamic>> _collectionAddressData = [];
   List<Map<String, dynamic>> _docAddressData = [];
   String? _note;
+  final TextEditingController _noteFieldController = TextEditingController();
+  late final AnimationController _noteSheetController;
+  late final Animation<Offset> _noteSheetOffset;
+  bool _noteSheetVisible = false;
   LatLng _currentLatLng = const LatLng(3.1390, 101.6869);
   bool _hideFrontPanel = false;
   double _backdropOpacity = 0.0;
@@ -195,6 +199,21 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   @override
   void initState() {
     super.initState();
+    _noteSheetController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 520),
+      reverseDuration: const Duration(milliseconds: 420),
+    );
+    _noteSheetOffset = Tween<Offset>(
+      begin: const Offset(0, 1),
+      end: Offset.zero,
+    ).animate(
+      CurvedAnimation(
+        parent: _noteSheetController,
+        curve: Curves.easeOutCubic,
+        reverseCurve: Curves.easeInCubic,
+      ),
+    );
     _panelController = AnimationController(
       vsync: this,
       lowerBound: 0,
@@ -296,6 +315,8 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     _mapController?.dispose();
     _addressCollectionSub?.cancel();
     _userDocSub?.cancel();
+    _noteSheetController.dispose();
+    _noteFieldController.dispose();
     super.dispose();
   }
 
@@ -385,10 +406,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     return result;
   }
 
-  String? _resolveUserName(
-    String? displayName,
-    Map<String, dynamic>? data,
-  ) {
+  String? _resolveUserName(String? displayName, Map<String, dynamic>? data) {
     final docName = data?['name'] as String?;
     if (docName?.trim().isNotEmpty == true) return docName!.trim();
     if (displayName?.trim().isNotEmpty == true) return displayName!.trim();
@@ -657,111 +675,190 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   }
 
   void _openNoteSheet() {
-    final TextEditingController controller = TextEditingController(text: _note);
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setSheetState) {
-            final int charCount = controller.text.length;
-            final String trimmed = controller.text.trim();
-            final bool canSave = trimmed.isNotEmpty;
-            return Container(
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-              ),
-              padding: EdgeInsets.only(
-                bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-                left: 16,
-                right: 16,
-                top: 16,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Note to driver',
-                    style: TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 18,
-                      color: Colors.black87,
+    if (_noteSheetVisible) return;
+    _noteFieldController.text = _note ?? '';
+    setState(() => _noteSheetVisible = true);
+    _noteSheetController.forward(from: 0);
+  }
+
+  Future<void> _hideNoteSheet() async {
+    if (!_noteSheetVisible) return;
+    await _noteSheetController.reverse();
+    if (!mounted) return;
+    setState(() => _noteSheetVisible = false);
+  }
+
+  void _onNotePanelDragUpdate(DragUpdateDetails details) {
+    if (!_noteSheetVisible) return;
+    final delta = details.primaryDelta ?? 0;
+    final progress = delta / 200;
+    _noteSheetController.value =
+        (_noteSheetController.value - progress).clamp(0.0, 1.0);
+  }
+
+  void _onNotePanelDragEnd(DragEndDetails details) {
+    if (!_noteSheetVisible) return;
+    if (_noteSheetController.value < 0.35) {
+      _hideNoteSheet();
+    } else {
+      _noteSheetController.forward();
+    }
+  }
+
+  Future<void> _confirmNoteSheet() async {
+    final trimmed = _noteFieldController.text.trim();
+    if (trimmed.isEmpty) return;
+    setState(() => _note = trimmed);
+    await _hideNoteSheet();
+  }
+
+  Widget _buildNotePanelOverlay() {
+    if (!_noteSheetVisible) return const SizedBox.shrink();
+    return Positioned.fill(
+      child: IgnorePointer(
+        ignoring: !_noteSheetVisible,
+        child: AnimatedBuilder(
+          animation: _noteSheetController,
+          builder: (context, child) {
+            final overlayOpacity =
+                (_noteSheetController.value * 0.35).clamp(0.0, 0.35);
+            return Stack(
+              children: [
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _hideNoteSheet,
+                  child: Container(
+                    color: Color.fromRGBO(
+                      0,
+                      0,
+                      0,
+                      (0.15 * overlayOpacity).clamp(0.0, 1.0).toDouble(),
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: controller,
-                    maxLength: 150,
-                    autofocus: true,
-                    onChanged: (_) => setSheetState(() {}),
-                    decoration: InputDecoration(
-                      hintText: 'Add pickup details (e.g. near the gate)',
-                      filled: true,
-                      fillColor: Colors.white,
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        borderSide: const BorderSide(color: Colors.black26),
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        borderSide: const BorderSide(
-                          color: Colors.black87,
-                          width: 1.2,
-                        ),
-                      ),
-                      counterText: '',
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 12,
-                      ),
-                    ),
-                    style: const TextStyle(fontSize: 14),
+                ),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: SlideTransition(
+                    position: _noteSheetOffset,
+                    child: _buildNotePanelContent(),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    '$charCount/150 characters',
-                    style: const TextStyle(color: Colors.black54, fontSize: 12),
-                  ),
-                  const SizedBox(height: 14),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: canSave
-                          ? () {
-                              setState(() => _note = trimmed);
-                              Navigator.of(context).pop();
-                            }
-                          : null,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: canSave
-                            ? _primaryColor
-                            : _disabledColor,
-                        foregroundColor: canSave
-                            ? Colors.black
-                            : Colors.white70,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                        textStyle: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 15,
-                        ),
-                      ),
-                      child: const Text('Save note'),
-                    ),
-                  ),
-                ],
-              ),
+                ),
+              ],
             );
           },
-        );
-      },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNotePanelContent() {
+    final charCount = _noteFieldController.text.length;
+    final canSave = _noteFieldController.text.trim().isNotEmpty;
+    return Material(
+      color: Colors.white,
+      elevation: 18,
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              GestureDetector(
+                onVerticalDragUpdate: _onNotePanelDragUpdate,
+                onVerticalDragEnd: _onNotePanelDragEnd,
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  width: 44,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.black26,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const Text(
+                'Note to driver',
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 16,
+                  color: Colors.black87,
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _noteFieldController,
+                maxLength: 150,
+                maxLines: 3,
+                autofocus: false,
+                decoration: InputDecoration(
+                  hintText: 'Add pickup details (e.g. near the gate)',
+                  filled: true,
+                  fillColor: Colors.white,
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: const BorderSide(color: Colors.black26),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: const BorderSide(
+                      color: Colors.black87,
+                      width: 1.2,
+                    ),
+                  ),
+                  counterText: '',
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                ),
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+                onChanged: (_) => setState(() {}),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '$charCount/150 characters',
+                textAlign: TextAlign.right,
+                style: const TextStyle(
+                  color: Colors.black54,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: canSave ? _confirmNoteSheet : null,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor:
+                        canSave ? _primaryColor : _disabledColor,
+                    foregroundColor:
+                        canSave ? Colors.black : Colors.white70,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    textStyle: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 15,
+                    ),
+                  ),
+                  child: const Text('Save note'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -779,8 +876,9 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
 
   PersonProfile _personFromAddress(AddressItem item) {
     final bool isSelf = _isSelfAddress(item);
-    final baseName =
-        item.forWho?.isNotEmpty == true ? item.forWho! : item.title;
+    final baseName = item.forWho?.isNotEmpty == true
+        ? item.forWho!
+        : item.title;
     final name = isSelf && _userFullName?.isNotEmpty == true
         ? _userFullName!
         : baseName;
@@ -803,7 +901,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   }
 
   bool _isSelfAddress(AddressItem item) {
-    final normalized = (String? value) => value?.trim().toLowerCase();
+    normalized(String? value) => value?.trim().toLowerCase();
     final label = normalized(item.label);
     final forWho = normalized(item.forWho);
     final title = normalized(item.title);
@@ -832,6 +930,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       appBar: AppBar(
         backgroundColor: Colors.white,
         elevation: 0,
+        automaticallyImplyLeading: false,
         centerTitle: true,
         flexibleSpace: Container(
           decoration: BoxDecoration(
@@ -948,15 +1047,14 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                               physics: isEmpty
                                   ? const ClampingScrollPhysics()
                                   : const _ItemSnapScrollPhysics(
-                                          itemExtent: _itemExtent,
-                                        ),
+                                      itemExtent: _itemExtent,
+                                    ),
                               padding: EdgeInsets.only(
                                 left: 12,
                                 right: 12,
                                 top: 0,
                                 bottom:
-                                    MediaQuery.of(context).padding.bottom +
-                                    120,
+                                    MediaQuery.of(context).padding.bottom + 120,
                               ),
                               itemExtent: isEmpty ? null : _itemExtent,
                               itemCount: isEmpty ? 1 : visibleList.length,
@@ -980,8 +1078,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                                   isActive: isActive,
                                   showEdit: !isCurrent,
                                   isCurrent: isCurrent,
-                                  onTap: () =>
-                                      _onAddressSelected(item, index),
+                                  onTap: () => _onAddressSelected(item, index),
                                   onEdit: () => _openEditAddress(
                                     _hasLocation ? index - 1 : index,
                                   ),
@@ -1078,6 +1175,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                 ),
               ),
             ),
+            if (_noteSheetVisible) _buildNotePanelOverlay(),
           ],
         ),
       ),
