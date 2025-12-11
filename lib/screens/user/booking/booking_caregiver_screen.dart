@@ -19,6 +19,7 @@ enum CaregiverCategory { forYou, recommendation, nearby }
 const Color _bookingAppBarText = Color(0xFF1B1D29);
 const Color _caregiverMatchAccent = Color(0xFF00A8A7);
 const Color _caregiverMatchBackground = Color(0xFFE4F4FF);
+const Color _serviceTagBlue = Color(0xFF00A8A7);
 
 class CaregiverOption {
   CaregiverOption({
@@ -776,8 +777,14 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         ),
       ),
       body: SafeArea(
-        child: Stack(
-          children: [
+        child: Container(
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.grey.withOpacity(0.25)),
+            borderRadius: BorderRadius.circular(18),
+          ),
+          clipBehavior: Clip.hardEdge,
+          child: Stack(
+            children: [
             Positioned(
               top: 0,
               left: 0,
@@ -813,11 +820,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                 borderRadius: panelBorderRadius,
                 child: Container(
                   decoration: BoxDecoration(
-                    color: Color.lerp(
-                      Colors.grey[200],
-                      Colors.white,
-                      _panelBlend,
-                    ),
+                    color: Colors.white,
                     borderRadius: panelBorderRadius,
                     border: Border.all(color: Colors.grey[200]!),
                     boxShadow: const [
@@ -913,9 +916,19 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
               left: 8,
               right: 8,
               bottom: frontBottom,
-              child: _frontSheet(subtitle),
+              child: Container(
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: Colors.grey.withOpacity(0.32),
+                    width: 1,
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: _frontSheet(subtitle),
+              ),
             ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -941,7 +954,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       color: Colors.white,
       elevation: 12,
       shadowColor: Colors.black.withValues(alpha: 0.2),
-      borderRadius: BorderRadius.circular(14),
+      borderRadius: BorderRadius.circular(16),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
         child: Column(
@@ -1591,13 +1604,13 @@ void _goToSummary({
           decoration: BoxDecoration(
             color: (isRecommendation && matched)
                 ? _caregiverMatchBackground
-                : Colors.grey[100],
+                : _serviceTagBlue.withOpacity(0.18),
             borderRadius: BorderRadius.circular(10),
           ),
           child: Text(
             s,
-            style: const TextStyle(
-              color: Colors.black87,
+            style: TextStyle(
+              color: _serviceTagBlue,
               fontSize: 10,
               height: 1.1,
             ),

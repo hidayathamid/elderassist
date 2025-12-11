@@ -24,7 +24,7 @@ const Color _avatarFallbackBackground = Color(0xFFB5D4D4);
 const TextStyle _activityDialogTitleStyle = TextStyle(fontWeight: FontWeight.w700);
 const TextStyle _activityDialogContentStyle = TextStyle(color: Colors.black87);
 
-final Color _activityCardBorderColor = Colors.black12.withValues(alpha: 0.05);
+final Color _activityCardBorderColor = Colors.grey.shade300;
 final BoxShadow _activityCardShadow = BoxShadow(
   color: Colors.black.withValues(alpha: 0.08),
   blurRadius: 16,

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -17,7 +19,9 @@ const Color _accentGold = Color(0xFFF4B63D);
 const Color _tealAccent = Color(0xFF00A8A7);
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _serviceChipBorder = Color(0xFFCCCCCC);
-const TextStyle _profileDialogTitleStyle = TextStyle(fontWeight: FontWeight.w700);
+const TextStyle _profileDialogTitleStyle = TextStyle(
+  fontWeight: FontWeight.w700,
+);
 const TextStyle _profileDialogContentStyle = TextStyle(color: Colors.black87);
 
 class ProfileOverviewScreen extends StatelessWidget {
@@ -151,7 +155,8 @@ class ProfileOverviewScreen extends StatelessWidget {
             builder: (context, bookingSnap) {
               final bookingDocs = bookingSnap.data?.docs ?? const [];
               final upcomingDocs = bookingDocs.where((doc) {
-                final rawStatus = (doc.data()['status'] as String?) ?? 'PENDING';
+                final rawStatus =
+                    (doc.data()['status'] as String?) ?? 'PENDING';
                 final status = _profileBookingStatusFromString(rawStatus);
                 return _isUpcomingBookingStatus(status);
               }).toList();
@@ -159,11 +164,11 @@ class ProfileOverviewScreen extends StatelessWidget {
               final families = <String>{};
               for (final doc in upcomingDocs) {
                 final data = doc.data();
-                final caregiverId =
-                    ((data['caregiverId'] as String?) ?? '').trim();
+                final caregiverId = ((data['caregiverId'] as String?) ?? '')
+                    .trim();
                 if (caregiverId.isNotEmpty) caregivers.add(caregiverId);
-                final personName =
-                    ((data['personName'] as String?) ?? '').trim();
+                final personName = ((data['personName'] as String?) ?? '')
+                    .trim();
                 if (personName.isNotEmpty) families.add(personName);
               }
               return _buildOverviewContent(
@@ -180,6 +185,16 @@ class ProfileOverviewScreen extends StatelessWidget {
           );
         },
       ),
+    );
+  }
+
+  Widget _buildSectionHeader(String title, String hint, TextStyle style) {
+    return Row(
+      children: [
+        Text(title, style: style),
+        const SizedBox(width: 6),
+        _ProfileSectionInfoIcon(message: hint),
+      ],
     );
   }
 
@@ -207,9 +222,7 @@ class ProfileOverviewScreen extends StatelessWidget {
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(18),
-                border: Border.all(
-                  color: Colors.black12.withValues(alpha: 0.05),
-                ),
+                border: Border.all(color: Colors.grey.shade300),
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withValues(alpha: 0.08),
@@ -230,8 +243,9 @@ class ProfileOverviewScreen extends StatelessWidget {
                       212,
                       212,
                     ).withValues(alpha: 0.1),
-                    backgroundImage:
-                        (user.photoUrl?.isNotEmpty == true) ? NetworkImage(user.photoUrl!) : null,
+                    backgroundImage: (user.photoUrl?.isNotEmpty == true)
+                        ? NetworkImage(user.photoUrl!)
+                        : null,
                     child: (user.photoUrl?.isNotEmpty != true)
                         ? Text(
                             user.name.isNotEmpty
@@ -263,9 +277,7 @@ class ProfileOverviewScreen extends StatelessWidget {
                           user.email,
                           style: TextStyle(
                             fontSize: 12,
-                            color: _profileDarkText.withValues(
-                              alpha: 0.7,
-                            ),
+                            color: _profileDarkText.withValues(alpha: 0.7),
                           ),
                         ),
                         if (user.phone.isNotEmpty) ...[
@@ -274,9 +286,7 @@ class ProfileOverviewScreen extends StatelessWidget {
                             user.phone,
                             style: TextStyle(
                               fontSize: 12,
-                              color: _profileDarkText.withValues(
-                                alpha: 0.6,
-                              ),
+                              color: _profileDarkText.withValues(alpha: 0.6),
                             ),
                           ),
                         ],
@@ -288,11 +298,12 @@ class ProfileOverviewScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 2),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 0, 16, 6),
-            child: Text(
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+            child: _buildSectionHeader(
               "Your Activity",
-              style: TextStyle(
+              "See an overview of upcoming bookings, caregivers, and family stats.",
+              const TextStyle(
                 color: _profileDarkText,
                 fontWeight: FontWeight.w700,
                 fontSize: 15,
@@ -305,9 +316,7 @@ class ProfileOverviewScreen extends StatelessWidget {
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(18),
-                border: Border.all(
-                  color: Colors.black12.withValues(alpha: 0.05),
-                ),
+                border: Border.all(color: Colors.grey.shade300),
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withValues(alpha: 0.08),
@@ -316,10 +325,7 @@ class ProfileOverviewScreen extends StatelessWidget {
                   ),
                 ],
               ),
-              padding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 6,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -346,11 +352,12 @@ class ProfileOverviewScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 0, 16, 6),
-            child: Text(
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+            child: _buildSectionHeader(
               "Service Preferences",
-              style: TextStyle(
+              "These guide the caregivers we recommend for you.",
+              const TextStyle(
                 fontSize: 14.5,
                 fontWeight: FontWeight.w600,
                 color: _profileDarkText,
@@ -381,9 +388,7 @@ class ProfileOverviewScreen extends StatelessWidget {
                         child: Text(
                           "No services selected",
                           style: TextStyle(
-                            color: _profileDarkText.withValues(
-                              alpha: 0.6,
-                            ),
+                            color: _profileDarkText.withValues(alpha: 0.6),
                             fontSize: 12,
                           ),
                         ),
@@ -392,17 +397,14 @@ class ProfileOverviewScreen extends StatelessWidget {
                         child: SingleChildScrollView(
                           scrollDirection: Axis.horizontal,
                           physics: const BouncingScrollPhysics(),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 6,
-                          ),
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: List.generate(
                               servicePreferences.length * 2 - 1,
                               (index) {
                                 if (index.isEven) {
-                                  final option =
-                                      servicePreferences[index ~/ 2];
+                                  final option = servicePreferences[index ~/ 2];
                                   return _OverviewServiceChip(
                                     label: option,
                                     selected: true,
@@ -418,11 +420,12 @@ class ProfileOverviewScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 12),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 0, 16, 10),
-            child: Text(
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+            child: _buildSectionHeader(
               "Account & Preferences",
-              style: TextStyle(
+              "Quick links to manage your profile, addresses, and emergency contacts.",
+              const TextStyle(
                 fontSize: 14.5,
                 fontWeight: FontWeight.w600,
                 color: _profileDarkText,
@@ -524,7 +527,7 @@ class ProfileOverviewScreen extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 24),
             child: SizedBox(
               width: double.infinity,
-                child: ElevatedButton(
+              child: ElevatedButton(
                 onPressed: () async {
                   final shouldLogout = await _confirmLogout(context);
                   if (!shouldLogout) return;
@@ -532,9 +535,7 @@ class ProfileOverviewScreen extends StatelessWidget {
                   if (!context.mounted) return;
                   Navigator.pushAndRemoveUntil(
                     context,
-                    MaterialPageRoute(
-                      builder: (_) => const TouchdownScreen(),
-                    ),
+                    MaterialPageRoute(builder: (_) => const TouchdownScreen()),
                     (_) => false,
                   );
                 },
@@ -768,5 +769,70 @@ class _ZUSDivider extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(height: 1, color: const Color(0xFFEDEDED));
+  }
+}
+
+class _ProfileSectionInfoIcon extends StatefulWidget {
+  const _ProfileSectionInfoIcon({required this.message});
+
+  final String message;
+
+  @override
+  State<_ProfileSectionInfoIcon> createState() =>
+      _ProfileSectionInfoIconState();
+}
+
+class _ProfileSectionInfoIconState extends State<_ProfileSectionInfoIcon> {
+  bool _showHint = false;
+  Timer? _hintTimer;
+
+  void _triggerHint() {
+    _hintTimer?.cancel();
+    setState(() => _showHint = true);
+    _hintTimer = Timer(const Duration(seconds: 2), () {
+      if (!mounted) return;
+      setState(() => _showHint = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _hintTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        GestureDetector(
+          onTap: _triggerHint,
+          onLongPress: _triggerHint,
+          child: Icon(Icons.info_outline, size: 16, color: _tealAccent),
+        ),
+        if (_showHint)
+          Positioned(
+            right: -170,
+            bottom: 24,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.black87,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              constraints: const BoxConstraints(maxWidth: 200),
+              child: Text(
+                widget.message,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  height: 1.2,
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
   }
 }

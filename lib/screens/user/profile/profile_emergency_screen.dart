@@ -217,7 +217,7 @@ class _DashedAddCard extends StatelessWidget {
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: Colors.grey.withValues(alpha: 0.35),
+            color: Colors.grey.shade300,
             width: 1.1,
           ),
         ),
@@ -265,7 +265,7 @@ class _EmergencyContactCard extends StatelessWidget {
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
-          color: Colors.grey.withValues(alpha: 0.15),
+          color: Colors.grey.shade300,
           width: 1,
         ),
         boxShadow: [

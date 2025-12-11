@@ -357,44 +357,46 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         },
       ),
       bottomSheet: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: Colors.white,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.2),
-              blurRadius: 12,
-              offset: const Offset(0, -3),
-            ),
-          ],
+          border: Border.all(color: Colors.grey.withOpacity(0.25)),
         ),
-        child: SafeArea(
-          top: false,
-            child: ElevatedButton(
-              onPressed: _canConfirmBooking ? _confirmBooking : null,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _actionGold,
-              foregroundColor: Colors.black,
-              minimumSize: const Size.fromHeight(52),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(18),
-              ),
-              textStyle: const TextStyle(
-                fontWeight: FontWeight.w600,
-                fontSize: 16,
+        clipBehavior: Clip.hardEdge,
+        child: Material(
+          color: Colors.white,
+          elevation: 12,
+          shadowColor: Colors.black.withValues(alpha: 0.3),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          child: SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: ElevatedButton(
+                onPressed: _canConfirmBooking ? _confirmBooking : null,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _actionGold,
+                  foregroundColor: Colors.black,
+                  minimumSize: const Size.fromHeight(52),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  textStyle: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 16,
+                  ),
+                ),
+                child: _isLoading
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.black,
+                        ),
+                      )
+                    : const Text('Place Booking & Pay'),
               ),
             ),
-            child: _isLoading
-                ? const SizedBox(
-                    height: 20,
-                    width: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.black,
-                    ),
-                  )
-                : const Text('Place Booking & Pay'),
           ),
         ),
       ),
