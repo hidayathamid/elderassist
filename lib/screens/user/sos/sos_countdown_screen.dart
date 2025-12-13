@@ -1,11 +1,14 @@
 import 'dart:async';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'sos_root_screen.dart';
+import 'package:emergencies_disability_assistance_app/widgets/layout_constants.dart';
+import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.dart';
 
 class SosCountdownScreen extends StatefulWidget {
   const SosCountdownScreen({super.key});
@@ -51,41 +54,62 @@ class _SosCountdownScreenState extends State<SosCountdownScreen>
       if (!mounted) return;
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(
-          builder: (_) => SosRootScreen(sosId: sosId),
-        ),
+        MaterialPageRoute(builder: (_) => SosRootScreen(sosId: sosId)),
       );
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to trigger SOS: $error')),
-      );
+    } catch (error, stack) {
+      debugPrint("SOS ERROR TYPE: ${error.runtimeType}");
+      debugPrint("SOS ERROR: $error");
+      debugPrint("STACK TRACE: $stack");
+
+      if (error is FirebaseFunctionsException) {
+        debugPrint("SOS ERROR CODE: ${error.code}");
+        debugPrint("SOS ERROR MESSAGE: ${error.message}");
+        debugPrint("SOS ERROR DETAILS: ${error.details}");
+      }
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to trigger SOS: $error')));
+
       setState(() => _isProcessing = false);
     }
   }
 
-  Future<String> _createSOS({
-    required double lat,
-    required double lng,
-  }) async {
-    final user = FirebaseAuth.instance.currentUser;
+  void _handleBack() {
+    if (_isProcessing) return;
+    _timer?.cancel();
+    if (!mounted) return;
+    Navigator.of(context).pop();
+  }
+
+  Future<String> _createSOS({required double lat, required double lng}) async {
+    final app = Firebase.app(); // 🔥 force default app
+    final auth = FirebaseAuth.instanceFor(app: app);
+
+    final user = auth.currentUser;
+    debugPrint("🔥 AUTH USER UID: ${user?.uid}");
+
     if (user == null) {
       throw Exception("User not logged in");
     }
 
-    final docRef = FirebaseFirestore.instance.collection("sos").doc();
-    await docRef.set({
-      "sosId": docRef.id,
-      "userId": user.uid,
-      "userName": "",
-      "userPhone": "",
-      "userLat": lat,
-      "userLng": lng,
-      "status": "FINDING",
-      "requestedAt": FieldValue.serverTimestamp(),
-    });
+    final functions = FirebaseFunctions.instanceFor(
+      app: app, // 🔥 SAME APP
+      region: 'us-central1',
+    );
 
-    return docRef.id;
+    final callable = functions.httpsCallable('handleSOSAlert');
+
+    final result = await callable.call({'lat': lat, 'lng': lng});
+
+    final data = Map<String, dynamic>.from(result.data as Map);
+    final sosId = data['sosId'] as String?;
+
+    if (sosId == null || sosId.isEmpty) {
+      throw Exception('SOS creation response missing id');
+    }
+
+    return sosId;
   }
 
   Future<Position> _getCurrentPosition() async {
@@ -114,8 +138,13 @@ class _SosCountdownScreenState extends State<SosCountdownScreen>
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('Activating SOS')),
-      body: Center(
+      appBar: buildProfileStyleAppBar(
+        title: 'Activating SOS',
+        onBack: _handleBack,
+      ),
+      backgroundColor: Colors.white,
+      body: Padding(
+        padding: kHorizontalScreenPadding,
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -123,29 +152,26 @@ class _SosCountdownScreenState extends State<SosCountdownScreen>
               animation: _pulseController,
               builder: (context, child) {
                 final scale = 1 + _pulseController.value * 0.3;
-                return Transform.scale(
-                  scale: scale,
-                  child: child,
-                );
+                return Transform.scale(scale: scale, child: child);
               },
               child: Container(
-                width: 200,
-                height: 200,
+                width: 180,
+                height: 180,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: theme.colorScheme.error,
                   boxShadow: [
                     BoxShadow(
-                      color: theme.colorScheme.error.withOpacity(0.5),
-                      blurRadius: 20,
-                      spreadRadius: 6,
+                      color: theme.colorScheme.error.withValues(alpha: 0.5),
+                      blurRadius: 18,
+                      spreadRadius: 5,
                     ),
                   ],
                 ),
                 child: Center(
                   child: Text(
                     '$_secondsRemaining',
-                    style: theme.textTheme.headlineLarge?.copyWith(
+                    style: theme.textTheme.headlineMedium?.copyWith(
                       color: Colors.white,
                       fontWeight: FontWeight.bold,
                     ),
@@ -153,24 +179,27 @@ class _SosCountdownScreenState extends State<SosCountdownScreen>
                 ),
               ),
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 20),
             if (!_isProcessing) ...[
               Text(
                 'Cancel if this was accidental',
-                style: theme.textTheme.bodyMedium,
+                style: theme.textTheme.bodySmall,
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
               OutlinedButton(
                 onPressed: () {
                   _timer?.cancel();
                   Navigator.pop(context);
                 },
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(48),
+                ),
                 child: const Text('Cancel'),
               ),
             ] else ...[
               const SizedBox(height: 12),
               const CircularProgressIndicator(),
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
               const Text('Sending SOS alert...'),
             ],
           ],

@@ -2,6 +2,7 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
 import 'package:emergencies_disability_assistance_app/screens/user/user_root_screen.dart';
 import 'booking_person_screen.dart';
@@ -163,7 +164,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       await _showBookingSuccessDialog();
       if (!mounted) return;
       Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const UserRootScreen(initialIndex: 3)),
+        MaterialPageRoute(
+          builder: (_) => const UserRootScreen(initialIndex: 3),
+        ),
         (route) => false,
       );
     } catch (e) {
@@ -543,26 +546,10 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          CircleAvatar(
+          DefaultProfileAvatar(
             radius: 32,
-            backgroundColor: person.photoUrl.isNotEmpty
-                ? Colors.white
-                : const Color.fromARGB(
-                    255,
-                    181,
-                    212,
-                    212,
-                  ).withValues(alpha: 0.1),
-            backgroundImage: person.photoUrl.isNotEmpty
-                ? NetworkImage(person.photoUrl)
-                : null,
-            child: person.photoUrl.isEmpty
-                ? const Icon(
-                    Icons.person_pin_circle_rounded,
-                    size: 26,
-                    color: Color(0xFF00B8C6),
-                  )
-                : null,
+            photoUrl: person.photoUrl,
+            label: person.name,
           ),
           const SizedBox(width: 10),
           Expanded(

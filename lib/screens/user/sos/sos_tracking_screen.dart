@@ -2,6 +2,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:intl/intl.dart';
+import 'package:emergencies_disability_assistance_app/widgets/layout_constants.dart';
+import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.dart';
 
 class SosTrackingScreen extends StatefulWidget {
   const SosTrackingScreen({
@@ -63,10 +65,16 @@ class _SosTrackingScreenState extends State<SosTrackingScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('Emergency Assistance')),
+      appBar: buildProfileStyleAppBar(
+        title: 'Emergency Assistance',
+        onBack: () => Navigator.of(context).maybePop(),
+      ),
+      backgroundColor: Colors.white,
       body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-        stream:
-            FirebaseFirestore.instance.collection('sos').doc(widget.sosId).snapshots(),
+        stream: FirebaseFirestore.instance
+            .collection('sos')
+            .doc(widget.sosId)
+            .snapshots(),
         builder: (context, sosSnapshot) {
           if (sosSnapshot.hasError) {
             return Center(
@@ -89,9 +97,7 @@ class _SosTrackingScreenState extends State<SosTrackingScreen> {
           final statusLabel = _friendlyStatus(status);
 
           if (userPosition == null) {
-            return const Center(
-              child: Text('Waiting for your location...'),
-            );
+            return const Center(child: Text('Waiting for your location...'));
           }
 
           return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
@@ -104,20 +110,21 @@ class _SosTrackingScreenState extends State<SosTrackingScreen> {
             builder: (context, locationSnapshot) {
               if (locationSnapshot.hasError) {
                 return Center(
-                  child: Text('Unable to load caregiver location: ${locationSnapshot.error}'),
+                  child: Text(
+                    'Unable to load caregiver location: ${locationSnapshot.error}',
+                  ),
                 );
               }
 
               final locationData = locationSnapshot.data?.data();
-              final caregiverLat =
-                  (locationData?['lat'] as num?)?.toDouble();
-              final caregiverLng =
-                  (locationData?['lng'] as num?)?.toDouble();
+              final caregiverLat = (locationData?['lat'] as num?)?.toDouble();
+              final caregiverLng = (locationData?['lng'] as num?)?.toDouble();
               final caregiverPosition =
                   (caregiverLat != null && caregiverLng != null)
-                      ? LatLng(caregiverLat, caregiverLng)
-                      : null;
-              final updatedAt = (locationData?['updatedAt'] as Timestamp?)?.toDate();
+                  ? LatLng(caregiverLat, caregiverLng)
+                  : null;
+              final updatedAt = (locationData?['updatedAt'] as Timestamp?)
+                  ?.toDate();
               final lastUpdated = updatedAt != null
                   ? _formatTimestamp(updatedAt)
                   : 'Updating...';
@@ -160,34 +167,33 @@ class _SosTrackingScreenState extends State<SosTrackingScreen> {
                     onMapCreated: (controller) => _mapController = controller,
                   ),
                   Positioned(
-                    bottom: 30,
-                    left: 16,
-                    right: 16,
+                    bottom: 20,
+                    left: kScreenHorizontalPaddingValue,
+                    right: kScreenHorizontalPaddingValue,
                     child: Card(
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(16),
                       ),
                       child: Padding(
-                        padding: const EdgeInsets.all(16),
+                        padding: const EdgeInsets.all(14),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text(
+                            Text(
                               'Emergency Status',
-                              style: TextStyle(
-                                fontSize: 18,
+                              style: theme.textTheme.titleMedium?.copyWith(
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
-                            const SizedBox(height: 8),
+                            const SizedBox(height: 6),
                             Text(
                               statusLabel,
-                              style: theme.textTheme.titleMedium,
+                              style: theme.textTheme.bodyMedium,
                             ),
-                            const SizedBox(height: 8),
+                            const SizedBox(height: 6),
                             Text(
                               'Last update: $lastUpdated',
-                              style: theme.textTheme.bodyMedium,
+                              style: theme.textTheme.bodySmall,
                             ),
                           ],
                         ),

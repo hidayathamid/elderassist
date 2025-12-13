@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'sos_finding_screen.dart';
 import 'sos_resolved_screen.dart';
 import 'sos_tracking_screen.dart';
+import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.dart';
 
 class SosRootScreen extends StatelessWidget {
   const SosRootScreen({super.key, required this.sosId});
@@ -24,23 +25,24 @@ class SosRootScreen extends StatelessWidget {
     'RESPONDER_FOUND',
   };
 
-  static const _resolvedStatuses = {
-    'RESOLVED',
-    'NO_RESPONDER',
-  };
+  static const _resolvedStatuses = {'RESOLVED', 'NO_RESPONDER'};
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('SOS Status')),
+      appBar: buildProfileStyleAppBar(
+        title: 'SOS Status',
+        onBack: () => Navigator.of(context).maybePop(),
+      ),
+      backgroundColor: Colors.white,
       body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-        stream:
-            FirebaseFirestore.instance.collection('sos').doc(sosId).snapshots(),
+        stream: FirebaseFirestore.instance
+            .collection('sos')
+            .doc(sosId)
+            .snapshots(),
         builder: (context, snapshot) {
           if (snapshot.hasError) {
-            return Center(
-              child: Text('Unable to load SOS: ${snapshot.error}'),
-            );
+            return Center(child: Text('Unable to load SOS: ${snapshot.error}'));
           }
 
           if (!snapshot.hasData) {
@@ -53,8 +55,10 @@ class SosRootScreen extends StatelessWidget {
           }
 
           final data = doc.data()!;
-          final status = (data['status'] as String?)?.toUpperCase() ?? 'FINDING';
-          final responderId = (data['responderId'] as String?) ??
+          final status =
+              (data['status'] as String?)?.toUpperCase() ?? 'FINDING';
+          final responderId =
+              (data['responderId'] as String?) ??
               (data['assignedCaregiverId'] as String?) ??
               (data['caregiverId'] as String?);
 
@@ -63,10 +67,7 @@ class SosRootScreen extends StatelessWidget {
           }
 
           if (_trackingStatuses.contains(status) && responderId != null) {
-            return SosTrackingScreen(
-              sosId: sosId,
-              caregiverId: responderId,
-            );
+            return SosTrackingScreen(sosId: sosId, caregiverId: responderId);
           }
 
           if (_resolvedStatuses.contains(status)) {
@@ -74,10 +75,7 @@ class SosRootScreen extends StatelessWidget {
           }
 
           if (responderId != null) {
-            return SosTrackingScreen(
-              sosId: sosId,
-              caregiverId: responderId,
-            );
+            return SosTrackingScreen(sosId: sosId, caregiverId: responderId);
           }
 
           return SosFindingScreen(sosId: sosId);

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -14,6 +15,7 @@ import 'package:emergencies_disability_assistance_app/screens/user/profile/profi
 import 'package:emergencies_disability_assistance_app/services/booking_service.dart';
 import 'package:emergencies_disability_assistance_app/services/caregiver_service.dart';
 import 'package:emergencies_disability_assistance_app/services/location_service.dart';
+import 'package:emergencies_disability_assistance_app/widgets/service_tag_chip.dart';
 
 class UserHomeScreen extends StatefulWidget {
   const UserHomeScreen({super.key});
@@ -24,12 +26,14 @@ class UserHomeScreen extends StatefulWidget {
 
 const Color _homeHeadingTextColor = Color(0xFF1B1D29);
 const Color _serviceTagBlue = Color(0xFF00A8A7);
-const double _sheetInitialExtent = 0.84;
+const double _sheetInitialExtent = 0.83;
 const double _nearbyRadiusMeters = 30000;
 const double _sheetSectionSpacing = 18.0;
 const double _headerTopPadding = 16.0;
 const double _headerHeight = 96.0;
-const double _sheetStartOffset = _headerTopPadding + _headerHeight - 12.0;
+const double _sheetHeaderGap = 12.0;
+const double _sheetHeaderInset =
+    _headerTopPadding + _headerHeight + _sheetHeaderGap;
 const TextStyle _sectionTitleStyle = TextStyle(
   fontWeight: FontWeight.w600,
   fontSize: 14,
@@ -39,6 +43,8 @@ const double _appBarTriggerExtent = 0.96;
 
 int _alphaFromOpacity(double opacity) =>
     (opacity * 255).clamp(0.0, 255.0).round();
+
+enum _CaregiverSectionType { previous, nearby, recommended }
 
 class _UserHomeScreenState extends State<UserHomeScreen> {
   final _caregiverService = CaregiverService();
@@ -52,6 +58,7 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
   Position? _currentPosition;
   final double _sheetMaxExtent = 1.0;
   double _sheetMinExtent = _sheetInitialExtent;
+  double _sheetTopInset = _sheetHeaderInset;
   bool _sheetMeasurementScheduled = false;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
   _userDocSubscription;
@@ -60,6 +67,9 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
   String? _headerPhotoUrl;
   bool _hasFinishedBooking = false;
   double _currentSheetExtent = _sheetInitialExtent;
+  final _collapsedSections = <_CaregiverSectionType>{};
+  String _currentGreeting = '';
+  Timer? _greetingTimer;
 
   @override
   void initState() {
@@ -69,6 +79,7 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
     _nearbyCaregiversStream = _caregiverService.streamAvailableCaregivers();
     _loadUserLocation();
     _subscribeToUserDocStream();
+    _updateGreeting();
   }
 
   Future<void> _loadUserLocation() async {
@@ -85,13 +96,14 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
 
   void _subscribeToUserDocStream() {
     final user = _auth.currentUser;
-    final attach = (User user) {
+    void attach(User user) {
       _userDocSubscription = FirebaseFirestore.instance
           .collection('users')
           .doc(user.uid)
           .snapshots()
           .listen(_handleUserDocSnapshot, onError: (_) {});
-    };
+    }
+
     if (user != null) {
       attach(user);
     } else {
@@ -118,10 +130,14 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
     final photoUrl = _normalizePhotoUrl(firestoreData?['photoUrl'] as String?);
     final fallbackPhoto = _normalizePhotoUrl(_auth.currentUser?.photoURL);
     final preferences = _extractPreferences(firestoreData);
+    final addressPosition = _positionsFromDocument(firestoreData);
     setState(() {
       _headerDisplayName = displayName;
       _headerPhotoUrl = photoUrl ?? fallbackPhoto;
       _userServicePreferences = preferences;
+      if (addressPosition != null) {
+        _currentPosition = addressPosition;
+      }
     });
   }
 
@@ -132,6 +148,52 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
       return raw.whereType<String>().toList();
     }
     return [];
+  }
+
+  Position? _positionsFromDocument(Map<String, dynamic>? data) {
+    final addresses = _extractAddressList(data);
+    for (final entry in addresses) {
+      final lat = _safeDouble(entry['lat']) ?? _safeDouble(entry['latitude']);
+      final lng =
+          _safeDouble(entry['long']) ??
+          _safeDouble(entry['lng']) ??
+          _safeDouble(entry['longitude']);
+      if (lat != null && lng != null) {
+        return Position(
+          longitude: lng,
+          latitude: lat,
+          timestamp: DateTime.now(),
+          accuracy: 10,
+          altitude: 0,
+          heading: 0,
+          speed: 0,
+          speedAccuracy: 0,
+          altitudeAccuracy: 0,
+          headingAccuracy: 0,
+        );
+      }
+    }
+    return null;
+  }
+
+  List<Map<String, dynamic>> _extractAddressList(Map<String, dynamic>? data) {
+    if (data == null) return [];
+    final raw = data['address'] ?? data['addresses'];
+    if (raw is List) {
+      return raw
+          .whereType<Map<String, dynamic>>()
+          .map((entry) => Map<String, dynamic>.from(entry))
+          .toList();
+    }
+    return [];
+  }
+
+  double? _safeDouble(dynamic value) {
+    if (value is num) return value.toDouble();
+    if (value is String && value.trim().isNotEmpty) {
+      return double.tryParse(value.trim());
+    }
+    return null;
   }
 
   Future<List<CaregiverProfile>> _loadPreviousCaregivers() async {
@@ -253,6 +315,15 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
           trailing: _SectionInfoIcon(
             message: 'Caregivers from your finished bookings.',
           ),
+          isCollapsed: _collapsedSections.contains(
+            _CaregiverSectionType.previous,
+          ),
+          onHide: caregivers.isEmpty
+              ? () => _collapseSection(_CaregiverSectionType.previous)
+              : null,
+          onUnhide: _collapsedSections.contains(_CaregiverSectionType.previous)
+              ? () => _unhideSection(_CaregiverSectionType.previous)
+              : null,
         );
       },
     );
@@ -284,6 +355,15 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
           trailing: _SectionInfoIcon(
             message: 'Within 30 km of your current location.',
           ),
+          isCollapsed: _collapsedSections.contains(
+            _CaregiverSectionType.nearby,
+          ),
+          onHide: caregivers.isEmpty
+              ? () => _collapseSection(_CaregiverSectionType.nearby)
+              : null,
+          onUnhide: _collapsedSections.contains(_CaregiverSectionType.nearby)
+              ? () => _unhideSection(_CaregiverSectionType.nearby)
+              : null,
         );
       },
     );
@@ -331,6 +411,16 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
           ),
           emptyMessage: caregivers.isEmpty
               ? 'No caregiver near you only'
+              : null,
+          onHide: caregivers.isEmpty
+              ? () => _collapseSection(_CaregiverSectionType.recommended)
+              : null,
+          isCollapsed: _collapsedSections.contains(
+            _CaregiverSectionType.recommended,
+          ),
+          onUnhide:
+              _collapsedSections.contains(_CaregiverSectionType.recommended)
+              ? () => _unhideSection(_CaregiverSectionType.recommended)
               : null,
         );
       },
@@ -439,9 +529,17 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
     if (screenHeight <= 0) return;
     final rawMax = 1 - (headerHeight / screenHeight);
     final targetExtent = rawMax.clamp(_sheetInitialExtent, _sheetMaxExtent);
-    if ((targetExtent - _sheetMinExtent).abs() > 0.01) {
+    final newInset = _headerTopPadding + headerHeight + _sheetHeaderGap;
+    final shouldUpdateExtent = (targetExtent - _sheetMinExtent).abs() > 0.01;
+    final shouldUpdateInset = (newInset - _sheetTopInset).abs() > 0.5;
+    if (shouldUpdateExtent || shouldUpdateInset) {
       setState(() {
-        _sheetMinExtent = targetExtent;
+        if (shouldUpdateExtent) {
+          _sheetMinExtent = targetExtent;
+        }
+        if (shouldUpdateInset) {
+          _sheetTopInset = newInset;
+        }
       });
     }
   }
@@ -457,8 +555,35 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
 
   bool get _showFloatingAppBar => _currentSheetExtent >= _appBarTriggerExtent;
 
+  void _updateGreeting() {
+    final now = DateTime.now();
+    final greeting = _greetingForTime(now);
+    final shouldUpdate = greeting != _currentGreeting;
+    _currentGreeting = greeting;
+    if (mounted && shouldUpdate) {
+      setState(() {});
+    }
+    _scheduleNextGreeting(now);
+  }
+
+  void _scheduleNextGreeting(DateTime now) {
+    _greetingTimer?.cancel();
+    final nextBoundary = _nextGreetingBoundary(now);
+    final duration = nextBoundary.difference(now);
+    _greetingTimer = Timer(duration, _updateGreeting);
+  }
+
+  void _collapseSection(_CaregiverSectionType type) {
+    setState(() => _collapsedSections.add(type));
+  }
+
+  void _unhideSection(_CaregiverSectionType type) {
+    setState(() => _collapsedSections.remove(type));
+  }
+
   @override
   void dispose() {
+    _greetingTimer?.cancel();
     _userDocSubscription?.cancel();
     super.dispose();
   }
@@ -484,14 +609,43 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
                 colors: [Color(0xFF00A8A7), Color(0xFF26B4B1)],
               ),
             ),
+            child: SafeArea(
+              bottom: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  16,
+                  _headerTopPadding,
+                  16,
+                  0,
+                ),
+                child: Container(
+                  key: _headerKey,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.transparent,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: _buildHeaderContent(theme),
+                ),
+              ),
+            ),
           ),
           DraggableScrollableSheet(
             initialChildSize: sheetInitialSize,
             minChildSize: _sheetMinExtent,
             maxChildSize: _sheetMaxExtent,
             builder: (context, scrollController) {
-              final topSpacing = showAppBar ? kToolbarHeight + 16.0 : 16.0;
-              const sectionSpacing = _sheetSectionSpacing;
+              final sectionSpacing = _sheetSectionSpacing;
+              final t =
+                  ((_currentSheetExtent - _sheetInitialExtent) /
+                          (1 - _sheetInitialExtent))
+                      .clamp(0.0, 1.0);
+              final collapsedSpacing = math.max(_sheetTopInset - 310.0, 0.0);
+              final interpolatedSpacing =
+                  lerpDouble(collapsedSpacing, 15.0, t) ?? 8.0;
+              final topSpacing = showAppBar
+                  ? kToolbarHeight + 8.0
+                  : interpolatedSpacing;
               return NotificationListener<DraggableScrollableNotification>(
                 onNotification: (notification) {
                   _onSheetExtentChanged(notification.extent);
@@ -533,15 +687,6 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
               );
             },
           ),
-          SafeArea(
-            child: Padding(
-              key: _headerKey,
-              padding: const EdgeInsets.symmetric(
-                horizontal: 24,
-              ).copyWith(top: 24),
-              child: _buildHeaderContent(theme),
-            ),
-          ),
           Positioned(
             top: 0,
             left: 0,
@@ -562,19 +707,10 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
     );
   }
 
-  String _timeGreeting() {
-    final hour = DateTime.now().hour;
-    if (hour < 12) {
-      return 'Good morning';
-    }
-    if (hour < 18) {
-      return 'Good afternoon';
-    }
-    return 'Good evening';
-  }
-
   Widget _buildHeaderContent(ThemeData theme) {
-    final greeting = _timeGreeting();
+    final greeting = _currentGreeting.isNotEmpty
+        ? _currentGreeting
+        : _greetingForTime(DateTime.now());
     final displayName = _headerDisplayName;
     final photoUrl = _headerPhotoUrl;
     final avatarInitial = _deriveAvatarInitial(displayName);
@@ -646,6 +782,32 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  String _greetingForTime(DateTime time) {
+    final hour = time.hour;
+    if (hour < 12) return 'Good morning';
+    if (hour < 18) return 'Good afternoon';
+    return 'Good evening';
+  }
+
+  DateTime _nextGreetingBoundary(DateTime now) {
+    int nextHour;
+    if (now.hour < 12) {
+      nextHour = 12;
+    } else if (now.hour < 18) {
+      nextHour = 18;
+    } else {
+      nextHour = 24;
+    }
+    final boundaryDay = nextHour == 24 ? now.add(const Duration(days: 1)) : now;
+    final boundaryHour = nextHour == 24 ? 0 : nextHour;
+    return DateTime(
+      boundaryDay.year,
+      boundaryDay.month,
+      boundaryDay.day,
+      boundaryHour,
     );
   }
 
@@ -818,62 +980,100 @@ class _CaregiverSection extends StatelessWidget {
     required this.caregivers,
     this.trailing,
     this.emptyMessage,
+    this.onHide,
+    this.isCollapsed = false,
+    this.onUnhide,
   });
 
   final String title;
   final List<CaregiverProfile> caregivers;
   final Widget? trailing;
   final String? emptyMessage;
+  final VoidCallback? onHide;
+  final bool isCollapsed;
+  final VoidCallback? onUnhide;
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    final headerRow = Row(
       children: [
-        Row(
-          children: [
-            Text(title, style: _sectionTitleStyle),
-            if (trailing != null) ...[const SizedBox(width: 4), trailing!],
-          ],
-        ),
-        const SizedBox(height: 6),
-        if (caregivers.isEmpty && emptyMessage != null)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.location_off, size: 32, color: Colors.grey),
-                const SizedBox(height: 6),
-                Text(
-                  emptyMessage!,
-                  style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
-                  textAlign: TextAlign.center,
-                ),
-              ],
+        Text(title, style: _sectionTitleStyle),
+        if (trailing != null) ...[const SizedBox(width: 4), trailing!],
+        const Spacer(),
+        if (isCollapsed && onUnhide != null)
+          TextButton(
+            onPressed: onUnhide,
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              minimumSize: const Size(0, 0),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text(
+              'Show section',
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
             ),
           )
-        else
-          SizedBox(
-            height: _caregiverTileHeight,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 2),
-              physics: const BouncingScrollPhysics(),
-              itemCount: caregivers.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 10),
-              itemBuilder: (context, index) =>
-                  _CaregiverTile(caregiver: caregivers[index]),
+        else if (!isCollapsed && onHide != null)
+          TextButton(
+            onPressed: onHide,
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              minimumSize: const Size(0, 0),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text(
+              'Hide section',
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
             ),
           ),
       ],
     );
+
+    Widget content;
+    if (isCollapsed) {
+      content = const SizedBox.shrink();
+    } else if (caregivers.isEmpty && emptyMessage != null) {
+      content = SizedBox(
+        height: _caregiverTileHeight,
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.location_off, size: 32, color: Colors.grey),
+              const SizedBox(height: 6),
+              Text(
+                emptyMessage!,
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      );
+    } else {
+      content = SizedBox(
+        height: _caregiverTileHeight,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 2),
+          physics: const BouncingScrollPhysics(),
+          itemCount: caregivers.length,
+          separatorBuilder: (_, __) => const SizedBox(width: 10),
+          itemBuilder: (context, index) =>
+              _CaregiverTile(caregiver: caregivers[index]),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [headerRow, const SizedBox(height: 6), content],
+    );
   }
 }
 
-const double _caregiverTileHeight = 130;
+const double _caregiverTileHeight = 120;
 const double _caregiverTileWidth = 250;
 
 class _CaregiverTile extends StatelessWidget {
@@ -922,7 +1122,13 @@ class _CaregiverTile extends StatelessWidget {
                     ? const Icon(Icons.person, color: Colors.grey)
                     : null,
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 6),
+              Container(
+                width: 1,
+                height: 60,
+                color: Colors.grey.withAlpha(_alphaFromOpacity(0.35)),
+              ),
+              const SizedBox(width: 6),
               Expanded(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -1003,47 +1209,17 @@ class _CaregiverTile extends StatelessWidget {
                           children: [
                             for (var i = 0; i < _serviceTags.length; i++) ...[
                               if (i != 0) const SizedBox(width: 4),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 6,
-                                  vertical: 2,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: _serviceTagBlue.withAlpha(
-                                    _alphaFromOpacity(0.18),
-                                  ),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: Text(
-                                  _serviceTags[i],
-                                  style: theme.textTheme.bodySmall?.copyWith(
-                                    fontSize: 8,
-                                    color: _serviceTagBlue,
-                                  ),
-                                ),
-                              ),
+                              ServiceTagChip(label: _serviceTags[i]),
                             ],
                             if (caregiver.matchedPreferences > 0) ...[
                               const SizedBox(width: 4),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 6,
-                                  vertical: 2,
+                              ServiceTagChip(
+                                label: '${caregiver.matchedPreferences} prefs',
+                                backgroundColor: _serviceTagBlue.withAlpha(
+                                  _alphaFromOpacity(0.18),
                                 ),
-                                decoration: BoxDecoration(
-                                  color: _serviceTagBlue.withAlpha(
-                                    _alphaFromOpacity(0.18),
-                                  ),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: Text(
-                                  '${caregiver.matchedPreferences} prefs',
-                                  style: TextStyle(
-                                    fontSize: 8,
-                                    color: _serviceTagBlue,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
+                                foregroundColor: _serviceTagBlue,
+                                borderColor: _serviceTagBlue,
                               ),
                             ],
                           ],
@@ -1135,7 +1311,7 @@ class _AvailabilityStatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(12),
@@ -1161,7 +1337,7 @@ class _AvailabilityStatusChip extends StatelessWidget {
             status,
             style: const TextStyle(
               fontWeight: FontWeight.w600,
-              fontSize: 9,
+              fontSize: 8,
               color: Colors.black87,
             ),
           ),

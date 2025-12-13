@@ -3,6 +3,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
+
 import 'profile_emergency_edit_screen.dart';
 
 const Color _tealAccent = Color(0xFF00A8A7);
@@ -284,22 +286,9 @@ class _EmergencyContactCard extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
             child: Row(
               children: [
-                Container(
-                  width: 32,
-                  height: 32,
-                  decoration: BoxDecoration(
-                    color: Colors.grey.withValues(alpha: 0.18),
-                    shape: BoxShape.circle,
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    name.isNotEmpty ? name[0].toUpperCase() : '?',
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.black87,
-                    ),
-                  ),
+                DefaultProfileAvatar(
+                  radius: 16,
+                  label: name,
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -341,9 +330,22 @@ class _EmergencyContactCard extends StatelessWidget {
               ],
             ),
           ),
-          const Divider(height: 0),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Align(
+              alignment: Alignment.center,
+              child: FractionallySizedBox(
+                widthFactor: 0.85,
+                child: Container(
+                  height: 1.5,
+                  color: Colors.black.withAlpha(20),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             child: Row(
               children: [
                 Expanded(

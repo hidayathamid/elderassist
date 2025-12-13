@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
 import '../../../services/chat_service.dart';
 import '../../../services/auth_service.dart';
@@ -285,7 +286,10 @@ class _ActivityBookingDetailsScreenState
               borderRadius: BorderRadius.circular(16),
             ),
             child: ListTile(
-              leading: const Icon(Icons.person_pin),
+              leading: DefaultProfileAvatar(
+                radius: 20,
+                label: personName,
+              ),
               title: Text(
                 personName,
                 style: const TextStyle(fontWeight: FontWeight.w600),

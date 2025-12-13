@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
 import 'profile_address_edit_screen.dart';
 import 'profile_overview_screen.dart';
@@ -185,7 +186,6 @@ class ProfileAddressesScreen extends StatelessWidget {
                     padding: const EdgeInsets.only(bottom: 12),
                     child: _AddressCard(
                       id: id ?? "",
-                      icon: _getIcon(label),
                       name: entry["name"] ?? "",
                       phone: entry["phone"] ?? "",
                       address: entry["address"] ?? "",
@@ -285,7 +285,6 @@ class _DashedAddCard extends StatelessWidget {
 
 class _AddressCard extends StatelessWidget {
   final String id;
-  final IconData icon;
   final String name;
   final String phone;
   final String address;
@@ -297,7 +296,6 @@ class _AddressCard extends StatelessWidget {
 
   const _AddressCard({
     required this.id,
-    required this.icon,
     required this.name,
     required this.phone,
     required this.address,
@@ -334,15 +332,9 @@ class _AddressCard extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
             child: Row(
               children: [
-                Container(
-                  width: 32,
-                  height: 32,
-                  decoration: BoxDecoration(
-                    color: Colors.grey.withValues(alpha: 0.18),
-                    shape: BoxShape.circle,
-                  ),
-                  alignment: Alignment.center,
-                  child: Icon(icon, size: 18, color: Colors.black87),
+                DefaultProfileAvatar(
+                  radius: 16,
+                  label: name,
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -418,9 +410,22 @@ class _AddressCard extends StatelessWidget {
               ],
             ),
           ),
-          const Divider(height: 0),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Align(
+              alignment: Alignment.center,
+              child: FractionallySizedBox(
+                widthFactor: 0.85,
+                child: Container(
+                  height: 1.5,
+                  color: Colors.black.withAlpha(20),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             child: Row(
               children: [
                 Expanded(

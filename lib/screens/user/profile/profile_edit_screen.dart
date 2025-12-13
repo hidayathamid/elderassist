@@ -6,6 +6,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:intl_phone_field/countries.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
+import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
 const Color _accentGold = Color(0xFFF4B63D);
 const Color _tealAccent = Color(0xFF00A8A7);
@@ -288,6 +289,14 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     }
   }
 
+  String _profileAvatarLabel() {
+    final firstName = _firstNameController.text.trim();
+    if (firstName.isNotEmpty) return firstName;
+    final email = _emailController.text.trim();
+    if (email.isNotEmpty) return email;
+    return 'User';
+  }
+
   Future<void> _saveProfile() async {
     final uid = FirebaseAuth.instance.currentUser!.uid;
     final firstName = _firstNameController.text.trim();
@@ -502,36 +511,11 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
                                 clipBehavior: Clip.none,
                                 alignment: Alignment.bottomRight,
                                 children: [
-                                  CircleAvatar(
-                                    radius: 40,
-                                    backgroundColor: _tealAccent.withValues(
-                                      alpha: 0.1,
-                                    ),
-                                    backgroundImage: _photoUrl != null
-                                        ? NetworkImage(_photoUrl!)
-                                        : null,
-                                    child: _photoUrl == null
-                                        ? Text(
-                                            ((_firstNameController.text
-                                                        .trim()
-                                                        .isNotEmpty
-                                                    ? _firstNameController
-                                                          .text[0]
-                                                    : (_emailController.text
-                                                              .trim()
-                                                              .isNotEmpty
-                                                          ? _emailController
-                                                                .text[0]
-                                                          : "U")))
-                                                .toUpperCase(),
-                                            style: const TextStyle(
-                                              fontSize: 24,
-                                              fontWeight: FontWeight.w700,
-                                              color: _tealAccent,
-                                            ),
-                                          )
-                                        : null,
-                                  ),
+                DefaultProfileAvatar(
+                  radius: 40,
+                  photoUrl: _photoUrl,
+                  label: _profileAvatarLabel(),
+                ),
                                   Positioned(
                                     right: -4,
                                     bottom: -4,

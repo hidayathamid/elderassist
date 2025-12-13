@@ -1,14 +1,17 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:intl_phone_field/countries.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
+import 'package:uuid/uuid.dart';
 
 const Color _accentGold = Color(0xFFF4B63D);
 const Color _profileDarkText = Color(0xFF1B1D29);
@@ -47,6 +50,7 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
   final TextEditingController _addressCtrl = TextEditingController();
   final TextEditingController _notesCtrl = TextEditingController();
   final TextEditingController _customLabelCtrl = TextEditingController();
+  final TextEditingController _telegramLinkCtrl = TextEditingController();
 
   final Completer<GoogleMapController> _mapControllerCompleter =
       Completer<GoogleMapController>();
@@ -66,6 +70,11 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
   String _currentCountryCode = 'MY';
   static final List<Country> _dialCodeCountries = [...countries]
     ..sort((a, b) => b.dialCode.length.compareTo(a.dialCode.length));
+  final Uuid _uuid = const Uuid();
+  bool _isGeneratingTelegramLink = false;
+  String? _pendingPairCode;
+  String? _telegramLink;
+  bool _shouldRefreshPairCodeTimestamp = false;
 
   @override
   void initState() {
@@ -85,6 +94,7 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
     _addressCtrl.dispose();
     _notesCtrl.dispose();
     _customLabelCtrl.dispose();
+    _telegramLinkCtrl.dispose();
     super.dispose();
   }
 
@@ -252,6 +262,18 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
       final coords = LatLng(lat.toDouble(), lng.toDouble());
       _placeMarker(coords, animate: false);
     }
+    final pairCode = entry['pairCode']?.toString();
+    if (pairCode != null && pairCode.isNotEmpty) {
+      _pendingPairCode = pairCode;
+      final link = 'https://t.me/Elder_AssistBot?start=$pairCode';
+      _telegramLink = link;
+      _telegramLinkCtrl.text = link;
+    } else {
+      _pendingPairCode = null;
+      _telegramLink = null;
+      _telegramLinkCtrl.clear();
+    }
+    _shouldRefreshPairCodeTimestamp = false;
   }
 
   Future<void> _placeMarker(LatLng pos, {bool animate = true}) async {
@@ -340,6 +362,65 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
     }
   }
 
+  Future<void> _generateTelegramLink() async {
+    if (_isGeneratingTelegramLink || widget.addressId == null) return;
+    debugPrint('generateTelegramLink addressId=${widget.addressId}');
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .get();
+      final addresses = _extractAddressListFromDocument(snapshot.data());
+      debugPrint(
+        'loaded address ids: ${addresses.map((entry) => entry['id']).toList()}',
+      );
+    } else {
+      debugPrint('generateTelegramLink: no current user');
+    }
+    setState(() {
+      _isGeneratingTelegramLink = true;
+    });
+    try {
+      final callable = FirebaseFunctions.instance.httpsCallable(
+        'generateTelegramPairCode',
+      );
+      final result = await callable.call(<String, dynamic>{
+        'role': 'role2',
+        'addressId': widget.addressId,
+      });
+      final data = result.data;
+      if (data is Map<String, dynamic>) {
+        final link = (data['telegramLink'] as String?)?.trim();
+        final pairCode = (data['pairCode'] as String?)?.trim();
+        if (link != null && link.isNotEmpty) {
+          setState(() {
+            _telegramLink = link;
+            _telegramLinkCtrl.text = link;
+            _pendingPairCode = pairCode ?? _pendingPairCode;
+            _shouldRefreshPairCodeTimestamp = true;
+          });
+          return;
+        }
+      }
+      _showSnack('Unable to generate Telegram link.');
+    } on FirebaseFunctionsException catch (error) {
+      _showSnack(error.message ?? 'Unable to generate Telegram link.');
+    } catch (error) {
+      _showSnack('Unable to generate Telegram link. ${error.toString()}');
+    } finally {
+      if (mounted) {
+        setState(() => _isGeneratingTelegramLink = false);
+      }
+    }
+  }
+
+  Future<void> _copyTelegramLink() async {
+    if (_telegramLink == null || _telegramLink!.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: _telegramLink!));
+    _showSnack('Telegram link copied to clipboard.');
+  }
+
   bool get _hasRequiredValues {
     final phoneValue = (_fullPhoneNumber ?? _phoneCtrl.text).trim();
     final labelValid =
@@ -385,10 +466,10 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
       final labelValue = _selectedLabel == 'Other'
           ? _customLabelCtrl.text.trim()
           : _selectedLabel;
+      final pairCode = _pendingPairCode;
+      final entryId = widget.addressId ?? _uuid.v4();
       final newEntry = {
-        'id':
-            widget.addressId ??
-            DateTime.now().millisecondsSinceEpoch.toString(),
+        'id': entryId,
         'name': _nameCtrl.text.trim(),
         'phone': cleanPhone,
         'label': labelValue.isNotEmpty ? labelValue : 'Home',
@@ -398,6 +479,9 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
         'lat': _pickedLatLng!.latitude,
         'lng': _pickedLatLng!.longitude,
         'updatedAt': DateTime.now(),
+        if (pairCode != null) 'pairCode': pairCode,
+        if (pairCode != null && _shouldRefreshPairCodeTimestamp)
+          'pairCodeExpiresAt': FieldValue.serverTimestamp(),
       };
       final int index = addresses.indexWhere(
         (entry) => entry['id'] == widget.addressId,
@@ -411,6 +495,7 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
       if (!mounted) return;
       setState(() {
         _dirty = false;
+        _shouldRefreshPairCodeTimestamp = false;
       });
       await _showCompletionDialog();
     } catch (e) {
@@ -545,6 +630,22 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
   @override
   Widget build(BuildContext context) {
     final bool canSubmit = !_isSubmitting && _dirty && _hasRequiredValues;
+    final bool hasTelegramLink = _telegramLink?.isNotEmpty == true;
+    final bool canGenerateTelegramLink =
+        !_isGeneratingTelegramLink &&
+        widget.addressId != null &&
+        !hasTelegramLink;
+    final VoidCallback? telegramButtonAction = hasTelegramLink
+        ? _copyTelegramLink
+        : (canGenerateTelegramLink ? _generateTelegramLink : null);
+    final Color telegramButtonColor = hasTelegramLink
+        ? Colors.blue
+        : (_isGeneratingTelegramLink || widget.addressId == null)
+        ? Colors.grey.shade400
+        : _accentGold;
+    final String telegramHelperText = widget.addressId == null
+        ? 'Save address before generating Telegram access'
+        : 'Copy this code and send it to your loved one via Telegram to connect.';
     return WillPopScope(
       onWillPop: () async => _handleBackPress(),
       child: Scaffold(
@@ -615,11 +716,106 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
                           const SizedBox(height: 8),
                           _addressCard(),
                           const SizedBox(height: 12),
-                          _labeledField(
-                            label: 'Address Details',
-                            controller: _notesCtrl,
-                            hintText: 'Unit, block, or landmark',
-                            maxLines: 2,
+                          const Text(
+                            'Telegram Emergency Access (Booked User)',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 12,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          TextFormField(
+                            controller: _telegramLinkCtrl,
+                            readOnly: true,
+                            showCursor: false,
+                            style: _inputFieldTextStyle,
+                            decoration: InputDecoration(
+                              hintText: 'Generate Telegram link',
+                              hintStyle: _inputFieldHintStyle,
+                              filled: true,
+                              fillColor: Colors.white,
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 10,
+                              ),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(16),
+                                borderSide: BorderSide(
+                                  color: Colors.grey[300]!,
+                                ),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(16),
+                                borderSide: BorderSide(
+                                  color: Colors.grey[300]!,
+                                ),
+                              ),
+                              focusedBorder: const OutlineInputBorder(
+                                borderRadius: BorderRadius.all(
+                                  Radius.circular(16),
+                                ),
+                                borderSide: BorderSide(
+                                  color: _profileDarkText,
+                                  width: 1.1,
+                                ),
+                              ),
+                              suffixIconConstraints: const BoxConstraints(
+                                minWidth: 90,
+                              ),
+                              suffixIcon: Padding(
+                                padding: const EdgeInsets.only(right: 6),
+                                child: SizedBox(
+                                  height: 32,
+                                  child: ElevatedButton(
+                                    onPressed: telegramButtonAction,
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: telegramButtonColor,
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 16,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                    ),
+                                    child: _isGeneratingTelegramLink
+                                        ? const SizedBox(
+                                            width: 16,
+                                            height: 16,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: Colors.white,
+                                            ),
+                                          )
+                                        : Text(
+                                            hasTelegramLink
+                                                ? 'Copy'
+                                                : 'Generate',
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w600,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            telegramHelperText,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Colors.black54,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'Your invite link will never expire.',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.black54,
+                            ),
                           ),
                         ],
                       ),

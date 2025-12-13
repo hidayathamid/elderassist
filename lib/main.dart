@@ -1,10 +1,12 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 
 import 'firebase_options.dart';
 import 'services/push_service.dart';
 import 'widgets/auth_wrapper.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 
 /// =============================
 /// BACKGROUND NOTIFICATION HANDLER
@@ -14,19 +16,35 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 }
 
-/// Global navigator key
+/// Global navigator key (used for push navigation)
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // ========================================
-  // Firebase App Check DISABLED for this build
-  // Using Auth token only (no app attestation)
+  // INITIALIZE FIREBASE
   // ========================================
-
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
+  // ========================================
+  // 🔐 ACTIVATE APP CHECK (DEV MODE)
+  // ========================================
+  await FirebaseAppCheck.instance.activate(
+    androidProvider: AndroidProvider.debug,
+  );
+
+  // ========================================
+  // 🔥 ENSURE USER IS AUTHENTICATED
+  // ========================================
+  final auth = FirebaseAuth.instance;
+  if (auth.currentUser == null) {
+    await auth.signInAnonymously();
+  }
+
+  // ========================================
+  // FIREBASE CLOUD MESSAGING
+  // ========================================
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
   runApp(const ElderAssistApp());
@@ -39,7 +57,9 @@ class ElderAssistApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final amber400 = Colors.amber[400]!;
 
-    // Initialize FCM push notifications
+    // ========================================
+    // INIT PUSH NOTIFICATION SERVICE
+    // ========================================
     PushService().init(navigatorKey);
 
     return MaterialApp(
@@ -53,6 +73,11 @@ class ElderAssistApp extends StatelessWidget {
           brightness: Brightness.light,
         ),
       ),
+
+      // ========================================
+      // AUTH WRAPPER
+      // At this point, user is GUARANTEED logged in
+      // ========================================
       home: const AuthWrapper(),
     );
   }

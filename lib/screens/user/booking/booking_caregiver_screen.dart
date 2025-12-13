@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
+import 'package:emergencies_disability_assistance_app/widgets/service_tag_chip.dart';
 
 import '../../../models/caregiver_model.dart';
 import 'booking_person_screen.dart';
@@ -963,15 +965,11 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
             Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                CircleAvatar(
-                  radius: 18,
-                  backgroundColor: const Color(0xFFE4F4FF),
-                  child: const Icon(
-                    Icons.person_pin_circle_rounded,
-                    size: 16,
-                    color: Color(0xFF00B8C6),
-                  ),
-                ),
+              DefaultProfileAvatar(
+                radius: 18,
+                photoUrl: widget.person.photoUrl,
+                label: name,
+              ),
                 const SizedBox(width: 8),
                 Expanded(
                       child: Column(
@@ -1597,23 +1595,13 @@ void _goToSummary({
     for (final s in services) {
       final matched = prefsLower.contains(s.toLowerCase().trim());
       chips.add(
-        Container(
-          margin: const EdgeInsets.only(right: 6),
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: (isRecommendation && matched)
-                ? _caregiverMatchBackground
-                : _serviceTagBlue.withOpacity(0.18),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: Text(
-            s,
-            style: TextStyle(
-              color: _serviceTagBlue,
-              fontSize: 10,
-              height: 1.1,
-            ),
+        Padding(
+          padding: const EdgeInsets.only(right: 6),
+          child: ServiceTagChip(
+            label: s,
+            backgroundColor: matched ? _caregiverMatchBackground : _serviceTagBlue,
+            foregroundColor: matched ? _caregiverMatchAccent : Colors.white,
+            borderColor: matched ? _caregiverMatchAccent : _serviceTagBlue,
           ),
         ),
       );

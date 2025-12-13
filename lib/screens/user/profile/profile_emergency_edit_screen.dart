@@ -1,10 +1,13 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl_phone_field/countries.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
+import 'package:uuid/uuid.dart';
 
 const Color _accentGold = Color(0xFFF4B63D);
 const Color _tealAccent = Color(0xFF00A8A7);
@@ -35,6 +38,7 @@ class _ProfileEmergencyEditScreenState
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _phoneController = TextEditingController();
+  final TextEditingController _pairingLinkCtrl = TextEditingController();
   String _relationship = 'Sibling';
   bool _loading = true;
   final _picker = ImagePicker();
@@ -47,7 +51,13 @@ class _ProfileEmergencyEditScreenState
   String _currentCountryCode = 'MY';
   static final List<Country> _dialCodeCountries = [...countries]
     ..sort((a, b) => b.dialCode.length.compareTo(a.dialCode.length));
+  final Uuid _uuid = const Uuid();
+  bool _isGeneratingLink = false;
+  String? _currentPairCode;
+  String? _currentPairingLink;
   bool get _canSave => !_loading && !_isSubmitting && _hasRequiredValues;
+  bool get _canGeneratePairLink =>
+      !_loading && !_isGeneratingLink && widget.contactId != null;
 
   void _markDirty() {
     if (_isInitializing || _dirty) return;
@@ -116,6 +126,14 @@ class _ProfileEmergencyEditScreenState
           _selectedDialCode,
         );
         _relationship = match['relationship'] as String? ?? 'Sibling';
+        _currentPairCode = match['pairCode'] as String?;
+        if (_currentPairCode?.isNotEmpty ?? false) {
+          _currentPairingLink = _pairingDeepLink(_currentPairCode!);
+          _pairingLinkCtrl.text = _currentPairingLink!;
+        } else {
+          _currentPairingLink = null;
+          _pairingLinkCtrl.clear();
+        }
       }
     }
 
@@ -138,8 +156,7 @@ class _ProfileEmergencyEditScreenState
     final doc = await userRef.get();
     final contacts = _extractEmergencyList(doc.data());
 
-    final entryId =
-        widget.contactId ?? DateTime.now().millisecondsSinceEpoch.toString();
+    final entryId = widget.contactId ?? _uuid.v4();
     final dialSegment = _normalizeDialCode(_selectedDialCode);
     var phoneValue = _fullPhoneNumber.trim().isNotEmpty
         ? _collapseRepeatedDialPrefix(_fullPhoneNumber.trim(), dialSegment)
@@ -188,6 +205,18 @@ class _ProfileEmergencyEditScreenState
 
   @override
   Widget build(BuildContext context) {
+    final bool hasPairingLink = _currentPairingLink?.isNotEmpty == true;
+    final bool canGeneratePairingLink = _canGeneratePairLink;
+    final bool contactSaved = widget.contactId != null;
+    final VoidCallback? telegramButtonAction = hasPairingLink
+        ? _copyPairingLink
+        : (canGeneratePairingLink ? _generatePairingLink : null);
+    final Color telegramButtonColor = hasPairingLink
+        ? Colors.blue
+        : (canGeneratePairingLink ? _tealAccent : Colors.grey.shade300);
+    final String telegramHelperText = contactSaved
+        ? 'Share this code so the contact can connect through Telegram.'
+        : 'Save contact before generating Telegram access';
     return WillPopScope(
       onWillPop: () async => _handleBackPress(),
       child: Scaffold(
@@ -268,6 +297,102 @@ class _ProfileEmergencyEditScreenState
                                 ),
                                 const SizedBox(height: 10),
                                 _buildPhoneField(),
+                                const SizedBox(height: 12),
+                                const Text(
+                                  'Telegram pairing link',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 12,
+                                    color: _profileDarkText,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                TextFormField(
+                                  controller: _pairingLinkCtrl,
+                                  readOnly: true,
+                                  showCursor: false,
+                                  style: _inputFieldTextStyle,
+                                  decoration: InputDecoration(
+                                    hintText: 'Generate pairing link',
+                                    hintStyle: _inputFieldHintStyle,
+                                    filled: true,
+                                    fillColor: Colors.white,
+                                    contentPadding: const EdgeInsets.symmetric(
+                                      horizontal: 14,
+                                      vertical: 10,
+                                    ),
+                                    border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(16),
+                                      borderSide: BorderSide(
+                                        color: Colors.grey[300]!,
+                                      ),
+                                    ),
+                                    enabledBorder: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(16),
+                                      borderSide: BorderSide(
+                                        color: Colors.grey[300]!,
+                                      ),
+                                    ),
+                                    focusedBorder: const OutlineInputBorder(
+                                      borderRadius: BorderRadius.all(
+                                        Radius.circular(16),
+                                      ),
+                                      borderSide: BorderSide(
+                                        color: _profileDarkText,
+                                        width: 1.1,
+                                      ),
+                                    ),
+                                    suffixIconConstraints: const BoxConstraints(
+                                      minWidth: 90,
+                                    ),
+                                suffixIcon: Padding(
+                                  padding: const EdgeInsets.only(right: 6),
+                                  child: SizedBox(
+                                    height: 32,
+                                    child: ElevatedButton(
+                                      onPressed: _isGeneratingLink
+                                          ? null
+                                          : telegramButtonAction,
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: telegramButtonColor,
+                                        foregroundColor: Colors.white,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 16,
+                                        ),
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                        ),
+                                      ),
+                                      child: _isGeneratingLink
+                                          ? const SizedBox(
+                                              width: 16,
+                                              height: 16,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                                color: Colors.white,
+                                              ),
+                                            )
+                                          : Text(
+                                              hasPairingLink ? 'Copy' : 'Generate',
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w600,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                    ),
+                                  ),
+                                ),
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  telegramHelperText,
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.black54,
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -770,6 +895,66 @@ class _ProfileEmergencyEditScreenState
     return false;
   }
 
+  Future<void> _generatePairingLink() async {
+    if (!_canGeneratePairLink || widget.contactId == null) return;
+    setState(() {
+      _isGeneratingLink = true;
+    });
+    try {
+      final callable = FirebaseFunctions.instance
+          .httpsCallable('generateTelegramPairCode');
+      final result = await callable.call(<String, dynamic>{
+        'role': 'role4',
+        'contactId': widget.contactId,
+      });
+      final data = result.data;
+      if (data is Map<String, dynamic>) {
+        final link = (data['telegramLink'] as String?)?.trim();
+        final pairCode = (data['pairCode'] as String?)?.trim();
+        if (link != null && link.isNotEmpty) {
+          if (mounted) {
+            setState(() {
+              _currentPairingLink = link;
+              _currentPairCode = pairCode ?? _currentPairCode;
+              _pairingLinkCtrl.text = link;
+            });
+          // link now displayed in field and copy button available; skip dialog
+          }
+          return;
+        }
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to generate pairing link.')),
+      );
+    } on FirebaseFunctionsException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.message ?? 'Unable to generate pairing link.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Unable to generate pairing link. ${error.toString()}')),
+      );
+    } finally {
+      if (mounted) setState(() => _isGeneratingLink = false);
+    }
+  }
+
+  Future<void> _copyPairingLink() async {
+    final link = _currentPairingLink;
+    if (link == null || link.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: link));
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Link copied to clipboard')));
+  }
+
+  String _pairingDeepLink(String pairCode) =>
+      'https://t.me/Elder_AssistBot?start=$pairCode';
+
   Widget _buildDropdown() {
     const relationshipOptions = ['Sibling', 'Friend', 'Doctor', 'Other'];
     return DropdownButtonFormField<String>(
@@ -823,5 +1008,13 @@ class _ProfileEmergencyEditScreenState
       },
       icon: const Icon(Icons.expand_more, size: 18),
     );
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _phoneController.dispose();
+    _pairingLinkCtrl.dispose();
+    super.dispose();
   }
 }

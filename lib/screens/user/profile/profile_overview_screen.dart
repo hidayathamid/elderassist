@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
 import 'profile_addresses_screen.dart';
 import 'profile_edit_screen.dart';
@@ -235,29 +236,10 @@ class ProfileOverviewScreen extends StatelessWidget {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  CircleAvatar(
+                  DefaultProfileAvatar(
                     radius: 32,
-                    backgroundColor: const Color.fromARGB(
-                      255,
-                      181,
-                      212,
-                      212,
-                    ).withValues(alpha: 0.1),
-                    backgroundImage: (user.photoUrl?.isNotEmpty == true)
-                        ? NetworkImage(user.photoUrl!)
-                        : null,
-                    child: (user.photoUrl?.isNotEmpty != true)
-                        ? Text(
-                            user.name.isNotEmpty
-                                ? user.name[0].toUpperCase()
-                                : user.email[0].toUpperCase(),
-                            style: const TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                              color: _tealAccent,
-                            ),
-                          )
-                        : null,
+                    photoUrl: user.photoUrl,
+                    label: user.name.isNotEmpty ? user.name : user.email,
                   ),
                   const SizedBox(width: 12),
                   Expanded(
