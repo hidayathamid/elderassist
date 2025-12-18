@@ -6,9 +6,12 @@ import '../../../constants/service_options.dart';
 
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _selectedServiceColor = Color(0xFF00A8A7);
+const Color _accentGold = Color(0xFFF4B63D);
 
 class ProfileServicesScreen extends StatefulWidget {
-  const ProfileServicesScreen({super.key});
+  final bool useServiceOfferedTitle;
+
+  const ProfileServicesScreen({super.key, this.useServiceOfferedTitle = false});
 
   @override
   State<ProfileServicesScreen> createState() => _ProfileServicesScreenState();
@@ -22,6 +25,9 @@ class _ProfileServicesScreenState extends State<ProfileServicesScreen> {
     return FirebaseFirestore.instance.collection('users').doc(uid).snapshots();
   }
 
+  Stream<DocumentSnapshot<Map<String, dynamic>>> _caregiverStream(String uid) =>
+      FirebaseFirestore.instance.collection('caregivers').doc(uid).snapshots();
+
   List<String> _extractPreferences(Map<String, dynamic>? data) {
     if (data == null) return [];
     final raw = data['servicePreferences'];
@@ -34,17 +40,29 @@ class _ProfileServicesScreenState extends State<ProfileServicesScreen> {
   Future<void> _togglePreference(
     String uid,
     String option,
-    List<String> current,
-  ) async {
+    List<String> current, {
+    required bool isCaregiver,
+  }) async {
     final updated = List<String>.from(current);
     if (updated.contains(option)) {
       updated.remove(option);
     } else {
       updated.add(option);
     }
-    await FirebaseFirestore.instance.collection('users').doc(uid).update({
-      'servicePreferences': updated,
-    });
+    final ref = FirebaseFirestore.instance
+        .collection(isCaregiver ? 'caregivers' : 'users')
+        .doc(uid);
+    final field = isCaregiver ? 'services' : 'servicePreferences';
+    await ref.set({field: updated}, SetOptions(merge: true));
+  }
+
+  List<String> _extractCaregiverServices(Map<String, dynamic>? data) {
+    if (data == null) return [];
+    final raw = data['services'];
+    if (raw is Iterable) {
+      return raw.whereType<String>().toList();
+    }
+    return [];
   }
 
   List<String> _visibleOptions() {
@@ -103,9 +121,11 @@ class _ProfileServicesScreenState extends State<ProfileServicesScreen> {
           ),
           onPressed: () => Navigator.of(context).maybePop(),
         ),
-        title: const Text(
-          'Service Preferences',
-          style: TextStyle(
+        title: Text(
+          widget.useServiceOfferedTitle
+              ? 'Service Offered'
+              : 'Service Preferences',
+          style: const TextStyle(
             fontWeight: FontWeight.w600,
             fontSize: 18,
             color: _profileDarkText,
@@ -114,106 +134,164 @@ class _ProfileServicesScreenState extends State<ProfileServicesScreen> {
       ),
       body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
         stream: _userStream(user.uid),
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
+        builder: (context, userSnapshot) {
+          if (userSnapshot.hasError) {
             return Center(
               child: Text(
-                'Unable to load preferences: ${snapshot.error}',
+                'Unable to load preferences: ${userSnapshot.error}',
                 style: const TextStyle(color: Colors.redAccent),
               ),
             );
           }
-          if (!snapshot.hasData) {
+          if (!userSnapshot.hasData) {
             return const Center(child: CircularProgressIndicator());
           }
 
-          final preferences = _extractPreferences(snapshot.data!.data());
-          final visible = _visibleOptions();
+          return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+            stream: _caregiverStream(user.uid),
+            builder: (context, caregiverSnapshot) {
+              if (caregiverSnapshot.hasError) {
+                return Center(
+                  child: Text(
+                    'Unable to load caregiver services: ${caregiverSnapshot.error}',
+                    style: const TextStyle(color: Colors.redAccent),
+                  ),
+                );
+              }
 
-          return SingleChildScrollView(
-            physics: const BouncingScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const SizedBox(height: 8),
-                Row(
+              final isCaregiver =
+                  caregiverSnapshot.hasData && caregiverSnapshot.data!.exists;
+              final caregiverServices = _extractCaregiverServices(
+                caregiverSnapshot.data?.data(),
+              );
+              final preferences = isCaregiver
+                  ? caregiverServices
+                  : _extractPreferences(userSnapshot.data!.data());
+              final visible = _visibleOptions();
+
+              return SingleChildScrollView(
+                physics: const BouncingScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _searchController,
-                        onChanged: _updateFilter,
-                        style: const TextStyle(fontSize: 11),
-                        decoration: InputDecoration(
-                          hintText: 'Search services',
-                          hintStyle: const TextStyle(fontSize: 11),
-                          prefixIcon: const Icon(Icons.search, size: 16),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: BorderSide(color: Colors.grey[300]!),
-                          ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: BorderSide(color: Colors.grey[300]!),
-                          ),
-                          focusedBorder: const OutlineInputBorder(
-                            borderRadius: BorderRadius.all(Radius.circular(14)),
-                            borderSide: BorderSide(
-                              color: Colors.black,
-                              width: 1.1,
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _searchController,
+                            onChanged: _updateFilter,
+                            style: const TextStyle(fontSize: 11),
+                            decoration: InputDecoration(
+                              hintText: 'Search services',
+                              hintStyle: const TextStyle(fontSize: 11),
+                              prefixIcon: const Icon(Icons.search, size: 16),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(14),
+                                borderSide: BorderSide(
+                                  color: Colors.grey[300]!,
+                                ),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(14),
+                                borderSide: BorderSide(
+                                  color: Colors.grey[300]!,
+                                ),
+                              ),
+                              focusedBorder: const OutlineInputBorder(
+                                borderRadius: BorderRadius.all(
+                                  Radius.circular(14),
+                                ),
+                                borderSide: BorderSide(
+                                  color: Colors.black,
+                                  width: 1.1,
+                                ),
+                              ),
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 0,
+                              ),
                             ),
                           ),
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 0,
+                        ),
+                        const SizedBox(width: 12),
+                        ElevatedButton(
+                          onPressed: () {
+                            _searchController.clear();
+                            _updateFilter('');
+                          },
+                          style: ButtonStyle(
+                            backgroundColor: WidgetStateProperty.resolveWith((
+                              states,
+                            ) {
+                              if (states.contains(WidgetState.disabled)) {
+                                return _accentGold.withOpacity(0.8);
+                              }
+                              return _accentGold;
+                            }),
+                            foregroundColor: WidgetStateProperty.resolveWith((
+                              states,
+                            ) {
+                              if (states.contains(WidgetState.disabled)) {
+                                return Colors.grey.shade600;
+                              }
+                              return Colors.black;
+                            }),
+                            elevation: WidgetStateProperty.resolveWith<double>((
+                              states,
+                            ) {
+                              if (states.contains(WidgetState.disabled)) {
+                                return 0;
+                              }
+                              return 0;
+                            }),
+                            padding: WidgetStateProperty.all(
+                              const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 4,
+                              ),
+                            ),
+                            shape: WidgetStateProperty.all(
+                              RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                            textStyle: WidgetStateProperty.all(
+                              const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ),
+                          child: const Text('Search'),
                         ),
-                      ),
+                      ],
                     ),
-                    const SizedBox(width: 12),
-                    ElevatedButton(
-                      onPressed: () {
-                        _searchController.clear();
-                        _updateFilter('');
-                      },
-                      style: ElevatedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 18,
-                          vertical: 10,
-                        ),
-                        backgroundColor: _selectedServiceColor,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        textStyle: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      child: const Text('Search'),
+                    const SizedBox(height: 16),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      alignment: WrapAlignment.spaceBetween,
+                      children: visible.map((option) {
+                        final selected = preferences.contains(option);
+                        return _ServiceChip(
+                          label: option,
+                          selected: selected,
+                          onTap: () => _togglePreference(
+                            user.uid,
+                            option,
+                            preferences,
+                            isCaregiver: isCaregiver,
+                          ),
+                        );
+                      }).toList(),
                     ),
+                    const SizedBox(height: 8),
                   ],
                 ),
-                const SizedBox(height: 16),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  alignment: WrapAlignment.spaceBetween,
-                  children: visible.map((option) {
-                    final selected = preferences.contains(option);
-                    return _ServiceChip(
-                      label: option,
-                      selected: selected,
-                      onTap: () =>
-                          _togglePreference(user.uid, option, preferences),
-                    );
-                  }).toList(),
-                ),
-                const SizedBox(height: 8),
-              ],
-            ),
+              );
+            },
           );
         },
       ),

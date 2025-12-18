@@ -103,9 +103,8 @@ class _ActivityEditBookingScreenState
 
     final updates = {
       'notes': _notesController.text.trim(),
-      'scheduledDate': _formatDate(_selectedDate),
-      'startTime': _formatTime(_startTime),
-      'endTime': _formatTime(_endTime),
+      'date': _formatDate(_selectedDate),
+      'time': _formatTime(_startTime),
     };
 
     final bookingRef =

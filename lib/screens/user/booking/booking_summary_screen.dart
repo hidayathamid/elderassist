@@ -6,6 +6,7 @@ import 'package:emergencies_disability_assistance_app/widgets/default_profile_av
 
 import 'package:emergencies_disability_assistance_app/screens/user/user_root_screen.dart';
 import 'booking_person_screen.dart';
+import 'package:emergencies_disability_assistance_app/screens/user/profile/profile_addresses_screen.dart';
 import '../../../constants/service_options.dart';
 import '../../../models/caregiver_model.dart';
 
@@ -32,6 +33,11 @@ class BookingSummaryScreen extends StatefulWidget {
     required this.price,
     required this.selectedAddress,
     required this.showScheduleSection,
+    this.editingBookingId,
+    this.lockedService,
+    this.lockedPaymentMethod,
+    this.readOnlyServiceAndPayment = false,
+    this.enableClientAddressSelection = false,
   });
 
   final PersonProfile person;
@@ -42,6 +48,11 @@ class BookingSummaryScreen extends StatefulWidget {
   final double price;
   final AddressItem selectedAddress;
   final bool showScheduleSection;
+  final String? editingBookingId;
+  final String? lockedService;
+  final String? lockedPaymentMethod;
+  final bool readOnlyServiceAndPayment;
+  final bool enableClientAddressSelection;
 
   @override
   State<BookingSummaryScreen> createState() => _BookingSummaryScreenState();
@@ -56,10 +67,14 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   late bool _isBookInAdvance;
   bool _showPaymentMethods = false;
   String? _selectedPaymentMethod;
+  late PersonProfile _currentPerson;
+  late AddressItem _activeAddress;
 
   @override
   void initState() {
     super.initState();
+    _currentPerson = widget.person;
+    _activeAddress = widget.selectedAddress;
     final now = DateTime.now();
     _selectedDate = widget.showScheduleSection
         ? _clampToFuture(widget.scheduleDate)
@@ -82,6 +97,10 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       _selectedTimeIndex = _timeOptions.length - 1;
     }
     _isBookInAdvance = widget.showScheduleSection;
+    if (widget.lockedService?.isNotEmpty == true) {
+      _selectedService = widget.lockedService!;
+    }
+    _selectedPaymentMethod = widget.lockedPaymentMethod;
   }
 
   Widget _buildLabeledBlock({required String label, required Widget child}) {
@@ -102,7 +121,16 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     );
   }
 
-  bool get _canConfirmBooking => !_isLoading && _selectedPaymentMethod != null;
+  bool get _isEditingBooking => widget.editingBookingId != null;
+
+  bool get _lockServiceAndPayment => widget.readOnlyServiceAndPayment;
+
+  bool get _canUseAddressPicker => widget.enableClientAddressSelection;
+
+  bool get _canConfirmBooking {
+    if (_isEditingBooking) return !_isLoading;
+    return !_isLoading && _selectedPaymentMethod != null;
+  }
 
   Future<void> _confirmBooking() async {
     if (_isLoading) return;
@@ -130,30 +158,27 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       final serviceLabel = _selectedService.isEmpty
           ? 'General care'
           : _selectedService;
-      final pickupDetails = widget.person.notes.trim();
+      final pickupDetails = _currentPerson.notes.trim();
       final firestore = FirebaseFirestore.instance;
       final bookingRef = firestore.collection('bookings').doc();
       final startTimeValue = _timeOptions[_selectedTimeIndex];
       final personAddress =
-          (widget.selectedAddress.addressLine ??
-                  widget.selectedAddress.subtitle)
-              .trim();
+          (_activeAddress.addressLine ?? _activeAddress.subtitle).trim();
       final bookingData = {
         'bookingId': bookingRef.id,
         'userId': user.uid,
         'caregiverId': widget.caregiver.id,
+        'caregiverName': widget.caregiver.name,
         'service': serviceLabel,
-        'personId': widget.person.id,
-        'personName': widget.person.name,
+        'personId': _currentPerson.id,
+        'personName': _currentPerson.name,
         'personAddress': personAddress,
+        'addressId': _activeAddress.id,
         'date': _formatDate(_selectedDate),
-        'scheduledDate': _formatDate(_selectedDate),
         'time': _formatTimeOfDay(startTimeValue),
-        'startTime': _formatTime24(startTimeValue),
-        'endTime': _formatTime24(_nextHour(startTimeValue)),
         'paymentMethod': _selectedPaymentMethod!,
         'servicePrice': widget.price,
-        'status': 'PENDING',
+        'status': _isBookInAdvance ? 'SCHEDULED' : 'ASSIGNED',
         'notes': pickupDetails,
         'createdAt': FieldValue.serverTimestamp(),
       };
@@ -182,6 +207,38 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       if (mounted) {
         setState(() => _isLoading = false);
       }
+    }
+  }
+
+  Future<void> _saveBookingChanges() async {
+    if (_isLoading || widget.editingBookingId == null) return;
+    setState(() => _isLoading = true);
+    try {
+      final startTimeValue = _timeOptions[_selectedTimeIndex];
+      final addressText =
+          (_activeAddress.addressLine ?? _activeAddress.subtitle).trim();
+      final updates = {
+        'date': _formatDate(_selectedDate),
+        'time': _formatTimeOfDay(startTimeValue),
+        'personName': _currentPerson.name,
+        'personAddress': addressText,
+        'personId': _currentPerson.id,
+        'personPhone': _currentPerson.phone,
+        'addressLabel':
+            _activeAddress.label ?? _currentPerson.label ?? '',
+        'caregiverName': widget.caregiver.name,
+        'addressId': _activeAddress.id,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      await FirebaseFirestore.instance
+          .collection('bookings')
+          .doc(widget.editingBookingId)
+          .update(updates);
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (!mounted) return;
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -232,16 +289,6 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     final month = date.month.toString().padLeft(2, '0');
     final day = date.day.toString().padLeft(2, '0');
     return '$year-$month-$day';
-  }
-
-  String _formatTime24(TimeOfDay time) =>
-      '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
-
-  TimeOfDay _nextHour(TimeOfDay time) {
-    final totalMinutes = time.hour * 60 + time.minute + 60;
-    final hour = (totalMinutes ~/ 60) % 24;
-    final minute = totalMinutes % 60;
-    return TimeOfDay(hour: hour, minute: minute);
   }
 
   List<DateTime> get _scheduleDays {
@@ -344,13 +391,15 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                 const SizedBox(height: 12),
                 const Text('Payment Method', style: _sectionLabelTextStyle),
                 const SizedBox(height: 6),
-                const Text(
-                  'Select ToyyibPay or PayPal to continue.',
-                  style: TextStyle(fontSize: 10, color: Colors.black54),
-                ),
-                const SizedBox(height: 6),
+                if (!_lockServiceAndPayment) ...[
+                  const Text(
+                    'Select ToyyibPay or PayPal to continue.',
+                    style: TextStyle(fontSize: 10, color: Colors.black54),
+                  ),
+                  const SizedBox(height: 6),
+                ],
                 _buildAddPaymentCard(),
-                if (_showPaymentMethods) ...[
+                if (_showPaymentMethods && !_lockServiceAndPayment) ...[
                   const SizedBox(height: 8),
                   _buildPaymentMethodList(),
                 ],
@@ -375,7 +424,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: ElevatedButton(
-                onPressed: _canConfirmBooking ? _confirmBooking : null,
+                onPressed: _canConfirmBooking
+                    ? (_isEditingBooking ? _saveBookingChanges : _confirmBooking)
+                    : null,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _actionGold,
                   foregroundColor: Colors.black,
@@ -397,7 +448,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                           color: Colors.black,
                         ),
                       )
-                    : const Text('Place Booking & Pay'),
+                    : Text(_isEditingBooking ? 'Save' : 'Place Booking & Pay'),
               ),
             ),
           ),
@@ -521,15 +572,15 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   }
 
   Widget _buildPersonCard() {
-    final person = widget.person;
-    final selectedAddress = widget.selectedAddress;
+    final person = _currentPerson;
+    final selectedAddress = _activeAddress;
     final labelText = selectedAddress.label?.trim().isNotEmpty == true
         ? selectedAddress.label!.trim()
         : (person.label?.trim() ?? '');
     final addressText = selectedAddress.addressLine?.isNotEmpty == true
         ? selectedAddress.addressLine!
         : selectedAddress.subtitle;
-    return Container(
+    final card = Container(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -544,7 +595,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         ],
       ),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           DefaultProfileAvatar(
             radius: 32,
@@ -592,9 +643,72 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
               ],
             ),
           ),
+          if (_canUseAddressPicker)
+            const Padding(
+              padding: EdgeInsets.only(left: 10),
+              child: Center(
+                child: Icon(
+                  Icons.chevron_right,
+                  size: 18,
+                  color: Colors.black26,
+                ),
+              ),
+            ),
         ],
       ),
     );
+
+    if (!_canUseAddressPicker) return card;
+    return InkWell(
+      onTap: _openAddressSelector,
+      borderRadius: BorderRadius.circular(16),
+      child: card,
+    );
+  }
+
+  Future<void> _openAddressSelector() async {
+    final result = await Navigator.push<Map<String, dynamic>>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const ProfileAddressesScreen(
+          selectionMode: true,
+          selectionModeForBookingEdit: true,
+        ),
+      ),
+    );
+    if (result == null) return;
+    final selectedMap = Map<String, dynamic>.from(result);
+    final selectedItem = AddressItem.fromMap(selectedMap);
+    setState(() {
+      _activeAddress = selectedItem;
+      final selectedName = (selectedMap['name'] ?? selectedItem.title)?.toString();
+      final selectedLabel =
+          (selectedMap['label'] ?? selectedMap['forWho'] ?? selectedItem.label)
+              ?.toString();
+      final selectedPhone = selectedMap['phone']?.toString();
+      _currentPerson = PersonProfile(
+        id: selectedMap['id']?.toString() ?? _currentPerson.id,
+        name: (selectedName?.trim().isNotEmpty ?? false)
+            ? selectedName!.trim()
+            : _currentPerson.name,
+        age: _currentPerson.age,
+        address:
+            selectedItem.addressLine?.trim().isNotEmpty == true
+                ? selectedItem.addressLine!
+                : selectedItem.subtitle,
+        conditions: _currentPerson.conditions,
+        photoUrl: _currentPerson.photoUrl,
+        label: (selectedLabel?.trim().isNotEmpty ?? false)
+            ? selectedLabel!.trim()
+            : _currentPerson.label,
+        phone: (selectedPhone?.trim().isNotEmpty ?? false)
+            ? selectedPhone!.trim()
+            : _currentPerson.phone,
+        notes: _currentPerson.notes,
+        latitude: selectedItem.lat,
+        longitude: selectedItem.long,
+      );
+    });
   }
 
   Widget _buildSectionTitle(String text) {
@@ -772,11 +886,12 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
 
   Widget _buildServiceRow({required String service}) {
     final selected = _selectedService == service;
+    final bool canSelect = !_lockServiceAndPayment;
     final description = kServiceDescriptions[service] ?? 'Book now with doctor';
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: GestureDetector(
-        onTap: () => setState(() => _selectedService = service),
+        onTap: canSelect ? () => setState(() => _selectedService = service) : null,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
           decoration: BoxDecoration(
@@ -847,6 +962,15 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                       )
                     : null,
               ),
+              if (!canSelect)
+                const Padding(
+                  padding: EdgeInsets.only(left: 8),
+                  child: Icon(
+                    Icons.lock_outline,
+                    size: 14,
+                    color: Colors.black26,
+                  ),
+                ),
             ],
           ),
         ),
@@ -917,6 +1041,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   ];
 
   Widget _buildPaymentMethodList() {
+    if (_lockServiceAndPayment) {
+      return const SizedBox.shrink();
+    }
     return Column(
       children: _paymentMethods.map((method) {
         final title = method['title'] as String;
@@ -1009,6 +1136,41 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   }
 
   Widget _buildAddPaymentCard() {
+    final locked = _lockServiceAndPayment;
+    final displayLabel =
+        _selectedPaymentMethod ?? 'Add payment method';
+    final cardContent = Row(
+      children: [
+        Icon(
+          Icons.credit_card_rounded,
+          color: locked ? Colors.grey : const Color(0xFF00B8C6),
+          size: 20,
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            locked ? '$displayLabel (locked)' : displayLabel,
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+          ),
+        ),
+        if (locked)
+          const Icon(Icons.lock_outline, size: 16, color: Colors.black26),
+      ],
+    );
+
+    if (locked) {
+      return Container(
+        constraints: const BoxConstraints(minHeight: 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.grey[300]!),
+        ),
+        child: cardContent,
+      );
+    }
+
     return GestureDetector(
       onTap: () => setState(() => _showPaymentMethods = !_showPaymentMethods),
       child: Container(
@@ -1019,16 +1181,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: Colors.grey[300]!),
         ),
-        child: Row(
-          children: const [
-            Icon(Icons.credit_card_rounded, color: Color(0xFF00B8C6), size: 20),
-            SizedBox(width: 10),
-            Text(
-              'Add payment method',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-            ),
-          ],
-        ),
+        child: cardContent,
       ),
     );
   }

@@ -2,9 +2,28 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_screen.dart';
+import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.dart';
+import 'package:emergencies_disability_assistance_app/screens/user/chat/user_chat_screen.dart';
+
 import '../../../services/chat_service.dart';
 import '../../../services/location_service.dart';
-import 'package:emergencies_disability_assistance_app/screens/caregiver/chat/caregiver_chat_screen.dart';
+import '../../../widgets/live_location_map.dart';
+
+const BorderRadius _sectionBorderRadius = BorderRadius.all(Radius.circular(18));
+
+final Color _sectionBorderColor = Colors.grey.shade300;
+final BoxShadow _sectionShadow = BoxShadow(
+  color: Colors.black.withValues(alpha: 20),
+  blurRadius: 16,
+  offset: const Offset(0, 6),
+);
+
+final BoxShadow _chipShadow = BoxShadow(
+  color: Colors.black.withValues(alpha: 20),
+  blurRadius: 8,
+  offset: const Offset(0, 4),
+);
 
 class CaregiverJobDetailsScreen extends StatefulWidget {
   const CaregiverJobDetailsScreen({super.key, required this.bookingId});
@@ -47,9 +66,7 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
 
     try {
       final doc = await FirebaseFirestore.instance
-          .collection('caregivers')
-          .doc(user.uid)
-          .collection('assignedBookings')
+          .collection('bookings')
           .doc(widget.bookingId)
           .get();
 
@@ -90,8 +107,9 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
     }
 
     final batch = FirebaseFirestore.instance.batch();
-    final bookingRef =
-        FirebaseFirestore.instance.collection('bookings').doc(widget.bookingId);
+    final bookingRef = FirebaseFirestore.instance
+        .collection('bookings')
+        .doc(widget.bookingId);
     final userRef = FirebaseFirestore.instance
         .collection('users')
         .doc(userId)
@@ -127,9 +145,9 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
     } catch (e) {
       if (!mounted) return false;
       setState(() => _isUpdating = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Update failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Update failed: $e')));
       return false;
     }
   }
@@ -158,20 +176,30 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
     final caregiverId = FirebaseAuth.instance.currentUser?.uid;
     if (caregiverId == null || caregiverId.isEmpty) return;
 
-    final chatId = await ChatService().createOrGetChat(userId, caregiverId);
-    if (chatId.isEmpty) return;
-
     final personName = (_job!['personName'] as String?) ?? 'Client';
-    final scheduledDate = (_job!['scheduledDate'] as String?) ?? '';
+    final chatService = ChatService();
+    final chatId = await chatService.createOrGetChat(
+      userId,
+      caregiverId,
+      personId: (_job!['personId'] as String?) ?? '',
+    );
+    if (chatId.isEmpty) return;
+    await chatService.setChatLabel(chatId, personName);
+    await chatService.setChatPersonInfo(
+      chatId,
+      personId: (_job!['personId'] as String?) ?? '',
+      personName: personName,
+    );
+
     if (!mounted) return;
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => CaregiverChatScreen(
+        builder: (_) => UserChatScreen(
           chatId: chatId,
           otherUserId: userId,
-          contactName: personName,
-          lastSeen: scheduledDate,
+          otherUserName: personName,
+          hideCallAction: true,
         ),
       ),
     );
@@ -179,13 +207,23 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final appBar = buildProfileStyleAppBar(
+      title: 'Job Details',
+      onBack: () => Navigator.of(context).pop(),
+    );
+
     if (_isLoading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return Scaffold(
+        backgroundColor: activityBackgroundColor,
+        appBar: appBar,
+        body: const Center(child: CircularProgressIndicator()),
+      );
     }
 
     if (_error != null) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Job Details')),
+        backgroundColor: activityBackgroundColor,
+        appBar: appBar,
         body: Center(child: Text(_error!)),
       );
     }
@@ -202,94 +240,231 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
     final timeLabel = _formatTimeLabel(startTime, endTime);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Job Details')),
+      backgroundColor: activityBackgroundColor,
+      appBar: appBar,
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        physics: const BouncingScrollPhysics(),
         children: [
-          _buildHeader(personName, status, location, timeLabel),
+          _buildHeader(personName, service, status, location, timeLabel),
           const SizedBox(height: 16),
-          _buildMapPlaceholder(),
+          _buildLiveMapSection(job),
           const SizedBox(height: 16),
-          _buildInfoCard(personName, service, scheduledDate, location, timeLabel),
+          _buildInfoCard(
+            personName,
+            service,
+            scheduledDate,
+            location,
+            timeLabel,
+          ),
           const SizedBox(height: 16),
           _buildNotesCard(),
           const SizedBox(height: 16),
           _buildPriceCard(price, status),
-          const SizedBox(height: 24),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: _actionButtons(status),
-          ),
+          const SizedBox(height: 16),
+          Wrap(spacing: 12, runSpacing: 12, children: _actionButtons(status)),
           const SizedBox(height: 12),
-          ElevatedButton.icon(
-            icon: const Icon(Icons.chat),
-            label: const Text('Chat with Client'),
+          OutlinedButton.icon(
             onPressed: _openChat,
-            style: ElevatedButton.styleFrom(
+            icon: const Icon(Icons.chat_bubble_outline, size: 18),
+            label: const Text('Chat with Client'),
+            style: OutlinedButton.styleFrom(
               minimumSize: const Size.fromHeight(52),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              side: BorderSide(color: Colors.grey.shade300),
+              foregroundColor: Colors.black87,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              textStyle: const TextStyle(fontWeight: FontWeight.w600),
             ),
           ),
+          const SizedBox(height: 24),
         ],
       ),
     );
   }
 
-  Widget _buildHeader(String person, String status, String location, String timeLabel) {
-    return Card(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+  Widget _buildHeader(
+    String person,
+    String service,
+    String status,
+    String location,
+    String timeLabel,
+  ) {
+    return _surface(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                const Icon(Icons.person_pin, size: 28),
+                const Icon(
+                  Icons.person_pin,
+                  size: 28,
+                  color: activityAccentBlue,
+                ),
                 const SizedBox(width: 12),
-                Text(person,
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                const Spacer(),
-                Chip(label: Text(status)),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        person,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 17,
+                          color: activityPrimaryTextColor,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        service,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.black54,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                _JobStatusChip(status: status),
               ],
             ),
-            const SizedBox(height: 4),
-            Text(location),
-            const SizedBox(height: 4),
-            Text(timeLabel),
+            const SizedBox(height: 12),
+            if (location.isNotEmpty)
+              Row(
+                children: [
+                  const Icon(
+                    Icons.location_on,
+                    size: 14,
+                    color: Colors.black54,
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      location,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.black54,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            if (location.isNotEmpty) const SizedBox(height: 8),
+            Row(
+              children: [
+                const Icon(Icons.access_time, size: 14, color: Colors.black54),
+                const SizedBox(width: 4),
+                Text(
+                  timeLabel.isNotEmpty ? timeLabel : 'Time pending',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+              ],
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildMapPlaceholder() {
-    return Card(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Container(
-        height: 180,
-        decoration: BoxDecoration(
-          color: Colors.grey[200],
-          borderRadius: BorderRadius.circular(20),
+  Widget _buildLiveMapSection(Map<String, dynamic> job) {
+    final caregiverId =
+        (job['caregiverId'] as String?) ??
+        FirebaseAuth.instance.currentUser?.uid ??
+        '';
+    final userId = (job['userId'] as String?) ?? '';
+    return _surface(
+      child: Padding(
+        padding: const EdgeInsets.all(0),
+        child: ClipRRect(
+          borderRadius: const BorderRadius.all(Radius.circular(18)),
+          child: LiveLocationMap(
+            caregiverId: caregiverId,
+            userId: userId,
+            height: 220,
+          ),
         ),
-        child: const Center(child: Text('Map placeholder')),
       ),
     );
   }
 
-  Widget _buildInfoCard(String personName, String service, String scheduledDate,
-      String location, String timeLabel) {
-    return Card(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: ListTile(
-        title: const Text('Person'),
-        subtitle: Text('$personName - $service'),
-        trailing: Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
+  Widget _buildInfoCard(
+    String personName,
+    String service,
+    String scheduledDate,
+    String location,
+    String timeLabel,
+  ) {
+    return _surface(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(scheduledDate),
-            Text(timeLabel),
+            const Text(
+              'Person',
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '$personName · $service',
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                const Icon(
+                  Icons.calendar_month,
+                  size: 14,
+                  color: Colors.black54,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  scheduledDate.isNotEmpty ? scheduledDate : 'Date pending',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                const Icon(Icons.access_time, size: 14, color: Colors.black54),
+                const SizedBox(width: 6),
+                Text(
+                  timeLabel.isNotEmpty ? timeLabel : 'Time pending',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+              ],
+            ),
+            if (location.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  const Icon(
+                    Icons.location_on,
+                    size: 14,
+                    color: Colors.black54,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      location,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.black54,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ),
@@ -297,21 +472,38 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
   }
 
   Widget _buildNotesCard() {
-    return Card(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+    return _surface(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Notes', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text(
+              'Notes',
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+            ),
             const SizedBox(height: 8),
             TextField(
               controller: _notesController,
               maxLines: 3,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
+              decoration: InputDecoration(
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
                 hintText: 'Add any job notes or completion summary',
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: BorderSide(color: Colors.grey.shade300),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: BorderSide(color: Colors.grey.shade300),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: BorderSide(color: activityAccentBlue),
+                ),
               ),
             ),
           ],
@@ -321,43 +513,66 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
   }
 
   Widget _buildPriceCard(String price, String status) {
-    return Card(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: ListTile(
-        title: const Text('Price'),
-        subtitle: Text(price),
-        trailing: Text(status),
+    return _surface(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Price',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  price,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14,
+                    color: activityPrimaryTextColor,
+                  ),
+                ),
+              ],
+            ),
+            const Spacer(),
+            Text(
+              status,
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   List<Widget> _actionButtons(String status) {
     if (_isUpdating) {
-      return [
-        const SizedBox(
-          width: 64,
-          height: 40,
+      return const [
+        SizedBox(
+          width: 160,
+          height: 44,
           child: Center(child: CircularProgressIndicator()),
-        )
+        ),
       ];
     }
 
     final normalized = status.toUpperCase();
     if (normalized == 'ONGOING') {
-      return [
-        _ActionButton(label: 'Complete Job', onPressed: _completeJob),
-      ];
+      return [_ActionButton(label: 'Complete Job', onPressed: _completeJob)];
     }
 
     if (normalized == 'COMPLETED' || normalized == 'CANCELLED') {
-      return [
-        const Text('Job already finalized', style: TextStyle(fontWeight: FontWeight.bold)),
+      return const [
+        Text(
+          'Job already finalized',
+          style: TextStyle(fontWeight: FontWeight.w700),
+        ),
       ];
     }
 
-    return [
-      _ActionButton(label: 'Start Job', onPressed: _startJob),
-    ];
+    return [_ActionButton(label: 'Start Job', onPressed: _startJob)];
   }
 
   String _formatTimeLabel(String start, String end) {
@@ -370,6 +585,104 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
     if (trimmedEnd.isEmpty) return trimmedStart;
     return '$trimmedStart - $trimmedEnd';
   }
+
+  Widget _surface({required Widget child}) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: _sectionBorderRadius,
+        border: Border.all(color: _sectionBorderColor),
+        boxShadow: [_sectionShadow],
+      ),
+      child: child,
+    );
+  }
+}
+
+class _JobStatusChip extends StatelessWidget {
+  const _JobStatusChip({required this.status});
+
+  final String status;
+
+  String get _normalized => status.trim().toLowerCase();
+
+  Color get _dotColor {
+    switch (_normalized) {
+      case 'ongoing':
+      case 'in_progress':
+        return Colors.blue.shade700;
+      case 'assigned':
+      case 'completed':
+        return Colors.green.shade700;
+      case 'cancelled':
+        return Colors.red.shade700;
+      default:
+        return Colors.grey.shade600;
+    }
+  }
+
+  String get _label {
+    switch (_normalized) {
+      case 'ongoing':
+      case 'in_progress':
+        return 'Ongoing';
+      case 'completed':
+        return 'Completed';
+      case 'cancelled':
+        return 'Cancelled';
+      case 'assigned':
+        return 'Assigned';
+      default:
+        return _formatLabel(status);
+    }
+  }
+
+  String _formatLabel(String input) {
+    final normalized = input.trim();
+    if (normalized.isEmpty) return 'Scheduled';
+    final segments = normalized
+        .split(RegExp(r'[\s_-]+'))
+        .where((segment) => segment.isNotEmpty)
+        .map(
+          (segment) =>
+              segment[0].toUpperCase() +
+              (segment.length > 1 ? segment.substring(1).toLowerCase() : ''),
+        )
+        .toList();
+    return segments.isEmpty ? 'Scheduled' : segments.join(' ');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _sectionBorderColor),
+        boxShadow: [_chipShadow],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 5,
+            height: 5,
+            decoration: BoxDecoration(color: _dotColor, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            _label,
+            style: const TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 10,
+              color: Colors.black87,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _ActionButton extends StatelessWidget {
@@ -380,13 +693,22 @@ class _ActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ElevatedButton(
-      onPressed: onPressed,
-      style: ElevatedButton.styleFrom(
-        minimumSize: const Size(160, 44),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+    return SizedBox(
+      height: 48,
+      child: ElevatedButton(
+        onPressed: onPressed,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: activityAccentBlue,
+          foregroundColor: Colors.white,
+          minimumSize: const Size(160, 48),
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          textStyle: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+        child: Text(label),
       ),
-      child: Text(label),
     );
   }
 }

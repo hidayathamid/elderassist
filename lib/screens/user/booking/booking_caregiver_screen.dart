@@ -727,13 +727,14 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   @override
   Widget build(BuildContext context) {
     final selectedAddress = widget.selectedAddress;
-    final String subtitle = selectedAddress.addressLine?.trim().isNotEmpty == true
+    final String subtitle =
+        selectedAddress.addressLine?.trim().isNotEmpty == true
         ? selectedAddress.addressLine!.trim()
         : (selectedAddress.subtitle.trim().isNotEmpty
-            ? selectedAddress.subtitle.trim()
-            : (widget.person.address.isNotEmpty
-                ? widget.person.address
-                : 'Care location'));
+              ? selectedAddress.subtitle.trim()
+              : (widget.person.address.isNotEmpty
+                    ? widget.person.address
+                    : 'Care location'));
     final double panelHeight = _currentSheetHeight(context);
     final double bottomInset = MediaQuery.of(context).padding.bottom;
     final double frontBottom = _hideFrontPanel
@@ -787,148 +788,148 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
           clipBehavior: Clip.hardEdge,
           child: Stack(
             children: [
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: _minSheetHeightPx(context),
-              child: GoogleMap(
-                initialCameraPosition: CameraPosition(
-                  target: _currentLatLng,
-                  zoom: 14.5,
-                ),
-                myLocationEnabled: false,
-                zoomControlsEnabled: false,
-                markers: _markers.isNotEmpty ? _markers : {_selectedMarker()},
-                polylines: _route,
-                onMapCreated: (c) {
-                  _mapController = c;
-                },
-              ),
-            ),
-            IgnorePointer(
-              ignoring: true,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
-                color: Colors.black.withValues(alpha: _backdropOpacity),
-              ),
-            ),
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              height: panelHeight,
-              child: ClipRRect(
-                borderRadius: panelBorderRadius,
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: panelBorderRadius,
-                    border: Border.all(color: Colors.grey[200]!),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Color(0x1F000000),
-                        blurRadius: 14,
-                        offset: Offset(0, -3),
-                      ),
-                    ],
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: _minSheetHeightPx(context),
+                child: GoogleMap(
+                  initialCameraPosition: CameraPosition(
+                    target: _currentLatLng,
+                    zoom: 14.5,
                   ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.max,
-                    children: [
-                      GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onVerticalDragStart: _onHandleDragStart,
-                        onVerticalDragUpdate: _onHandleDragUpdate,
-                        onVerticalDragEnd: _onHandleDragEnd,
-                        child: SizedBox(
-                          height: 42,
-                          width: double.infinity,
-                          child: Center(
-                            child: Container(
-                              width: 38,
-                              height: 4,
-                              decoration: BoxDecoration(
-                                color: Colors.grey[400],
-                                borderRadius: BorderRadius.circular(24),
+                  myLocationEnabled: false,
+                  zoomControlsEnabled: false,
+                  markers: _markers.isNotEmpty ? _markers : {_selectedMarker()},
+                  polylines: _route,
+                  onMapCreated: (c) {
+                    _mapController = c;
+                  },
+                ),
+              ),
+              IgnorePointer(
+                ignoring: true,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  color: Colors.black.withValues(alpha: _backdropOpacity),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: panelHeight,
+                child: ClipRRect(
+                  borderRadius: panelBorderRadius,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: panelBorderRadius,
+                      border: Border.all(color: Colors.grey[200]!),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x1F000000),
+                          blurRadius: 14,
+                          offset: Offset(0, -3),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.max,
+                      children: [
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onVerticalDragStart: _onHandleDragStart,
+                          onVerticalDragUpdate: _onHandleDragUpdate,
+                          onVerticalDragEnd: _onHandleDragEnd,
+                          child: SizedBox(
+                            height: 42,
+                            width: double.infinity,
+                            child: Center(
+                              child: Container(
+                                width: 38,
+                                height: 4,
+                                decoration: BoxDecoration(
+                                  color: Colors.grey[400],
+                                  borderRadius: BorderRadius.circular(24),
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                      _categoryTabs(show: _panelController.value > 0.05),
-                      const Divider(height: 1),
-                      Expanded(
-                        child: NotificationListener<ScrollNotification>(
-                          onNotification: (notification) {
-                            if (notification is ScrollUpdateNotification ||
-                                notification is ScrollEndNotification) {
-                              _handleScrollCategoryDetection();
-                            }
-                            return false;
-                          },
-                          child: ListView(
-                            key: _listKey,
-                            controller: _listController,
-                            padding: EdgeInsets.only(
-                              left: 12,
-                              right: 12,
-                              top: 8,
-                              bottom:
-                                  MediaQuery.of(context).padding.bottom + 160,
-                            ),
-                            children: [
-                              if (_loadingCaregivers)
-                                const Padding(
-                                  padding: EdgeInsets.all(24),
-                                  child: Center(
-                                    child: CircularProgressIndicator(),
-                                  ),
-                                )
-                              else if (_caregivers.isEmpty)
-                                Padding(
-                                  padding: EdgeInsets.all(24),
-                                  child: Center(
-                                    child: Text(
-                                      _errorMessage ??
-                                          'No caregivers available',
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w700,
-                                        color: Colors.black54,
+                        _categoryTabs(show: _panelController.value > 0.05),
+                        const Divider(height: 1),
+                        Expanded(
+                          child: NotificationListener<ScrollNotification>(
+                            onNotification: (notification) {
+                              if (notification is ScrollUpdateNotification ||
+                                  notification is ScrollEndNotification) {
+                                _handleScrollCategoryDetection();
+                              }
+                              return false;
+                            },
+                            child: ListView(
+                              key: _listKey,
+                              controller: _listController,
+                              padding: EdgeInsets.only(
+                                left: 12,
+                                right: 12,
+                                top: 8,
+                                bottom:
+                                    MediaQuery.of(context).padding.bottom + 160,
+                              ),
+                              children: [
+                                if (_loadingCaregivers)
+                                  const Padding(
+                                    padding: EdgeInsets.all(24),
+                                    child: Center(
+                                      child: CircularProgressIndicator(),
+                                    ),
+                                  )
+                                else if (_caregivers.isEmpty)
+                                  Padding(
+                                    padding: EdgeInsets.all(24),
+                                    child: Center(
+                                      child: Text(
+                                        _errorMessage ??
+                                            'No caregivers available',
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w700,
+                                          color: Colors.black54,
+                                        ),
                                       ),
                                     ),
+                                  )
+                                else
+                                  ...CaregiverCategory.values.map(
+                                    _categorySection,
                                   ),
-                                )
-                              else
-                                ...CaregiverCategory.values.map(
-                                  _categorySection,
-                                ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-            AnimatedPositioned(
-              duration: const Duration(milliseconds: 240),
-              curve: Curves.easeOut,
-              left: 8,
-              right: 8,
-              bottom: frontBottom,
-              child: Container(
-                decoration: BoxDecoration(
-                  border: Border.all(
-                    color: Colors.grey.withOpacity(0.32),
-                    width: 1,
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 240),
+                curve: Curves.easeOut,
+                left: 8,
+                right: 8,
+                bottom: frontBottom,
+                child: Container(
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                      color: Colors.grey.withOpacity(0.32),
+                      width: 1,
+                    ),
+                    borderRadius: BorderRadius.circular(16),
                   ),
-                  borderRadius: BorderRadius.circular(16),
+                  child: _frontSheet(subtitle),
                 ),
-                child: _frontSheet(subtitle),
               ),
-            ),
             ],
           ),
         ),
@@ -943,11 +944,12 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     final addressLabel = selectedAddress.label?.trim().isNotEmpty == true
         ? selectedAddress.label!.trim()
         : labelFallback;
-    final trimmedAddressLine = selectedAddress.addressLine?.trim().isNotEmpty == true
+    final trimmedAddressLine =
+        selectedAddress.addressLine?.trim().isNotEmpty == true
         ? selectedAddress.addressLine!.trim()
         : (selectedAddress.subtitle.trim().isNotEmpty
-            ? selectedAddress.subtitle.trim()
-            : subtitle);
+              ? selectedAddress.subtitle.trim()
+              : subtitle);
     final frontSubtitle = addressLabel.isNotEmpty
         ? '$addressLabel · $trimmedAddressLine'
         : (trimmedAddressLine.isNotEmpty ? trimmedAddressLine : subtitle);
@@ -965,18 +967,18 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
             Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-              DefaultProfileAvatar(
-                radius: 18,
-                photoUrl: widget.person.photoUrl,
-                label: name,
-              ),
+                DefaultProfileAvatar(
+                  radius: 18,
+                  photoUrl: widget.person.photoUrl,
+                  label: name,
+                ),
                 const SizedBox(width: 8),
                 Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            name,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        name,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -1032,7 +1034,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     );
   }
 
-void _goToSummary({
+  void _goToSummary({
     DateTime? scheduleDate,
     TimeOfDay? startTime,
     TimeOfDay? endTime,
@@ -1195,7 +1197,8 @@ void _goToSummary({
         _selectedCaregiver?.id == caregiver.id &&
         _selectedCategory == tileCategory;
     final bool isRecommendation =
-        showRecommendationBadges && tileCategory == CaregiverCategory.recommendation;
+        showRecommendationBadges &&
+        tileCategory == CaregiverCategory.recommendation;
     final Color accent = isSelected
         ? const Color(0xFF00B8C6)
         : Colors.grey.withValues(alpha: 0.08);
@@ -1599,7 +1602,9 @@ void _goToSummary({
           padding: const EdgeInsets.only(right: 6),
           child: ServiceTagChip(
             label: s,
-            backgroundColor: matched ? _caregiverMatchBackground : _serviceTagBlue,
+            backgroundColor: matched
+                ? _caregiverMatchBackground
+                : _serviceTagBlue,
             foregroundColor: matched ? _caregiverMatchAccent : Colors.white,
             borderColor: matched ? _caregiverMatchAccent : _serviceTagBlue,
           ),

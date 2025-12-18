@@ -15,10 +15,18 @@ class ToyyibPayService {
   final String secretKey;
 
   String get _categoryOrEnv =>
-      categoryKey.isNotEmpty ? categoryKey : dotenv.env['TOYYIBPAY_CATEGORY_CODE'] ?? '';
+      categoryKey.isNotEmpty ? categoryKey : _envValue('TOYYIBPAY_CATEGORY_CODE') ?? '';
 
   String get _secretOrEnv =>
-      secretKey.isNotEmpty ? secretKey : dotenv.env['TOYYIBPAY_SECRET_KEY'] ?? '';
+      secretKey.isNotEmpty ? secretKey : _envValue('TOYYIBPAY_SECRET_KEY') ?? '';
+
+  String? _envValue(String key) {
+    try {
+      return dotenv.env[key];
+    } catch (_) {
+      return null;
+    }
+  }
 
   bool get isConfigured => _categoryOrEnv.isNotEmpty && _secretOrEnv.isNotEmpty;
 

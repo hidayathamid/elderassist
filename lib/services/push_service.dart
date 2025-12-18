@@ -49,18 +49,34 @@ class PushService {
       if (user == null) return;
       final token = await _fm.getToken();
       if (token != null) {
-        await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
-          'fcmToken': token,
-        });
+        await _saveToken(user.uid, token);
       }
       // token refresh
       FirebaseMessaging.instance.onTokenRefresh.listen((t) async {
-        await FirebaseFirestore.instance.collection('users').doc(user.uid).update({'fcmToken': t});
+        await _saveToken(user.uid, t);
       });
     } catch (_) {}
   }
 
-  void _handleNavigation(Map<String, dynamic> data, GlobalKey<NavigatorState> navKey) {
+  Future<void> _saveToken(String uid, String token) async {
+    final firestore = FirebaseFirestore.instance;
+    final caregiverRef = firestore.collection('caregivers').doc(uid);
+    final caregiverSnap = await caregiverRef.get();
+    if (caregiverSnap.exists) {
+      await caregiverRef.set({'fcmToken': token}, SetOptions(merge: true));
+      return;
+    }
+    final userRef = firestore.collection('users').doc(uid);
+    final userSnap = await userRef.get();
+    if (userSnap.exists) {
+      await userRef.set({'fcmToken': token}, SetOptions(merge: true));
+    }
+  }
+
+  void _handleNavigation(
+    Map<String, dynamic> data,
+    GlobalKey<NavigatorState> navKey,
+  ) {
     final chatId = data['chatId'] as String?;
     final otherId = data['otherUserId'] as String?;
     final otherName = data['otherUserName'] as String?;
@@ -78,4 +94,3 @@ class PushService {
     }
   }
 }
-

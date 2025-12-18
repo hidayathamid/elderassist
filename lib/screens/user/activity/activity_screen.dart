@@ -4,12 +4,19 @@ import 'package:flutter/material.dart';
 
 import '../../../services/auth_service.dart';
 import '../../../services/chat_service.dart';
+import '../chat/user_chat_list_screen.dart';
 import '../chat/user_chat_screen.dart';
 
 import 'activity_booking_details_screen.dart';
-import 'activity_edit_booking_screen.dart';
 import 'track_caregiver_screen.dart';
+import 'activity_review_screen.dart';
 import 'package:emergencies_disability_assistance_app/models/activity_booking.dart';
+import '../../../widgets/default_profile_avatar.dart';
+import '../../../widgets/standard_app_bar.dart';
+import '../booking/booking_summary_screen.dart';
+import '../booking/booking_person_screen.dart';
+import '../../../models/caregiver_model.dart';
+import 'package:intl/intl.dart';
 
 const Color activityBackgroundColor = Colors.white;
 const Color activityPrimaryTextColor = Color(0xFF1B1D29);
@@ -21,7 +28,9 @@ const Color activityCancelButtonColor = Color(0xFFF4B63D);
 const double activitySegmentRadius = 26.0;
 const double _pillButtonHeight = 34.0;
 const Color _avatarFallbackBackground = Color(0xFFB5D4D4);
-const TextStyle _activityDialogTitleStyle = TextStyle(fontWeight: FontWeight.w700);
+const TextStyle _activityDialogTitleStyle = TextStyle(
+  fontWeight: FontWeight.w700,
+);
 const TextStyle _activityDialogContentStyle = TextStyle(color: Colors.black87);
 
 final Color _activityCardBorderColor = Colors.grey.shade300;
@@ -67,20 +76,22 @@ class _ActivityScreenState extends State<ActivityScreen>
   late final Animation<Offset> _reasonSheetOffset;
   List<_EnrichedBooking>? _cachedEnriched;
   final Set<String> _hiddenHistoryBookings = <String>{};
-
-  static const Color _activityAppBarText = Color(0xFF1B1D29);
+  final ChatService _chatService = ChatService();
 
   BookingStatus _statusFromString(String status) {
-    switch (status.toUpperCase()) {
+    final normalized = status.toUpperCase();
+    switch (normalized) {
       case 'ONGOING':
       case 'IN_PROGRESS':
+      case 'ASSIGNED':
         return BookingStatus.ongoing;
       case 'COMPLETED':
+      case 'EMERGENCY':
         return BookingStatus.completed;
       case 'CANCELLED':
       case 'CANCELED':
         return BookingStatus.cancelled;
-      case 'ASSIGNED':
+      case 'SCHEDULED':
       case 'PENDING':
       default:
         return BookingStatus.pending;
@@ -113,12 +124,11 @@ class _ActivityScreenState extends State<ActivityScreen>
   }
 
   ActivityBooking _mapFromDoc(Map<String, dynamic> data, String docId) {
-    final date =
-        (data['date'] as String?) ?? (data['scheduledDate'] as String?) ?? '';
+    final date = (data['date'] as String?) ?? '';
     final time = (data['time'] as String?) ?? '';
-    final scheduledDate = (data['scheduledDate'] as String?) ?? date;
-    final startTime = (data['startTime'] as String?) ?? '';
-    final endTime = (data['endTime'] as String?) ?? '';
+    final scheduledDate = date;
+    final startTime = time;
+    final endTime = time;
     final paymentMethod = (data['paymentMethod'] as String?) ?? 'Unknown';
     final servicePrice = (data['servicePrice'] as num?)?.toDouble() ?? 0.0;
     final rawStatus = ((data['status'] as String?) ?? 'PENDING')
@@ -128,6 +138,9 @@ class _ActivityScreenState extends State<ActivityScreen>
     return ActivityBooking(
       id: docId,
       caregiverId: (data['caregiverId'] as String?) ?? '',
+      caregiverName: (data['caregiverName'] as String?) ?? '',
+      personId: (data['personId'] as String?) ?? '',
+      addressId: (data['addressId'] as String?) ?? '',
       personName: (data['personName'] as String?) ?? 'Family member',
       personAddress: (data['personAddress'] as String?) ?? '',
       service: (data['service'] as String?) ?? 'Home care',
@@ -150,6 +163,8 @@ class _ActivityScreenState extends State<ActivityScreen>
   ) async {
     final futures = docs.map((doc) async {
       final data = doc.data();
+      final hidden = (data['hidden'] as bool?) ?? false;
+      if (hidden) return null;
       final caregiverId = (data['caregiverId'] as String?) ?? '';
       final userId = (data['userId'] as String?) ?? '';
       final caregiverDoc = caregiverId.isNotEmpty
@@ -164,16 +179,33 @@ class _ActivityScreenState extends State<ActivityScreen>
                 .doc(userId)
                 .get()
           : null;
+      bool hasReview = false;
+      if (userId.isNotEmpty) {
+        try {
+          final reviewSnapshot = await FirebaseFirestore.instance
+              .collection('reviews')
+              .where('bookingId', isEqualTo: doc.id)
+              .where('userId', isEqualTo: userId)
+              .limit(1)
+              .get();
+          hasReview = reviewSnapshot.docs.isNotEmpty;
+        } catch (_) {
+          hasReview = false;
+        }
+      }
       return _EnrichedBooking(
         bookingId: doc.id,
         booking: _mapFromDoc(data, doc.id),
         status: (data['status'] as String?) ?? 'PENDING',
         caregiverId: caregiverId,
+        userId: userId,
+        hasReview: hasReview,
         caregiverData: caregiverDoc?.data(),
         userData: userDoc?.data(),
       );
     }).toList();
-    return Future.wait(futures);
+    final results = await Future.wait(futures);
+    return results.whereType<_EnrichedBooking>().toList();
   }
 
   @override
@@ -185,40 +217,75 @@ class _ActivityScreenState extends State<ActivityScreen>
       );
     }
 
+    final userId = user.uid;
     return Scaffold(
       backgroundColor: activityBackgroundColor,
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        centerTitle: true,
-        automaticallyImplyLeading: false,
-        flexibleSpace: Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.08),
-                blurRadius: 8,
-                offset: const Offset(0, 4),
-              ),
-            ],
-          ),
-          child: Container(
-            alignment: Alignment.bottomCenter,
-            child: Container(
-              height: 1,
-              color: Colors.black.withValues(alpha: 0.08),
+      appBar: buildProfileStyleAppBar(
+        title: 'Activity',
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: StreamBuilder<int>(
+              stream: _chatService.streamUnreadCountForUser(userId),
+              builder: (context, snapshot) {
+                final badgeCount = snapshot.data ?? 0;
+                return IconButton(
+                  onPressed: () async {
+                    if (!mounted) return;
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            const UserChatListScreen(showBackButton: true),
+                      ),
+                    );
+                  },
+                  icon: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Icon(
+                        Icons.chat_bubble_outline,
+                        color: activityPrimaryTextColor,
+                        size: 22,
+                      ),
+                      if (badgeCount > 0)
+                        Positioned(
+                          top: -2,
+                          right: -4,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: activityAccentBlue,
+                              borderRadius: BorderRadius.circular(999),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.1),
+                                  blurRadius: 6,
+                                  offset: const Offset(0, 2),
+                                ),
+                              ],
+                            ),
+                            child: Text(
+                              badgeCount.toString(),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 10,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  tooltip: 'Messages',
+                );
+              },
             ),
           ),
-        ),
-        title: const Text(
-          'Activity',
-          style: TextStyle(
-            color: _activityAppBarText,
-            fontWeight: FontWeight.w600,
-            fontSize: 18,
-          ),
-        ),
+        ],
       ),
       body: StreamBuilder<List<_EnrichedBooking>>(
         stream: _enrichedBookingsStream(user.uid),
@@ -256,6 +323,7 @@ class _ActivityScreenState extends State<ActivityScreen>
           booking: entry.booking,
           caregiverData: entry.caregiverData,
           userData: entry.userData,
+          hasReview: entry.hasReview,
         );
         if (!cancellable) return card;
         return Padding(
@@ -305,7 +373,7 @@ class _ActivityScreenState extends State<ActivityScreen>
     );
   }
 
-  Widget _buildDeleteBackground(ActivityBooking booking) {
+  Widget _buildDeleteBackground(_EnrichedBooking entry) {
     return Container(
       decoration: BoxDecoration(
         color: Colors.red.shade600,
@@ -318,7 +386,7 @@ class _ActivityScreenState extends State<ActivityScreen>
         color: Colors.transparent,
         child: InkWell(
           borderRadius: BorderRadius.circular(18),
-          onTap: () => _confirmRemoveHistory(booking),
+          onTap: () => _confirmRemoveHistory(entry),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.start,
             children: const [
@@ -338,7 +406,7 @@ class _ActivityScreenState extends State<ActivityScreen>
     );
   }
 
-  Future<void> _confirmRemoveHistory(ActivityBooking booking) async {
+  Future<void> _confirmRemoveHistory(_EnrichedBooking entry) async {
     final confirm = await showDialog<bool>(
       context: context,
       barrierDismissible: true,
@@ -400,9 +468,35 @@ class _ActivityScreenState extends State<ActivityScreen>
     );
     if (confirm != true || !mounted) return;
     setState(() {
-      _hiddenHistoryBookings.add(booking.id);
-      _resetSwipeFor = booking.id;
+      _hiddenHistoryBookings.add(entry.booking.id);
+      _resetSwipeFor = entry.booking.id;
     });
+    await _markBookingHidden(entry);
+  }
+
+  Future<void> _markBookingHidden(_EnrichedBooking entry) async {
+    final batch = FirebaseFirestore.instance.batch();
+    final bookingRef = FirebaseFirestore.instance
+        .collection('bookings')
+        .doc(entry.booking.id);
+    batch.set(bookingRef, {'hidden': true}, SetOptions(merge: true));
+    if (entry.userId.isNotEmpty) {
+      final userRef = FirebaseFirestore.instance
+          .collection('users')
+          .doc(entry.userId)
+          .collection('bookings')
+          .doc(entry.booking.id);
+      batch.set(userRef, {'hidden': true}, SetOptions(merge: true));
+    }
+    if (entry.caregiverId.isNotEmpty) {
+      final caregiverRef = FirebaseFirestore.instance
+          .collection('caregivers')
+          .doc(entry.caregiverId)
+          .collection('assignedBookings')
+          .doc(entry.booking.id);
+      batch.set(caregiverRef, {'hidden': true}, SetOptions(merge: true));
+    }
+    await batch.commit();
   }
 
   Widget _buildHistoryList(List<_EnrichedBooking> list) {
@@ -419,13 +513,14 @@ class _ActivityScreenState extends State<ActivityScreen>
           booking: entry.booking,
           caregiverData: entry.caregiverData,
           userData: entry.userData,
+          hasReview: entry.hasReview,
         );
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 2),
           child: _SwipeRevealCard(
             id: entry.booking.id,
             resetId: _resetSwipeFor,
-            background: _buildDeleteBackground(entry.booking),
+            background: _buildDeleteBackground(entry),
             revealExtent: _cancelRevealDistance,
             child: card,
           ),
@@ -446,9 +541,7 @@ class _ActivityScreenState extends State<ActivityScreen>
           .collection('bookings')
           .doc(booking.id)
           .update({'status': 'CANCELLED', 'cancellationReason': reason});
-      if (!mounted) return true;
-      messenger.showSnackBar(const SnackBar(content: Text('Booking canceled')));
-      return true;
+      return mounted;
     } catch (e) {
       if (!mounted) return false;
       messenger.showSnackBar(SnackBar(content: Text('Unable to cancel: $e')));
@@ -537,47 +630,63 @@ class _ActivityScreenState extends State<ActivityScreen>
                   horizontal: 16,
                   vertical: 12,
                 ),
-                child: Container(
-                  height: 46,
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(activitySegmentRadius),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.04),
-                        blurRadius: 10,
-                        offset: const Offset(0, 4),
+                child: SizedBox(
+                  height: 38,
+                  child: Stack(
+                    children: [
+                      Container(
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          border: Border.all(color: Colors.grey.shade300),
+                          borderRadius: BorderRadius.circular(
+                            activitySegmentRadius,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.04),
+                              blurRadius: 10,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
                       ),
-                    ],
-                  ),
-                  child: TabBar(
-                    indicator: BoxDecoration(
-                      color: activityIndicatorColor,
-                      borderRadius: BorderRadius.circular(
-                        activitySegmentRadius,
+                      Positioned.fill(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(
+                            activitySegmentRadius,
+                          ),
+                          child: TabBar(
+                            indicator: BoxDecoration(
+                              color: activityIndicatorColor,
+                              borderRadius: BorderRadius.circular(
+                                activitySegmentRadius,
+                              ),
+                            ),
+                            indicatorPadding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 6,
+                            ),
+                            indicatorSize: TabBarIndicatorSize.tab,
+                            labelStyle: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13,
+                            ),
+                            labelColor: Colors.black,
+                            unselectedLabelColor: Colors.black54,
+                            tabs: const [
+                              Tab(text: 'Upcoming'),
+                              Tab(text: 'History'),
+                            ],
+                          ),
+                        ),
                       ),
-                    ),
-                    indicatorPadding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 6,
-                    ),
-                    indicatorSize: TabBarIndicatorSize.tab,
-                    labelStyle: const TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13,
-                    ),
-                    labelColor: Colors.black,
-                    unselectedLabelColor: Colors.black54,
-                    tabs: const [
-                      Tab(text: 'Upcoming'),
-                      Tab(text: 'History'),
                     ],
                   ),
                 ),
               ),
               Expanded(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
                   child: TabBarView(
                     physics: const NeverScrollableScrollPhysics(),
                     children: [
@@ -976,6 +1085,8 @@ class _EnrichedBooking {
     required this.booking,
     required this.status,
     required this.caregiverId,
+    required this.userId,
+    required this.hasReview,
     this.caregiverData,
     this.userData,
   });
@@ -984,6 +1095,8 @@ class _EnrichedBooking {
   final ActivityBooking booking;
   final String status;
   final String caregiverId;
+  final String userId;
+  final bool hasReview;
   final Map<String, dynamic>? caregiverData;
   final Map<String, dynamic>? userData;
 }
@@ -994,11 +1107,13 @@ class ActivityBookingCard extends StatefulWidget {
     required this.booking,
     this.caregiverData,
     this.userData,
+    this.hasReview = false,
   });
 
   final ActivityBooking booking;
   final Map<String, dynamic>? caregiverData;
   final Map<String, dynamic>? userData;
+  final bool hasReview;
 
   @override
   State<ActivityBookingCard> createState() => _ActivityBookingCardState();
@@ -1024,9 +1139,13 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
 
       final userId = _auth.userId;
       final navigator = Navigator.of(context);
+      final caregiverName = await _loadCaregiverName();
 
       final chatId = await _chatService.createOrGetChat(userId, caregiverId);
-      final caregiverName = await _loadCaregiverName();
+      if (chatId.isNotEmpty) {
+        await _chatService.setChatLabel(chatId, caregiverName);
+      }
+      if (chatId.isEmpty) return;
       if (!mounted) return;
       navigator.push(
         MaterialPageRoute(
@@ -1063,7 +1182,7 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
       navigator.push(
         MaterialPageRoute(
           builder: (_) => TrackCaregiverScreen(
-            caregiverId: caregiverId,
+            bookingId: widget.booking.id,
             caregiverName: caregiverName,
           ),
         ),
@@ -1093,48 +1212,299 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
     );
   }
 
-  String? _extractPersonAddress(Map<String, dynamic>? userData) {
-    if (userData == null) return null;
-    final primary = _pickFirstAddressCandidate(userData);
-    if (primary != null) return primary;
-
-    final nested = userData['addresses'] ?? userData['addressList'];
-    if (nested is Iterable) {
-      for (final entry in nested) {
-        if (entry is Map<String, dynamic>) {
-          final nestedAddress = _extractAddressFromMap(entry);
-          if (nestedAddress != null) return nestedAddress;
-        } else if (entry is String && entry.trim().isNotEmpty) {
-          return entry.trim();
-        }
-      }
-    } else if (nested is Map<String, dynamic>) {
-      return _extractAddressFromMap(nested);
-    }
-    return null;
-  }
-
-  String? _pickFirstAddressCandidate(Map<String, dynamic> data) {
-    for (final key in ['address', 'addressLine', 'street', 'location']) {
-      final value = data[key];
-      if (value is String && value.trim().isNotEmpty) {
-        return value.trim();
-      }
-    }
-    return null;
-  }
-
-  String? _extractAddressFromMap(Map<String, dynamic> map) {
-    return _pickFirstAddressCandidate(map);
-  }
-
-  void _editBooking(BuildContext context) {
-    Navigator.push(
+  Future<void> _openRateReview(BuildContext context) async {
+    final result = await Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => ActivityEditBookingScreen(booking: widget.booking),
+        builder: (_) => ActivityReviewScreen(
+          bookingId: widget.booking.id,
+          booking: widget.booking,
+          caregiverData: widget.caregiverData,
+        ),
       ),
     );
+    if (!mounted) return;
+    if (result == 'history') {
+      final tabController = DefaultTabController.of(context);
+      tabController.animateTo(1);
+    }
+  }
+
+  Future<void> _editBooking(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final rootNavigator = Navigator.of(context, rootNavigator: true);
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+    try {
+      final caregiverMap =
+          widget.caregiverData ??
+          (await FirebaseFirestore.instance
+                  .collection('caregivers')
+                  .doc(widget.booking.caregiverId)
+                  .get())
+              .data() ??
+          <String, dynamic>{};
+      final caregiver = CaregiverModel.safeFromMap(
+        widget.booking.caregiverId,
+        caregiverMap,
+      );
+      final personProfile = _buildPersonProfile();
+      final selectedAddress = _buildSelectedAddress(personProfile);
+      final scheduleDate =
+          _parseBookingDate(widget.booking.date) ?? DateTime.now();
+      final startTime =
+          _parseBookingTime(widget.booking.time) ??
+          const TimeOfDay(hour: 8, minute: 0);
+      final endTime = _addHourToTime(startTime);
+
+      rootNavigator.pop();
+
+      if (!context.mounted) return;
+      final updated = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => BookingSummaryScreen(
+            person: personProfile,
+            caregiver: caregiver,
+            scheduleDate: scheduleDate,
+            startTime: startTime,
+            endTime: endTime,
+            price: widget.booking.servicePrice,
+            selectedAddress: selectedAddress,
+            showScheduleSection: true,
+            editingBookingId: widget.booking.id,
+            lockedService: widget.booking.service,
+            lockedPaymentMethod: widget.booking.paymentMethod,
+            readOnlyServiceAndPayment: true,
+            enableClientAddressSelection: true,
+          ),
+        ),
+      );
+      if (updated == true && mounted) {
+        setState(() {});
+      }
+    } catch (e) {
+      rootNavigator.pop();
+      messenger.showSnackBar(
+        SnackBar(content: Text('Unable to open booking for edit: $e')),
+      );
+    }
+  }
+
+  PersonProfile _buildPersonProfile() {
+    final data = widget.userData ?? const <String, dynamic>{};
+    final selectedEntry =
+        _addressEntryForPerson(
+          data,
+          widget.booking.personId,
+          widget.booking.id,
+          widget.booking.addressId,
+        ) ??
+        _primaryAddressMap(data);
+    final rawName =
+        _stringValue(selectedEntry?['name']) ??
+        (data['name'] as String?)?.trim() ??
+        widget.booking.personName;
+    final rawPhone =
+        _stringValue(selectedEntry?['phone']) ??
+        (data['phone'] as String?)?.trim();
+    final rawLabel =
+        _stringValue(selectedEntry?['label']) ??
+        _stringValue(selectedEntry?['forWho']) ??
+        (data['addressLabel'] as String?);
+    final addressText =
+        _stringValue(
+          selectedEntry?['address'] ??
+              selectedEntry?['addressLine'] ??
+              selectedEntry?['location'] ??
+              selectedEntry?['street'],
+        ) ??
+        widget.booking.personAddress;
+    final latitude = (selectedEntry?['lat'] as num?)?.toDouble();
+    final longitude = (selectedEntry?['lng'] as num?)?.toDouble();
+    final fallbackId = widget.booking.personId.isNotEmpty
+        ? widget.booking.personId
+        : widget.booking.id;
+    final profileId =
+        _stringValue(selectedEntry?['id']) ??
+        _stringValue(data['id']) ??
+        fallbackId;
+    return PersonProfile(
+      id: profileId,
+      name: rawName,
+      age: (data['age'] as num?)?.toInt() ?? 0,
+      address: addressText,
+      conditions: const [],
+      photoUrl:
+          (selectedEntry?['photoUrl'] as String?) ??
+          (data['photoUrl'] as String?) ??
+          '',
+      label: (rawLabel != null && rawLabel.trim().isNotEmpty)
+          ? rawLabel.trim()
+          : null,
+      phone: (rawPhone != null && rawPhone.isNotEmpty) ? rawPhone : '',
+      notes: widget.booking.notes ?? '',
+      latitude: latitude,
+      longitude: longitude,
+    );
+  }
+
+  AddressItem _buildSelectedAddress(PersonProfile person) {
+    final selectedEntry =
+        _addressEntryForPerson(
+          widget.userData,
+          widget.booking.personId,
+          widget.booking.id,
+          widget.booking.addressId,
+        ) ??
+        _primaryAddressMap(widget.userData);
+    final label =
+        _stringValue(selectedEntry?['label']) ??
+        _stringValue(selectedEntry?['forWho']);
+    final addressLine = _stringValue(
+      selectedEntry?['address'] ??
+          selectedEntry?['addressLine'] ??
+          widget.booking.personAddress,
+    );
+    final lat = (selectedEntry?['lat'] as num?)?.toDouble();
+    final long =
+        (selectedEntry?['lng'] as num?)?.toDouble() ??
+        (selectedEntry?['long'] as num?)?.toDouble();
+    final entryId = _stringValue(selectedEntry?['id']);
+    final fallbackId = widget.booking.personId.isNotEmpty
+        ? widget.booking.personId
+        : widget.booking.id;
+    return AddressItem(
+      id: entryId ?? fallbackId,
+      title: _stringValue(selectedEntry?['name']) ?? person.name,
+      subtitle: widget.booking.personAddress,
+      addressLine: addressLine ?? widget.booking.personAddress,
+      label: label?.trim().isNotEmpty == true ? label!.trim() : null,
+      forWho: person.name,
+      lat: lat,
+      long: long,
+    );
+  }
+
+  Map<String, dynamic>? _primaryAddressMap(Map<String, dynamic>? data) {
+    final entries = _addressEntries(data);
+    if (entries.isEmpty) return null;
+    final defaultEntry = entries.firstWhere(
+      (entry) => entry['isDefault'] == true,
+      orElse: () => entries.first,
+    );
+    return defaultEntry;
+  }
+
+  Map<String, dynamic>? _addressEntryForPerson(
+    Map<String, dynamic>? data,
+    String personId,
+    String bookingId,
+    String addressId,
+  ) {
+    final entries = _addressEntries(data);
+    if (addressId.trim().isNotEmpty) {
+      for (final entry in entries) {
+        final entryId = entry['id']?.toString();
+        if (entryId != null && entryId == addressId) {
+          return entry;
+        }
+      }
+    }
+    if (personId.trim().isNotEmpty) {
+      for (final entry in entries) {
+        final entryId = entry['id']?.toString();
+        if (entryId != null && entryId == personId) {
+          return entry;
+        }
+      }
+    } else if (bookingId.trim().isNotEmpty) {
+      for (final entry in entries) {
+        final entryBookingId = entry['bookingId']?.toString();
+        if (entryBookingId != null && entryBookingId == bookingId) {
+          return entry;
+        }
+      }
+    }
+    return null;
+  }
+
+  List<Map<String, dynamic>> _addressEntries(Map<String, dynamic>? data) {
+    if (data == null) return [];
+    final raw = data['address'] ?? data['addresses'] ?? data['addressList'];
+    return _extractAddressList(raw);
+  }
+
+  List<Map<String, dynamic>> _extractAddressList(dynamic raw) {
+    if (raw is Map) {
+      return [Map<String, dynamic>.from(raw)];
+    }
+    if (raw is Iterable) {
+      return raw
+          .whereType<Map>()
+          .map((entry) => Map<String, dynamic>.from(entry))
+          .toList();
+    }
+    return [];
+  }
+
+  String? _stringValue(dynamic value) {
+    if (value is String && value.trim().isNotEmpty) {
+      return value.trim();
+    }
+    if (value is Iterable) {
+      final joinable = value.whereType<String>().toList();
+      if (joinable.isNotEmpty) {
+        return joinable.join(', ');
+      }
+    }
+    if (value != null) return value.toString();
+    return null;
+  }
+
+  DateTime? _parseBookingDate(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return null;
+    final trimmed = raw.trim();
+    try {
+      return DateTime.parse(trimmed);
+    } catch (_) {
+      try {
+        return DateFormat('dd/MM/yyyy').parse(trimmed);
+      } catch (_) {
+        return null;
+      }
+    }
+  }
+
+  TimeOfDay? _parseBookingTime(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return null;
+    final trimmed = raw.trim();
+    final formats = ['HH:mm', 'H:mm', 'hh:mm a', 'h:mm a'];
+    for (final pattern in formats) {
+      try {
+        final dt = DateFormat(pattern).parse(trimmed);
+        return TimeOfDay(hour: dt.hour, minute: dt.minute);
+      } catch (_) {}
+    }
+    final numeric = trimmed.split(':');
+    if (numeric.length >= 2) {
+      final hour = int.tryParse(numeric[0]);
+      final minute = int.tryParse(numeric[1].replaceAll(RegExp('[^0-9]'), ''));
+      if (hour != null && minute != null) {
+        return TimeOfDay(hour: hour, minute: minute);
+      }
+    }
+    return null;
+  }
+
+  TimeOfDay _addHourToTime(TimeOfDay base) {
+    final totalMinutes = base.hour * 60 + base.minute + 60;
+    final hour = (totalMinutes ~/ 60) % 24;
+    final minute = totalMinutes % 60;
+    return TimeOfDay(hour: hour, minute: minute);
   }
 
   Future<String> _loadCaregiverName() async {
@@ -1146,6 +1516,7 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
   }
 
   List<_ActionConfig> _actionButtons(BuildContext context) {
+    final alreadyReviewed = widget.hasReview;
     final chatButton = _ActionConfig(
       label: 'Chat',
       icon: Icons.chat_bubble_outline,
@@ -1153,50 +1524,99 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
       kind: _ActionButtonKind.circle,
     );
 
-    switch (widget.booking.status) {
-      case BookingStatus.pending:
-        return [
-          _ActionConfig(
-            label: 'View Details',
-            onPressed: () => _openDetails(context),
-            tone: _PillTone.teal,
-            icon: Icons.remove_red_eye_outlined,
-          ),
-          _ActionConfig(
-            label: 'Edit',
-            onPressed: () => _editBooking(context),
-            icon: Icons.edit_outlined,
-          ),
-          chatButton,
-        ];
-      case BookingStatus.ongoing:
-        return [
-          _ActionConfig(
-            label: 'Track',
-            onPressed: () => _openTrack(context),
-            icon: Icons.navigation_outlined,
-            tone: _PillTone.yellow,
-          ),
-          chatButton,
-        ];
-      case BookingStatus.completed:
-        return [
-          _ActionConfig(
-            label: 'View Details',
-            onPressed: () => _openDetails(context),
-            icon: Icons.info_outline,
-          ),
-          chatButton,
-        ];
-      case BookingStatus.cancelled:
-        return [
-          _ActionConfig(
-            label: 'View Details',
-            onPressed: () => _openDetails(context),
-            icon: Icons.info_outline,
-          ),
-        ];
+    final normalizedStatus = widget.booking.rawStatus.trim().toUpperCase();
+    final isScheduled =
+        normalizedStatus == 'SCHEDULED' || normalizedStatus == 'PENDING';
+    final isAssigned = normalizedStatus == 'ASSIGNED';
+    final isOngoing =
+        normalizedStatus == 'ONGOING' || normalizedStatus == 'IN_PROGRESS';
+    final isCancelled =
+        normalizedStatus == 'CANCELLED' || normalizedStatus == 'CANCELED';
+    final isEmergency = normalizedStatus == 'EMERGENCY';
+    final isCompleted = normalizedStatus == 'COMPLETED';
+
+    if (isScheduled) {
+      return [
+        _ActionConfig(
+          label: 'View Details',
+          onPressed: () => _openDetails(context),
+          tone: _PillTone.teal,
+          icon: Icons.remove_red_eye_outlined,
+        ),
+        _ActionConfig(
+          label: 'Edit',
+          onPressed: () => _editBooking(context),
+          icon: Icons.edit_outlined,
+        ),
+        chatButton,
+      ];
     }
+
+    if (isAssigned) {
+      return [
+        _ActionConfig(
+          label: 'Track',
+          onPressed: () => _openTrack(context),
+          icon: Icons.navigation_outlined,
+          tone: _PillTone.teal,
+        ),
+        _ActionConfig(
+          label: 'View Details',
+          onPressed: () => _openDetails(context),
+          icon: Icons.info_outline,
+        ),
+        chatButton,
+      ];
+    }
+
+    if (isOngoing) {
+      return [
+        _ActionConfig(
+          label: 'Track',
+          onPressed: () => _openTrack(context),
+          icon: Icons.navigation_outlined,
+          tone: _PillTone.teal,
+        ),
+        chatButton,
+      ];
+    }
+
+    if (isEmergency || isCompleted) {
+      return [
+        _ActionConfig(
+          label: 'View Details',
+          onPressed: () => _openDetails(context),
+          icon: Icons.info_outline,
+        ),
+        _ActionConfig(
+          label: alreadyReviewed ? 'Reviewed' : 'Rate & Review',
+          onPressed: alreadyReviewed ? null : () => _openRateReview(context),
+          icon: Icons.star_rate_rounded,
+          tone: alreadyReviewed ? _PillTone.outline : _PillTone.teal,
+          enabled: !alreadyReviewed,
+        ),
+      ];
+    }
+
+    if (isCancelled) {
+      return [
+        _ActionConfig(
+          label: 'View Details',
+          onPressed: () => _openDetails(context),
+          icon: Icons.info_outline,
+        ),
+      ];
+    }
+
+    // Fallback for any other status
+    return [
+      _ActionConfig(
+        label: 'View Details',
+        onPressed: () => _openDetails(context),
+        icon: Icons.info_outline,
+      ),
+      chatButton,
+    ];
   }
 
   @override
@@ -1222,21 +1642,25 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
     Map<String, dynamic> caregiverData,
     Map<String, dynamic>? userData,
   ) {
-    final caregiverName =
-        (caregiverData['name'] as String?)?.trim().isNotEmpty == true
-        ? caregiverData['name'] as String
-        : 'Caregiver';
+    final caregiverNameCandidate =
+        (caregiverData['name'] as String?)?.trim() ?? '';
+    final caregiverName = widget.booking.caregiverName.isNotEmpty
+        ? widget.booking.caregiverName
+        : (caregiverNameCandidate.isNotEmpty
+              ? caregiverNameCandidate
+              : 'Caregiver');
     final rawPhoto = (caregiverData['photoUrl'] as String?)?.trim();
     final hasPhoto = rawPhoto?.isNotEmpty == true;
     final caregiverPhoto = hasPhoto ? rawPhoto! : null;
     final specialization = (caregiverData['specialization'] as String?) ?? '';
-    final personNameCandidate =
-        (userData?['name'] as String?)?.trim() ?? widget.booking.personName;
-    final personName = personNameCandidate.isNotEmpty
-        ? personNameCandidate
-        : 'Family member';
-    final personAddress =
-        _extractPersonAddress(userData) ?? widget.booking.personAddress;
+    final personProfile = _buildPersonProfile();
+    final personName = widget.booking.personName.isNotEmpty
+        ? widget.booking.personName
+        : personProfile.name;
+    final personAddress = widget.booking.personAddress.isNotEmpty
+        ? widget.booking.personAddress
+        : personProfile.address;
+    final personLabel = personProfile.label;
 
     return Container(
       clipBehavior: Clip.hardEdge,
@@ -1368,17 +1792,12 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
               ),
               child: Row(
                 children: [
-                  CircleAvatar(
+                  DefaultProfileAvatar(
                     radius: 14,
-                    backgroundColor: _avatarFallbackBackground,
-                    child: Text(
-                      personName.isNotEmpty ? personName[0].toUpperCase() : '?',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
-                        color: Colors.black54,
-                      ),
-                    ),
+                    photoUrl: personProfile.photoUrl.trim().isNotEmpty
+                        ? personProfile.photoUrl.trim()
+                        : null,
+                    label: personName,
                   ),
                   const SizedBox(width: 8),
                   Expanded(
@@ -1392,6 +1811,16 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
                             fontSize: 11,
                           ),
                         ),
+                        if (personLabel?.isNotEmpty == true) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            personLabel!,
+                            style: const TextStyle(
+                              fontSize: 9,
+                              color: Colors.black54,
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 2),
                         Text(
                           personAddress,
@@ -1532,11 +1961,12 @@ class _CircleActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isEnabled = action.enabled && action.onPressed != null;
     return SizedBox(
       width: 40,
       height: 40,
       child: OutlinedButton(
-        onPressed: action.onPressed,
+        onPressed: isEnabled ? action.onPressed : null,
         style: OutlinedButton.styleFrom(
           shape: const CircleBorder(),
           padding: EdgeInsets.zero,
@@ -1548,7 +1978,7 @@ class _CircleActionButton extends StatelessWidget {
         child: Icon(
           action.icon ?? Icons.chat_bubble_outline,
           size: 18,
-          color: Colors.black54,
+          color: isEnabled ? Colors.black54 : Colors.black26,
         ),
       ),
     );
@@ -1565,6 +1995,7 @@ class _PillActionButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const radius = BorderRadius.all(Radius.circular(22));
+    final isEnabled = action.enabled && action.onPressed != null;
     final child = Row(
       mainAxisSize: MainAxisSize.min,
       mainAxisAlignment: MainAxisAlignment.center,
@@ -1574,10 +2005,10 @@ class _PillActionButton extends StatelessWidget {
             action.icon,
             size: 16,
             color: action.tone == _PillTone.teal
-                ? Colors.white
+                ? (isEnabled ? Colors.white : Colors.white70)
                 : action.tone == _PillTone.yellow
-                ? Colors.black87
-                : Colors.black87,
+                ? (isEnabled ? Colors.black87 : Colors.black45)
+                : (isEnabled ? Colors.black87 : Colors.black38),
           ),
           const SizedBox(width: 6),
         ],
@@ -1587,10 +2018,10 @@ class _PillActionButton extends StatelessWidget {
             fontWeight: FontWeight.w700,
             fontSize: 13,
             color: action.tone == _PillTone.teal
-                ? Colors.white
+                ? (isEnabled ? Colors.white : Colors.white70)
                 : action.tone == _PillTone.yellow
-                ? Colors.black87
-                : Colors.black87,
+                ? (isEnabled ? Colors.black87 : Colors.black45)
+                : (isEnabled ? Colors.black87 : Colors.black38),
           ),
         ),
       ],
@@ -1635,12 +2066,12 @@ class _PillActionButton extends StatelessWidget {
 
     return action.tone == _PillTone.outline
         ? OutlinedButton(
-            onPressed: action.onPressed,
+            onPressed: isEnabled ? action.onPressed : null,
             style: style,
             child: child,
           )
         : ElevatedButton(
-            onPressed: action.onPressed,
+            onPressed: isEnabled ? action.onPressed : null,
             style: style,
             child: child,
           );
@@ -1656,6 +2087,7 @@ class _ActionConfig {
     this.onPressed,
     this.tone = _PillTone.outline,
     this.kind = _ActionButtonKind.pill,
+    this.enabled = true,
   });
 
   final String label;
@@ -1663,4 +2095,5 @@ class _ActionConfig {
   final VoidCallback? onPressed;
   final _PillTone tone;
   final _ActionButtonKind kind;
+  final bool enabled;
 }

@@ -7,24 +7,34 @@ import 'profile_address_edit_screen.dart';
 import 'profile_overview_screen.dart';
 
 const Color _profileDarkText = Color(0xFF1B1D29);
+const Color _tealAccent = Color(0xFF00B8C6);
+const Color _accentGold = Color(0xFFF4B63D);
 
-class ProfileAddressesScreen extends StatelessWidget {
-  const ProfileAddressesScreen({super.key});
+class ProfileAddressesScreen extends StatefulWidget {
+  const ProfileAddressesScreen({
+    super.key,
+    this.selectionMode = false,
+    this.selectionModeForBookingEdit = false,
+  });
 
-  IconData _getIcon(String label) {
-    switch (label) {
-      case "Home":
-        return Icons.home_rounded;
-      case "Office":
-        return Icons.apartment_rounded;
-      case "Parents":
-        return Icons.group_rounded;
-      case "Kampung":
-        return Icons.park_rounded;
-      default:
-        return Icons.location_on_rounded;
-    }
-  }
+  final bool selectionMode;
+  final bool selectionModeForBookingEdit;
+
+  @override
+  State<ProfileAddressesScreen> createState() => _ProfileAddressesScreenState();
+}
+
+class _ProfileAddressesScreenState extends State<ProfileAddressesScreen> {
+  String? _selectedAddressId;
+  Map<String, dynamic>? _selectedAddress;
+
+  bool get _isSelectionMode => widget.selectionMode;
+  bool get _isBookingEditSelectionMode =>
+      widget.selectionMode && widget.selectionModeForBookingEdit;
+  bool get _showAddCard =>
+      !_isSelectionMode || widget.selectionModeForBookingEdit == false;
+  bool get _showActionButtons =>
+      !_isSelectionMode || widget.selectionModeForBookingEdit == false;
 
   Future<void> _setAsDefault(String userId, String addressId) async {
     final userRef = FirebaseFirestore.instance.collection("users").doc(userId);
@@ -146,18 +156,20 @@ class ProfileAddressesScreen extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const SizedBox(height: 2),
-                _DashedAddCard(
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => const ProfileAddressEditScreen(),
-                      ),
-                    );
-                  },
-                ),
-                const SizedBox(height: 12),
+                if (_showAddCard) ...[
+                  const SizedBox(height: 2),
+                  _DashedAddCard(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const ProfileAddressEditScreen(),
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 if (sortedDocs.isEmpty)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 12),
@@ -191,6 +203,19 @@ class ProfileAddressesScreen extends StatelessWidget {
                       address: entry["address"] ?? "",
                       label: label,
                       isDefault: isDefault,
+                      isSelected: _isSelectionMode && id == _selectedAddressId,
+                      selectionMode: _isSelectionMode,
+                      compact: _isBookingEditSelectionMode,
+                      showActions: _showActionButtons,
+                      onSelect: _isSelectionMode
+                          ? () {
+                              setState(() {
+                                _selectedAddressId = id;
+                                _selectedAddress =
+                                    Map<String, dynamic>.from(entry);
+                              });
+                            }
+                          : null,
                       onEdit: () {
                         if (id?.isEmpty ?? true) return;
                         Navigator.push(
@@ -215,6 +240,31 @@ class ProfileAddressesScreen extends StatelessWidget {
           );
         },
       ),
+      bottomNavigationBar: _isSelectionMode
+          ? SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: ElevatedButton(
+                  onPressed: _selectedAddress == null
+                      ? null
+                      : () => Navigator.of(context).pop(_selectedAddress),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _accentGold,
+                    foregroundColor: Colors.black,
+                    minimumSize: const Size.fromHeight(48),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    textStyle: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14,
+                    ),
+                  ),
+                  child: const Text('Choose this person'),
+                ),
+              ),
+            )
+          : null,
     );
   }
 
@@ -293,6 +343,11 @@ class _AddressCard extends StatelessWidget {
   final VoidCallback onEdit;
   final VoidCallback? onSetDefault;
   final VoidCallback onDelete;
+  final VoidCallback? onSelect;
+  final bool isSelected;
+  final bool selectionMode;
+  final bool compact;
+  final bool showActions;
 
   const _AddressCard({
     required this.id,
@@ -304,17 +359,29 @@ class _AddressCard extends StatelessWidget {
     required this.onEdit,
     required this.onSetDefault,
     required this.onDelete,
+    this.onSelect,
+    this.isSelected = false,
+    this.selectionMode = false,
+    this.compact = false,
+    this.showActions = true,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    final borderColor = isSelected ? _tealAccent : Colors.grey.shade300;
+    final double borderWidth = isSelected ? 1.6 : 1.0;
+    final cardColor = isSelected ? const Color(0xFFE4F4FF) : Colors.white;
+    final horizontalPadding = compact ? 10.0 : 12.0;
+    final verticalPadding = compact ? 6.0 : 8.0;
+    final dividerPadding = compact ? 4.0 : 6.0;
+
+    final cardContent = Container(
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: cardColor,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
-          color: Colors.grey.shade300,
-          width: 1,
+          color: borderColor,
+          width: borderWidth,
         ),
         boxShadow: [
           BoxShadow(
@@ -329,11 +396,15 @@ class _AddressCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
+            padding: EdgeInsets.symmetric(
+              horizontal: horizontalPadding,
+              vertical: verticalPadding,
+            ),
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 DefaultProfileAvatar(
-                  radius: 16,
+                  radius: compact ? 24 : 26,
                   label: name,
                 ),
                 const SizedBox(width: 10),
@@ -341,40 +412,16 @@ class _AddressCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              name,
-                              style: const TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.black87,
-                              ),
-                            ),
-                          ),
-                          if (isDefault)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.04),
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                              child: const Text(
-                                'Default',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                        ],
+                      Text(
+                        name,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.black87,
+                        ),
                       ),
                       if (label.isNotEmpty) ...[
-                        const SizedBox(height: 3),
+                        SizedBox(height: compact ? 2 : 4),
                         Text(
                           label,
                           style: TextStyle(
@@ -384,88 +431,109 @@ class _AddressCard extends StatelessWidget {
                           ),
                         ),
                       ],
-                      const SizedBox(height: 4),
-                      Text(
-                        phone,
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                          color: Colors.grey[700],
-                          height: 1.2,
+                      if (phone.isNotEmpty) ...[
+                        SizedBox(height: compact ? 2 : 4),
+                        Text(
+                          phone,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            color: Colors.grey[700],
+                            height: 1.2,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        address,
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                          color: Colors.grey[600],
-                          height: 1.3,
+                      ],
+                      if (address.isNotEmpty) ...[
+                        SizedBox(height: compact ? 2 : 4),
+                        Text(
+                          address,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            color: Colors.grey[600],
+                            height: 1.3,
+                          ),
                         ),
-                      ),
+                      ],
                     ],
                   ),
                 ),
+                if (selectionMode)
+                  const Padding(
+                    padding: EdgeInsets.only(left: 10),
+                    child: Center(
+                      child: Icon(
+                        Icons.chevron_right,
+                        size: 18,
+                        color: Colors.black26,
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
+            padding: EdgeInsets.symmetric(vertical: dividerPadding),
             child: Align(
               alignment: Alignment.center,
               child: FractionallySizedBox(
                 widthFactor: 0.85,
                 child: Container(
-                  height: 1.5,
+                  height: 1.2,
                   color: Colors.black.withAlpha(20),
                 ),
               ),
             ),
           ),
-          const SizedBox(height: 4),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _ActionButton(
-                    label: "Edit",
-                    icon: Icons.edit_outlined,
-                    onTap: onEdit,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _ActionButton(
-                    label: isDefault ? "Default" : "Set Default",
-                    icon: isDefault ? Icons.check : Icons.star_outline,
-                    isPrimary: !isDefault,
-                    onTap: onSetDefault,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                InkWell(
-                  onTap: onDelete,
-                  borderRadius: BorderRadius.circular(12),
-                  child: Container(
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      color: Colors.red.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(
-                      Icons.delete_outline,
-                      color: Colors.red,
-                      size: 18,
+          if (showActions)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _ActionButton(
+                      label: "Edit",
+                      icon: Icons.edit_outlined,
+                      onTap: onEdit,
                     ),
                   ),
-                ),
-              ],
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _ActionButton(
+                      label: isDefault ? "Default" : "Set Default",
+                      icon: isDefault ? Icons.check : Icons.star_outline,
+                      isPrimary: !isDefault,
+                      onTap: onSetDefault,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  InkWell(
+                    onTap: onDelete,
+                    borderRadius: BorderRadius.circular(12),
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(
+                        Icons.delete_outline,
+                        color: Colors.red,
+                        size: 18,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
         ],
       ),
+    );
+
+    return InkWell(
+      onTap: onSelect,
+      borderRadius: BorderRadius.circular(16),
+      child: cardContent,
     );
   }
 }

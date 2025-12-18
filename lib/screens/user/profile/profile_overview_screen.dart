@@ -6,10 +6,10 @@ import 'package:flutter/material.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
 import 'profile_addresses_screen.dart';
-import 'profile_edit_screen.dart';
 import 'profile_emergency_screen.dart';
 import 'profile_payments_screen.dart';
 import 'profile_services_screen.dart';
+import 'profile_edit_screen.dart';
 
 import '../../../models/activity_booking.dart';
 import '../../../models/user_model.dart';

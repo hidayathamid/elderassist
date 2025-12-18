@@ -1,258 +1,287 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+
 import 'package:emergencies_disability_assistance_app/widgets/layout_constants.dart';
 import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.dart';
 
-class SosFindingScreen extends StatefulWidget {
+import '../activity/activity_tracking_helpers.dart';
+import 'sos_tracking_screen.dart';
+
+const Color _sosShadowColor = Color(0xFFEBEDF0);
+const Color _sosTitleColor = Color(0xFF1B1D29);
+
+class SosFindingScreen extends StatelessWidget {
   const SosFindingScreen({super.key, required this.sosId});
 
   final String sosId;
 
   @override
-  State<SosFindingScreen> createState() => _SosFindingScreenState();
-}
-
-class _SosFindingScreenState extends State<SosFindingScreen>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _dotsController;
-
-  @override
-  void initState() {
-    super.initState();
-    _dotsController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat();
-  }
-
-  @override
-  void dispose() {
-    _dotsController.dispose();
-    super.dispose();
-  }
-
-  String _statusLabel(String status) {
-    switch (status.toUpperCase()) {
-      case 'ACCEPTED':
-        return 'Accepted';
-      case 'DECLINED':
-      case 'REJECTED':
-        return 'Declined';
-      case 'PENDING':
-        return 'Pending';
-      default:
-        return status;
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Scaffold(
-      backgroundColor: Colors.white,
       appBar: buildProfileStyleAppBar(
-        title: 'Finding caregivers',
-        onBack: () => Navigator.of(context).maybePop(),
+        title: 'SOS request',
+        onBack: () => Navigator.of(context).pop(),
       ),
-      body: Padding(
-        padding: kStandardScreenPadding,
-        child: Column(
-          children: [
-            const SizedBox(height: 32),
-            const Icon(Icons.search, size: 48),
-            const SizedBox(height: 12),
-            Text(
-              'Searching nearby caregivers...',
-              style: theme.textTheme.titleMedium,
-            ),
-            const SizedBox(height: 16),
-            AnimatedBuilder(
-              animation: _dotsController,
-              builder: (_, __) {
-                final progress = (_dotsController.value * 3).floor();
-                final dots = List.generate(
-                  3,
-                  (index) => Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 4),
-                    width: 12,
-                    height: 12,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: theme.colorScheme.primary.withOpacity(
-                        index == progress % 3 ? 1 : 0.3,
+      backgroundColor: Colors.white,
+      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+        stream:
+            FirebaseFirestore.instance.collection('sos').doc(sosId).snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Center(
+              child: Text('Unable to load SOS status: ${snapshot.error}'),
+            );
+          }
+          if (!snapshot.hasData || !snapshot.data!.exists) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          final sosData = snapshot.data!.data()!;
+          final status = (sosData['status'] as String?)?.toUpperCase() ?? 'SEARCHING';
+          final reason = (sosData['reason'] as String?) ?? 'SOS requested';
+          final address = (sosData['address'] as String?) ?? 'Address unavailable';
+          final caregiverId = (sosData['caregiverId'] as String?) ?? '';
+          final events = buildTimelineEvents(sosData);
+
+          return SingleChildScrollView(
+        padding: EdgeInsets.symmetric(
+          horizontal: kScreenHorizontalPaddingValue,
+          vertical: 16,
+        ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: Colors.grey[300]!),
+                    boxShadow: [
+                      BoxShadow(
+                        color: _sosShadowColor,
+                        blurRadius: 14,
+                        offset: const Offset(0, 6),
                       ),
-                    ),
+                    ],
                   ),
-                );
-                return Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: dots,
-                );
-              },
-            ),
-            const SizedBox(height: 32),
-            const Text(
-              'Notifying caregivers in your vicinity...',
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            Expanded(
-              child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-                stream: FirebaseFirestore.instance
-                    .collection('sos')
-                    .doc(widget.sosId)
-                    .snapshots(),
-                builder: (context, snapshot) {
-                  if (snapshot.hasError) {
-                    return Center(
-                      child: Text(
-                        'Unable to load responders: ${snapshot.error}',
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'We are finding helpers near ${address.split(',').first}',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: _sosTitleColor,
+                        ),
                       ),
-                    );
-                  }
-
-                  if (!snapshot.hasData || !snapshot.data!.exists) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-
-                  final status =
-                      (snapshot.data!.data()?['status'] as String?)
-                          ?.toUpperCase() ??
-                      'FINDING';
-
-                  if (status == 'NO_RESPONDER') {
-                    return Padding(
-                      padding: kHorizontalScreenPadding,
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
+                      const SizedBox(height: 6),
+                      Text(
+                        reason,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.black54,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
                         children: [
-                          const Icon(
-                            Icons.error_outline,
-                            size: 48,
-                            color: Colors.amber,
-                          ),
-                          const SizedBox(height: 16),
-                          const Text(
-                            'No caregivers were available right now. Please try again later.',
-                            textAlign: TextAlign.center,
-                          ),
-                          const SizedBox(height: 16),
-                          ElevatedButton(
-                            onPressed: () => Navigator.pop(context),
-                            child: const Text('Back'),
+                          Icon(Icons.location_pin,
+                              size: 18, color: Colors.grey[600]),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              address,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Colors.black54,
+                              ),
+                            ),
                           ),
                         ],
                       ),
-                    );
-                  }
-
-                  return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                    stream: FirebaseFirestore.instance
-                        .collection('sos')
-                        .doc(widget.sosId)
-                        .collection('responders')
-                        .orderBy('distanceKm')
-                        .snapshots(),
-                    builder: (context, responders) {
-                      if (responders.hasError) {
-                        return Center(
-                          child: Text(
-                            'Unable to load responders: ${responders.error}',
-                          ),
-                        );
-                      }
-
-                      if (!responders.hasData) {
-                        return const Center(child: CircularProgressIndicator());
-                      }
-
-                      final docs = responders.data!.docs;
-                      if (docs.isEmpty) {
-                        return const Center(
-                          child: Text('Waiting for responders...'),
-                        );
-                      }
-
-                      return ListView.separated(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 8,
+                      const SizedBox(height: 10),
+                      Text(
+                        'Status: $status',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color:
+                              status == 'RESOLVED' ? Colors.green : Colors.black87,
                         ),
-                        itemCount: docs.length,
-                        separatorBuilder: (_, __) => const SizedBox(height: 12),
-                        itemBuilder: (context, index) {
-                          final responderData = docs[index].data();
-                          final caregiverName =
-                              responderData['caregiverName'] as String? ??
-                              'Caregiver';
-                          final photoUrl =
-                              responderData['caregiverPhoto'] as String?;
-                          final distanceKm =
-                              (responderData['distanceKm'] as num?)?.toDouble();
-                          final statusValue =
-                              (responderData['status'] as String?)
-                                  ?.toUpperCase() ??
-                              'PENDING';
-                          final initials = caregiverName.isNotEmpty
-                              ? caregiverName.substring(0, 1)
-                              : '?';
-
-                          return Card(
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
-                            ),
-                            child: ListTile(
-                              contentPadding: const EdgeInsets.all(16),
-                              leading: CircleAvatar(
-                                radius: 26,
-                                backgroundImage:
-                                    (photoUrl != null && photoUrl.isNotEmpty)
-                                    ? NetworkImage(photoUrl)
-                                    : null,
-                                child: (photoUrl == null || photoUrl.isEmpty)
-                                    ? Text(initials)
-                                    : null,
-                              ),
-                              title: Text(
-                                caregiverName,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              subtitle: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    distanceKm != null
-                                        ? '${distanceKm.toStringAsFixed(1)} km away'
-                                        : 'Distance unavailable',
-                                  ),
-                                ],
-                              ),
-                              trailing: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Text(
-                                    _statusLabel(statusValue),
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Response timeline',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: _sosTitleColor,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                ListView.separated(
+                  padding: EdgeInsets.zero,
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: events.length,
+                  itemBuilder: (_, index) =>
+                      _buildTimelineRow(events[index], index == events.length - 1),
+                  separatorBuilder: (_, __) => const SizedBox(height: 12),
+                ),
+                const SizedBox(height: 16),
+                if (caregiverId.isNotEmpty) ...[
+                  _buildCaregiverTile(context, caregiverId),
+                  const SizedBox(height: 12),
+                  ElevatedButton(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => SosTrackingScreen(
+                            sosId: sosId,
+                            caregiverId: caregiverId,
+                          ),
+                        ),
                       );
                     },
-                  );
-                },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF00A8A7),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                    child: const Text(
+                      'Track caregiver',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildTimelineRow(TimelineEvent event, bool isLast) {
+    final timeLabel = formatTimelineTime(event.timestamp);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Column(
+          children: [
+            Container(
+              width: 10,
+              height: 10,
+              decoration: const BoxDecoration(
+                color: Color(0xFF00A8A7),
+                shape: BoxShape.circle,
               ),
             ),
+            if (!isLast)
+              Container(
+                width: 2,
+                height: 36,
+                color: _sosShadowColor,
+              ),
           ],
         ),
-      ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (timeLabel.isNotEmpty)
+                Text(
+                  timeLabel,
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              Text(
+                event.title,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: _sosTitleColor,
+                ),
+              ),
+              if (event.description != null && event.description!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    event.description!,
+                    style: const TextStyle(fontSize: 12, color: Colors.black54),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCaregiverTile(BuildContext context, String caregiverId) {
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance
+          .collection('caregivers')
+          .doc(caregiverId)
+          .snapshots(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData || !snapshot.data!.exists) {
+          return const Card(
+            margin: EdgeInsets.zero,
+            child: Padding(
+              padding: EdgeInsets.all(12),
+              child: Text('Caregiver information loading...'),
+            ),
+          );
+        }
+        final caregiver = snapshot.data!.data()!;
+        final name = (caregiver['name'] as String?) ?? 'Caregiver';
+        final specialization =
+            (caregiver['specialization'] as String?) ?? 'Home care';
+        return Card(
+          margin: EdgeInsets.zero,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: _sosTitleColor,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  specialization,
+                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    const Icon(Icons.phone, size: 16),
+                    const SizedBox(width: 6),
+                    Text(
+                      (caregiver['phone'] as String?) ?? 'No contact info',
+                      style:
+                          const TextStyle(fontSize: 12, color: Colors.black54),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }

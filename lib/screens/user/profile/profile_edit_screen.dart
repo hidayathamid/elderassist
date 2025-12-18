@@ -1,7 +1,13 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl_phone_field/countries.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
@@ -9,7 +15,6 @@ import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
 const Color _accentGold = Color(0xFFF4B63D);
-const Color _tealAccent = Color(0xFF00A8A7);
 const Color _profileDarkText = Color(0xFF1B1D29);
 const TextStyle _inputFieldTextStyle = TextStyle(
   fontSize: 12,
@@ -23,7 +28,9 @@ final TextStyle _inputFieldHintStyle = TextStyle(
 );
 
 class ProfileEditScreen extends StatefulWidget {
-  const ProfileEditScreen({super.key});
+  final bool useCaregiverData;
+
+  const ProfileEditScreen({super.key, this.useCaregiverData = false});
 
   @override
   State<ProfileEditScreen> createState() => _ProfileEditScreenState();
@@ -33,7 +40,13 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   final _firstNameController = TextEditingController();
   final _emailController = TextEditingController();
   final _phoneController = TextEditingController();
+  final _addressController = TextEditingController();
   final _picker = ImagePicker();
+  final _bioController = TextEditingController();
+  String _bioInitial = '';
+  String _addressInitial = '';
+  List<Map<String, dynamic>> _existingAddresses = [];
+  bool _isCaregiver = false;
 
   static final List<Country> _dialCodeCountries = [...countries]
     ..sort((a, b) => b.dialCode.length.compareTo(a.dialCode.length));
@@ -45,14 +58,23 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   bool _hasChanges = false;
   String _initialName = "";
   String _initialEmail = "";
-  String _initialPhone = "";
   String _initialPhoneFull = "";
+  String _initialAddress = "";
   String? _emailError;
   String? _phoneError;
   String? _nameError;
   String _selectedDialCode = '+60';
   String _currentCountryCode = 'MY';
   String _fullPhoneNumber = "";
+  final Completer<GoogleMapController> _mapControllerCompleter =
+      Completer<GoogleMapController>();
+  GoogleMapController? _mapController;
+  LatLng? _pickedLatLng;
+  Marker? _marker;
+  MapType _mapType = MapType.normal;
+  bool _locating = false;
+  String? _currentLocationDisplay;
+  static const LatLng _defaultMapPosition = LatLng(3.1390, 101.6869);
   bool get _canSave =>
       _hasChanges &&
       !_saving &&
@@ -69,6 +91,8 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     _firstNameController.addListener(_onFieldChanged);
     _emailController.addListener(_onFieldChanged);
     _phoneController.addListener(_onFieldChanged);
+    _bioController.addListener(_onFieldChanged);
+    _addressController.addListener(_onFieldChanged);
     _loadProfile();
   }
 
@@ -80,10 +104,14 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     final national = phone.isNotEmpty ? _stripDialCode(phone, dialSegment) : '';
     final candidate = national.isNotEmpty ? '$dialSegment$national' : '';
     _fullPhoneNumber = _collapseRepeatedDialPrefix(candidate, dialSegment);
+    final bioValue = _bioController.text.trim();
+    final addressValue = _addressController.text.trim();
     final dirty =
         name != _initialName ||
         email != _initialEmail ||
-        _fullPhoneNumber != _initialPhoneFull;
+        _fullPhoneNumber != _initialPhoneFull ||
+        (_isCaregiver && bioValue != _bioInitial) ||
+        (_isCaregiver && addressValue != _addressInitial);
     final emailLower = email.toLowerCase();
     final emailError = email.isEmpty
         ? "Email is required"
@@ -213,18 +241,58 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         .collection("users")
         .doc(uid)
         .get();
-    if (!snap.exists) {
-      if (mounted) {
-        setState(() => _loading = false);
+    final data = snap.exists ? snap.data() : null;
+    final dataMap = data != null
+        ? Map<String, dynamic>.from(data)
+        : <String, dynamic>{};
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+    debugPrint(
+      'ProfileEdit load: uid=$currentUid email=${dataMap["email"] ?? "(none)"}',
+    );
+    final caregiverRef = FirebaseFirestore.instance
+        .collection("caregivers")
+        .doc(uid);
+    final caregiverSnap = await caregiverRef.get();
+    Map<String, dynamic>? caregiverData = caregiverSnap.data();
+    if (caregiverData == null && data != null) {
+      final emailQuery = await FirebaseFirestore.instance
+          .collection("caregivers")
+          .where("email", isEqualTo: data["email"])
+          .limit(1)
+          .get();
+      if (emailQuery.docs.isNotEmpty) {
+        caregiverData = Map<String, dynamic>.from(emailQuery.docs.first.data());
       }
-      return;
     }
-    final data = snap.data()!;
-    final name = data["name"] as String? ?? "";
+    final bool hasCaregiverData = caregiverData != null;
+    final caregiverRole =
+        (caregiverData?['role'] as String?)?.toLowerCase() ?? '';
+    final userRole = (dataMap["role"] as String?)?.toLowerCase() ?? '';
+    final isCaregiverRole =
+        hasCaregiverData ||
+        caregiverRole == 'caregiver' ||
+        userRole == 'caregiver';
+    final bool forceCaregiverSource =
+        widget.useCaregiverData && hasCaregiverData;
+    final bool shouldUseCaregiverData =
+        hasCaregiverData || widget.useCaregiverData;
+    final showCaregiverFields = isCaregiverRole || widget.useCaregiverData;
+    final Map<String, dynamic> sourceData =
+        shouldUseCaregiverData && caregiverData != null
+        ? Map<String, dynamic>.from(caregiverData)
+        : dataMap;
+
+    final name = (sourceData["name"] as String?) ?? '';
     final fragments = name.split(" ");
     _firstNameController.text = fragments.isNotEmpty ? fragments.first : "";
-    _emailController.text = data["email"] as String? ?? "";
-    final phoneRaw = data["phone"] as String? ?? "";
+    _emailController.text =
+        (sourceData["email"] as String?) ??
+        caregiverData?["email"] as String? ??
+        '';
+    final phoneRaw =
+        (sourceData["phone"] as String?) ??
+        caregiverData?["phone"] as String? ??
+        '';
     final matchedDial = _normalizeDialCode(_detectDialCodeFromPhone(phoneRaw));
     _selectedDialCode = matchedDial;
     _currentCountryCode = _countryCodeFromDialCode(matchedDial);
@@ -237,21 +305,218 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
       _fullPhoneNumber,
       matchedDial,
     );
-    _photoUrl = data["photoUrl"] as String?;
+    _photoUrl =
+        (sourceData["photoUrl"] as String?) ??
+        caregiverData?["photoUrl"] as String? ??
+        '';
+
+    final bioValue = shouldUseCaregiverData
+        ? (caregiverData?['bio'] as String? ?? '')
+        : '';
+    debugPrint(
+      'ProfileEdit source: caregiver=$hasCaregiverData showCaregiver=$showCaregiverFields name=${sourceData["name"]} email=${sourceData["email"]}',
+    );
+    _existingAddresses = _addressListFromSources(dataMap, caregiverData);
+    final addressValue = _existingAddresses.isNotEmpty
+        ? _formatAddressEntry(_existingAddresses.first)
+        : '';
+    _addressController.text = addressValue;
+    _addressInitial = addressValue;
+    if (_existingAddresses.isNotEmpty) {
+      _applyLocationFromEntry(_existingAddresses.first);
+    }
+    _bioController.text = bioValue;
+    _bioInitial = bioValue;
 
     if (mounted) {
       setState(() {
         _loading = false;
         _initialName = _firstNameController.text.trim();
         _initialEmail = _emailController.text.trim();
-        _initialPhone = _phoneController.text.trim();
         _initialPhoneFull = _fullPhoneNumber;
+        _isCaregiver = showCaregiverFields;
         _hasChanges = false;
         _emailError = null;
         _nameError = null;
         _phoneError = null;
       });
+      if (_pickedLatLng == null) {
+        _autoDetectLocation();
+      }
     }
+  }
+
+  List<Map<String, dynamic>> _extractAddressListFromDocument(
+    Map<String, dynamic>? data,
+  ) {
+    if (data == null) return [];
+    final raw = data["address"];
+    if (raw is List) {
+      return raw
+          .whereType<Map<String, dynamic>>()
+          .map((entry) => Map<String, dynamic>.from(entry))
+          .toList();
+    }
+    return [];
+  }
+
+  List<Map<String, dynamic>> _addressListFromSources(
+    Map<String, dynamic>? userData,
+    Map<String, dynamic>? caregiverData,
+  ) {
+    final caregiverAddresses = _extractAddressListFromDocument(caregiverData);
+    if (caregiverAddresses.isNotEmpty) return caregiverAddresses;
+    return _extractAddressListFromDocument(userData);
+  }
+
+  String _formatAddressEntry(Map<String, dynamic> entry) {
+    final candidates = <String?>[
+      entry["formattedAddress"] as String?,
+      entry["address"] as String?,
+      entry["description"] as String?,
+      entry["street"] as String?,
+      entry["line1"] as String?,
+      entry["city"] as String?,
+      entry["state"] as String?,
+      entry["postcode"] as String?,
+    ];
+    final filtered = candidates
+        .where((element) => element != null && element.trim().isNotEmpty)
+        .map((element) => element!.trim())
+        .toList();
+    if (filtered.isNotEmpty) {
+      return filtered.join(', ');
+    }
+    return '';
+  }
+
+  void _applyLocationFromEntry(Map<String, dynamic> entry) {
+    final lat = entry['lat'];
+    final lng = entry['lng'];
+    if (lat is num && lng is num) {
+      final coords = LatLng(lat.toDouble(), lng.toDouble());
+      _placeMarker(coords, animate: false, updateAddress: false);
+    }
+  }
+
+  Future<void> _placeMarker(
+    LatLng pos, {
+    bool animate = true,
+    bool updateAddress = true,
+  }) async {
+    final newMarker = Marker(
+      markerId: const MarkerId('profile'),
+      position: pos,
+      draggable: true,
+      onDragEnd: (newPos) => _placeMarker(newPos, animate: false),
+    );
+    setState(() {
+      _pickedLatLng = pos;
+      _marker = newMarker;
+    });
+    if (animate && _mapControllerCompleter.isCompleted) {
+      final controller = await _mapControllerCompleter.future;
+      await controller.animateCamera(CameraUpdate.newLatLngZoom(pos, 15));
+    }
+    if (updateAddress) {
+      await _reverseGeocode(pos.latitude, pos.longitude);
+    }
+  }
+
+  Future<void> _reverseGeocode(double lat, double lng) async {
+    try {
+      final placemarks = await placemarkFromCoordinates(lat, lng);
+      if (placemarks.isNotEmpty) {
+        final formatted = _formatPlacemark(placemarks.first);
+        _addressController.text = formatted;
+        _addressController.selection = TextSelection.collapsed(
+          offset: formatted.length,
+        );
+        setState(() {
+          _currentLocationDisplay = formatted;
+        });
+      }
+    } catch (_) {
+      setState(() {
+        _currentLocationDisplay =
+            'Lat: ${lat.toStringAsFixed(5)}, '
+            'Lng: ${lng.toStringAsFixed(5)}';
+      });
+    }
+  }
+
+  String _formatPlacemark(Placemark placemark) {
+    return [
+      placemark.name,
+      placemark.subLocality,
+      placemark.locality,
+      placemark.administrativeArea,
+      placemark.postalCode,
+      placemark.country,
+    ].where((part) => part != null && part.isNotEmpty).join(', ');
+  }
+
+  Future<void> _autoDetectLocation() async {
+    try {
+      setState(() => _locating = true);
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        debugPrint('Enable location services to continue.');
+        return;
+      }
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        debugPrint('Location permission denied.');
+        return;
+      }
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.best,
+      );
+      final coords = LatLng(position.latitude, position.longitude);
+      await _placeMarker(coords);
+    } catch (e) {
+      debugPrint('Unable to get location: $e');
+    } finally {
+      if (mounted) setState(() => _locating = false);
+    }
+  }
+
+  Future<void> _searchAddress(String query) async {
+    if (query.trim().isEmpty) return;
+    try {
+      final results = await locationFromAddress(query);
+      if (results.isNotEmpty) {
+        final first = results.first;
+        final coords = LatLng(first.latitude, first.longitude);
+        await _placeMarker(coords);
+      }
+    } catch (_) {
+      debugPrint('Unable to locate address.');
+    }
+  }
+
+  List<Map<String, dynamic>> _buildUpdatedAddressList(String addressValue) {
+    final updated = _existingAddresses
+        .map((entry) => Map<String, dynamic>.from(entry))
+        .toList();
+    if (updated.isNotEmpty) {
+      final updatedFirst = Map<String, dynamic>.from(updated.first);
+      updatedFirst["address"] = addressValue;
+      updatedFirst["formattedAddress"] = addressValue;
+      updated[0] = updatedFirst;
+    } else if (addressValue.isNotEmpty) {
+      updated.add({
+        "id": "primary",
+        "label": "Primary",
+        "address": addressValue,
+        "formattedAddress": addressValue,
+      });
+    }
+    return updated;
   }
 
   Future<void> _pickPhoto() async {
@@ -270,18 +535,18 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
       );
       await ref.putData(bytes, SettableMetadata(contentType: "image/jpeg"));
       final downloadUrl = await ref.getDownloadURL();
-      await FirebaseFirestore.instance.collection("users").doc(uid).update({
-        "photoUrl": downloadUrl,
-      });
+      final targetCollection = _isCaregiver ? "caregivers" : "users";
+      await FirebaseFirestore.instance
+          .collection(targetCollection)
+          .doc(uid)
+          .set({"photoUrl": downloadUrl}, SetOptions(merge: true));
       setState(() {
         _photoUrl = downloadUrl;
         _hasChanges = true;
       });
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text("Unable to upload photo")));
+      debugPrint('Unable to upload photo: $e');
     } finally {
       if (mounted) {
         setState(() => _uploadingPhoto = false);
@@ -302,14 +567,12 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     final firstName = _firstNameController.text.trim();
     final email = _emailController.text.trim();
     final phone = _phoneController.text.trim();
+    final bioValue = _bioController.text.trim();
 
     if (firstName.isEmpty ||
         email.isEmpty ||
         phone.isEmpty ||
         _emailError != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please fix the highlighted fields")),
-      );
       return;
     }
 
@@ -330,35 +593,53 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     }
 
     try {
-      await FirebaseFirestore.instance.collection("users").doc(uid).update({
-        "name": firstName,
-        "email": email,
-        "phone": phoneToSave,
-      });
+      final trimmedAddress = _addressController.text.trim();
+      final updatedAddresses = _buildUpdatedAddressList(trimmedAddress);
+      if (_isCaregiver) {
+        final caregiverUpdate = <String, dynamic>{
+          "name": firstName,
+          "email": email,
+          "phone": phoneToSave,
+          "bio": bioValue,
+          "address": updatedAddresses,
+          "photoUrl": _photoUrl ?? '',
+        };
+        await FirebaseFirestore.instance
+            .collection("caregivers")
+            .doc(uid)
+            .set(caregiverUpdate, SetOptions(merge: true));
+      } else {
+        final userUpdate = <String, dynamic>{
+          "name": firstName,
+          "email": email,
+          "phone": phoneToSave,
+        };
+        await FirebaseFirestore.instance
+            .collection("users")
+            .doc(uid)
+            .set(userUpdate, SetOptions(merge: true));
+      }
 
       if (!mounted) return;
 
       setState(() {
         _initialName = firstName;
         _initialEmail = email;
-        _initialPhone = phone;
+        _initialPhoneFull = _fullPhoneNumber;
+        _bioInitial = bioValue;
+        if (_isCaregiver) {
+          _initialAddress = trimmedAddress;
+          _existingAddresses = updatedAddresses;
+        }
         _hasChanges = false;
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("Profile saved successfully"),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
       await Future.delayed(const Duration(milliseconds: 600));
       if (!mounted) return;
       _returnToOverview();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text("Failed to save profile: $e")));
+      debugPrint('Failed to save profile: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -369,6 +650,9 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     _firstNameController.dispose();
     _emailController.dispose();
     _phoneController.dispose();
+    _addressController.dispose();
+    _bioController.dispose();
+    _mapController?.dispose();
     super.dispose();
   }
 
@@ -464,7 +748,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           backgroundColor: Colors.white,
           elevation: 0,
           centerTitle: true,
-          automaticallyImplyLeading: true,
+          automaticallyImplyLeading: false,
           flexibleSpace: Container(
             decoration: BoxDecoration(
               color: Colors.white,
@@ -487,7 +771,11 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           ),
           title: const Text(
             "Edit Profile",
-            style: TextStyle(color: _profileDarkText),
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 18,
+              color: _profileDarkText,
+            ),
           ),
         ),
         body: _loading
@@ -511,11 +799,11 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
                                 clipBehavior: Clip.none,
                                 alignment: Alignment.bottomRight,
                                 children: [
-                DefaultProfileAvatar(
-                  radius: 40,
-                  photoUrl: _photoUrl,
-                  label: _profileAvatarLabel(),
-                ),
+                                  DefaultProfileAvatar(
+                                    radius: 40,
+                                    photoUrl: _photoUrl,
+                                    label: _profileAvatarLabel(),
+                                  ),
                                   Positioned(
                                     right: -4,
                                     bottom: -4,
@@ -577,6 +865,12 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
                             ),
                             const SizedBox(height: 10),
                             _phoneField(),
+                            if (_isCaregiver) ...[
+                              const SizedBox(height: 10),
+                              _bioField(),
+                              const SizedBox(height: 10),
+                              _addressField(),
+                            ],
                             const SizedBox(height: 24),
                           ],
                         ),
@@ -838,6 +1132,276 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           },
         ),
       ],
+    );
+  }
+
+  Widget _bioField() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Bio",
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: _profileDarkText,
+          ),
+        ),
+        const SizedBox(height: 6),
+        TextField(
+          controller: _bioController,
+          maxLines: 1,
+          style: _inputFieldTextStyle,
+          maxLength: 60,
+          maxLengthEnforcement: MaxLengthEnforcement.enforced,
+          decoration: InputDecoration(
+            hintText: "Tell families what makes you special",
+            hintStyle: _inputFieldHintStyle,
+            filled: true,
+            fillColor: Colors.white,
+            counterText: '',
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 10,
+            ),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: BorderSide(color: Colors.grey[300]!),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: BorderSide(color: Colors.grey[300]!),
+            ),
+            focusedBorder: const OutlineInputBorder(
+              borderRadius: BorderRadius.all(Radius.circular(16)),
+              borderSide: BorderSide(color: _profileDarkText, width: 1.1),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _addressField() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Address",
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: _profileDarkText,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.grey[200]!),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.08),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ClipRRect(
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(20),
+                ),
+                child: SizedBox(
+                  height: 160,
+                  child: Stack(
+                    children: [
+                      GoogleMap(
+                        initialCameraPosition: CameraPosition(
+                          target: _pickedLatLng ?? _defaultMapPosition,
+                          zoom: _pickedLatLng == null ? 12 : 15,
+                        ),
+                        mapType: _mapType,
+                        zoomControlsEnabled: false,
+                        myLocationEnabled: true,
+                        myLocationButtonEnabled: false,
+                        mapToolbarEnabled: false,
+                        onMapCreated: (controller) {
+                          if (!_mapControllerCompleter.isCompleted) {
+                            _mapControllerCompleter.complete(controller);
+                          }
+                          _mapController = controller;
+                        },
+                        markers: _marker != null ? {_marker!} : <Marker>{},
+                        onTap: (pos) => _placeMarker(pos),
+                      ),
+                      if (_locating)
+                        const Positioned.fill(
+                          child: Center(child: CircularProgressIndicator()),
+                        ),
+                      Positioned(
+                        top: 12,
+                        right: 12,
+                        child: Column(
+                          children: [
+                            _mapControlButton(
+                              icon: Icons.layers_outlined,
+                              tooltip: 'Toggle map view',
+                              onTap: () {
+                                setState(() {
+                                  _mapType = _mapType == MapType.normal
+                                      ? MapType.satellite
+                                      : MapType.normal;
+                                });
+                              },
+                            ),
+                            const SizedBox(height: 6),
+                            _mapControlButton(
+                              icon: Icons.my_location_rounded,
+                              tooltip: 'Current location',
+                              onTap: _autoDetectLocation,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Positioned(
+                        top: 12,
+                        left: 12,
+                        child: Icon(
+                          Icons.location_pin,
+                          size: 28,
+                          color: Colors.white,
+                        ),
+                      ),
+                      Positioned(
+                        bottom: 12,
+                        left: 16,
+                        right: 16,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.92),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.grey.shade300),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.05),
+                                blurRadius: 8,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.my_location_outlined,
+                                size: 16,
+                                color: Colors.black87,
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  _currentLocationDisplay ??
+                                      "Determining current location...",
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.black87,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Confirm your location',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: _addressController,
+                      textInputAction: TextInputAction.search,
+                      maxLines: 2,
+                      style: _inputFieldTextStyle,
+                      decoration: InputDecoration(
+                        hintText: "Street, city, postcode",
+                        hintStyle: _inputFieldHintStyle,
+                        filled: true,
+                        fillColor: Colors.grey[50],
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: BorderSide(color: Colors.grey[300]!),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: BorderSide(color: Colors.grey[300]!),
+                        ),
+                        focusedBorder: const OutlineInputBorder(
+                          borderRadius: BorderRadius.all(Radius.circular(16)),
+                          borderSide: BorderSide(
+                            color: _profileDarkText,
+                            width: 1.1,
+                          ),
+                        ),
+                        suffixIcon: IconButton(
+                          icon: const Icon(Icons.search),
+                          onPressed: () =>
+                              _searchAddress(_addressController.text.trim()),
+                        ),
+                      ),
+                      onSubmitted: (value) => _searchAddress(value),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _mapControlButton({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.white,
+      shape: const CircleBorder(),
+      elevation: 2,
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Icon(icon, size: 20, color: Colors.black87),
+        ),
+      ),
     );
   }
 }

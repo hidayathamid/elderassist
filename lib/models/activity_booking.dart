@@ -4,6 +4,9 @@ class ActivityBooking {
   const ActivityBooking({
     required this.id,
     required this.caregiverId,
+    required this.caregiverName,
+    required this.personId,
+    required this.addressId,
     required this.personName,
     required this.personAddress,
     required this.service,
@@ -22,6 +25,9 @@ class ActivityBooking {
 
   final String id;
   final String caregiverId;
+  final String caregiverName;
+  final String personId;
+  final String addressId;
   final String personName;
   final String personAddress;
   final String service;

@@ -799,7 +799,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                 ),
               ),
               const Text(
-                'Note to driver',
+                'Note to Caregiver',
                 style: TextStyle(
                   fontWeight: FontWeight.w700,
                   fontSize: 16,
@@ -813,7 +813,8 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                 maxLines: 3,
                 autofocus: false,
                 decoration: InputDecoration(
-                  hintText: 'Add pickup details (e.g. near the gate)',
+                  hintText:
+                      'Add person details (e.g. allergies, medical conditions)',
                   filled: true,
                   fillColor: Colors.white,
                   enabledBorder: OutlineInputBorder(
@@ -1155,7 +1156,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                                 child: Text(
                                   _note?.isNotEmpty == true
                                       ? _note!
-                                      : 'Add pickup details (e.g. near the gate)',
+                                      : 'Add person details (e.g. allergies, medical conditions)',
                                   style: const TextStyle(
                                     color: _accentBlue,
                                     fontWeight: FontWeight.w600,
