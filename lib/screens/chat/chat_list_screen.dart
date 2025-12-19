@@ -13,7 +13,7 @@ const double _chatCardRevealExtent = 118;
 const Color _chatMutedText = Color(0xFF1B1D29);
 
 final BoxShadow _chatCardShadow = BoxShadow(
-  color: Colors.black.withOpacity(0.08),
+  color: Colors.black.withValues(alpha: 0.08),
   blurRadius: 16,
   offset: const Offset(0, 4),
 );
@@ -198,9 +198,9 @@ class _ChatListScreenState extends State<ChatListScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Container(
         decoration: BoxDecoration(
-          color: activityAccentBlue.withOpacity(0.1),
+        color: activityAccentBlue.withValues(alpha: 0.1),
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: activityAccentBlue.withOpacity(0.3)),
+        border: Border.all(color: activityAccentBlue.withValues(alpha: 0.3)),
         ),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         child: Row(
@@ -321,7 +321,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
           final totalUnread = visibleChats.fold<int>(
             0,
-            (sum, doc) => sum + _extractUnread(doc, widget.userId),
+            (acc, doc) => acc + _extractUnread(doc, widget.userId),
           );
 
           return Padding(
@@ -333,12 +333,12 @@ class _ChatListScreenState extends State<ChatListScreen> {
                 Expanded(
                   child: ListView.separated(
                     padding: const EdgeInsets.symmetric(
-                      vertical: 4,
-                      horizontal: 16,
+                      vertical: 2,
+                      horizontal: 12,
                     ),
                     physics: const BouncingScrollPhysics(),
                     itemCount: visibleChats.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 10),
+                    separatorBuilder: (_, __) => const SizedBox(height: 6),
                     itemBuilder: (context, index) {
                       final chatDoc = visibleChats[index];
                       final data = chatDoc.data();
@@ -357,7 +357,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
                       return Padding(
                         key: ValueKey(chatDoc.id),
-                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        padding: const EdgeInsets.symmetric(vertical: 4),
                         child: _ChatSwipeRevealCard(
                           id: chatDoc.id,
                           resetId: _resetSwipeFor,
@@ -463,7 +463,7 @@ class _ChatTile extends StatelessWidget {
             );
           },
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
             child: Row(
               children: [
                 DefaultProfileAvatar(

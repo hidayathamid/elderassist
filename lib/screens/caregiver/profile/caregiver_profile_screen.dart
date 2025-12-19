@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 
 import '../../../services/auth_service.dart';
 import '../../auth/touchdown_screen.dart';
@@ -71,34 +72,80 @@ class CaregiverProfileScreen extends StatelessWidget {
         final photoUrl = (data['photoUrl'] as String?) ?? '';
         final rating = (data['rating'] as num?)?.toDouble() ?? 0.0;
         final available = (data['availability'] as bool?) ?? true;
-        final totalJobs = (data['jobsCompleted'] as num?)?.toInt() ?? 0;
-        final monthlyJobs = (data['monthlyJobs'] as num?)?.toInt() ?? 0;
         final services = _stringListFromField(data['services']);
-        final documentsCount = (data['documents'] as Iterable?)?.length ?? 0;
-        final certificationsCount = data['certifications'] != null ? 1 : 0;
         final availabilitySchedule = data['availabilitySchedule'] as Iterable?;
         final availabilityCount =
             availabilitySchedule?.length ?? (available ? 1 : 0);
+        final bookingsStream = FirebaseFirestore.instance
+            .collection('bookings')
+            .where('caregiverId', isEqualTo: user.uid)
+            .snapshots();
+        final documentsStream = FirebaseFirestore.instance
+            .collection('documents')
+            .where('caregiverId', isEqualTo: user.uid)
+            .snapshots();
 
         return Scaffold(
           backgroundColor: Colors.white,
           appBar: _buildAppBar(),
-          body: _buildProfileContent(
-            context: context,
-            name: name,
-            email: email,
-            phone: phone,
-            photoUrl: photoUrl.isNotEmpty ? photoUrl : null,
-            rating: rating,
-            available: available,
-            jobsCompleted: totalJobs,
-            monthlyJobs: monthlyJobs,
-            services: services,
-            documentsCount: documentsCount,
-            certificationsCount: certificationsCount,
-            availabilityCount: availabilityCount,
-            servicesCount: services.length,
-            caregiverRef: caregiverRef,
+          body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: bookingsStream,
+            builder: (context, bookingsSnapshot) {
+              if (!bookingsSnapshot.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              final bookingDocs = bookingsSnapshot.data!.docs;
+              final assignedJobs = bookingDocs
+                  .where(
+                    (doc) => _isAssignedStatus(
+                      (doc.data()['status'] as String?) ?? '',
+                    ),
+                  )
+                  .length;
+              final completedThisMonth = bookingDocs.where((doc) {
+                final status = ((doc.data()['status'] as String?) ?? '')
+                    .trim()
+                    .toUpperCase();
+                if (!_isCompletedStatus(status)) return false;
+                final scheduled = _parseScheduledDate(
+                  (doc.data()['scheduledDate'] as String?) ??
+                      (doc.data()['date'] as String?),
+                );
+                if (scheduled == null) return false;
+                final now = DateTime.now();
+                return scheduled.year == now.year &&
+                    scheduled.month == now.month;
+              }).length;
+              return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                stream: documentsStream,
+                builder: (context, documentsSnapshot) {
+                  if (!documentsSnapshot.hasData) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  final documentDocs = documentsSnapshot.data!.docs;
+                  final verifiedDocs = documentDocs
+                      .where((doc) => (doc.data()['status'] as bool?) == true)
+                      .length;
+                  return _buildProfileContent(
+                    context: context,
+                    name: name,
+                    email: email,
+                    phone: phone,
+                    photoUrl: photoUrl.isNotEmpty ? photoUrl : null,
+                    rating: rating,
+                    available: available,
+                    assignedJobs: assignedJobs,
+                    completedThisMonth: completedThisMonth,
+                    services: services,
+                    documentsCount: documentDocs.length,
+                    certificationsCount: verifiedDocs,
+                    availabilityCount: availabilityCount,
+                    servicesCount: services.length,
+                    caregiverRef: caregiverRef,
+                  );
+                },
+              );
+            },
           ),
         );
       },
@@ -142,8 +189,8 @@ class CaregiverProfileScreen extends StatelessWidget {
     String? photoUrl,
     double? rating,
     required bool available,
-    required int jobsCompleted,
-    required int monthlyJobs,
+    required int assignedJobs,
+    required int completedThisMonth,
     required List<String> services,
     required int documentsCount,
     required int certificationsCount,
@@ -297,12 +344,12 @@ class CaregiverProfileScreen extends StatelessWidget {
                   ),
                   _SummaryItem(
                     title: 'Jobs',
-                    value: jobsCompleted,
+                    value: assignedJobs,
                     icon: Icons.event_note_outlined,
                   ),
                   _SummaryItem(
                     title: 'This Month',
-                    value: monthlyJobs,
+                    value: completedThisMonth,
                     icon: Icons.calendar_month_outlined,
                   ),
                 ],
@@ -810,4 +857,35 @@ class _ProfileSectionInfoIconState extends State<_ProfileSectionInfoIcon> {
       ],
     );
   }
+}
+
+DateTime? _parseScheduledDate(String? input) {
+  if (input == null || input.trim().isEmpty) return null;
+  final trimmed = input.trim();
+  try {
+    return DateTime.parse(trimmed);
+  } catch (_) {}
+  final formats = [
+    DateFormat('yyyy-MM-dd'),
+    DateFormat('dd MMM yyyy'),
+    DateFormat('MMM d, yyyy'),
+    DateFormat('d MMM yyyy'),
+    DateFormat('yyyy/MM/dd'),
+  ];
+  for (final format in formats) {
+    try {
+      return format.parseStrict(trimmed);
+    } catch (_) {
+      continue;
+    }
+  }
+  return null;
+}
+
+bool _isAssignedStatus(String status) {
+  return status.trim().toUpperCase() == 'ASSIGNED';
+}
+
+bool _isCompletedStatus(String status) {
+  return status.trim().toUpperCase() == 'COMPLETED';
 }

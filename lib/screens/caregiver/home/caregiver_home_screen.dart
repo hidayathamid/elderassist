@@ -2,8 +2,15 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'dart:async';
 
+import 'package:emergencies_disability_assistance_app/screens/caregiver/jobs/caregiver_job_details_screen.dart';
+import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_booking_details_screen.dart';
+import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_screen.dart';
+import 'package:emergencies_disability_assistance_app/screens/user/chat/user_chat_screen.dart';
+import 'package:emergencies_disability_assistance_app/services/chat_service.dart';
+import 'package:emergencies_disability_assistance_app/widgets/caregiver_job_card.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../profile/profile_availability_schedule_screen.dart';
 import '../profile/profile_documents_screen.dart';
@@ -82,8 +89,13 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
 
             final docs = bookingsSnapshot.data!.docs;
             final todayJobs = _extractTodayJobs(docs);
+            final scheduledJobs = _extractScheduledJobs(docs);
             final earningsSummary = _calculateEarnings(docs);
-            final totalJobs = docs.length;
+            final completedJobs = docs
+                .where((doc) => _isCompletedStatus(
+                      (doc.data()['status'] as String?) ?? '',
+                    ))
+                .length;
             final hasAssignedBooking = docs.any(
               (doc) =>
                   _isAssignedStatus((doc.data()['status'] as String?) ?? ''),
@@ -177,6 +189,8 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
                               const SizedBox(height: 12),
                               _buildTodayJobSection(context, todayJobs),
                               const SizedBox(height: _sectionSpacing),
+                              _buildScheduledJobsSection(scheduledJobs),
+                              const SizedBox(height: _sectionSpacing),
                               _buildSectionTitle(
                                 title: 'Earnings & Stats',
                                 hint:
@@ -184,7 +198,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
                               ),
                               const SizedBox(height: 12),
                               _buildEarningsStatsRow(
-                                jobsCompleted: totalJobs,
+                                jobsCompleted: completedJobs,
                                 thisWeekValue: earningsSummary.thisWeekEarnings,
                                 totalValue: earningsSummary.totalEarnings,
                                 rating: ratingValue,
@@ -334,7 +348,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
   }) {
     final actions = [
       _QuickActionButtonData(
-        icon: Icons.pause_circle_filled,
+        icon: isAvailable ? Icons.pause_circle_filled : Icons.play_circle_fill,
         label: isAvailable ? 'Available' : 'Start Day',
         onTap: () => _onStartDayTap(
           context,
@@ -342,7 +356,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
           hasAssignedBooking,
           isAvailable,
         ),
-        disabled: hasAssignedBooking || isAvailable,
+        disabled: hasAssignedBooking,
       ),
       _QuickActionButtonData(
         icon: Icons.calendar_today,
@@ -444,52 +458,63 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
       );
     }
 
-    final activeJobs = todayJobs
-        .where((job) => _isActiveStatus(job.status))
-        .toList();
-    final upcomingJobs = todayJobs
-        .where((job) => !_isActiveStatus(job.status))
-        .toList();
-    final horizontalJobs = activeJobs.isNotEmpty
-        ? activeJobs
-        : todayJobs.isNotEmpty
-        ? [todayJobs.first]
-        : <_CaregiverJob>[];
-    final otherJobs = activeJobs.isNotEmpty
-        ? upcomingJobs
-        : todayJobs.length > 1
-        ? todayJobs.sublist(1)
-        : <_CaregiverJob>[];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: todayJobs.map((job) {
+        final dateLabel = job.scheduledDate != null
+            ? DateFormat('d MMM yyyy').format(job.scheduledDate!)
+            : 'Date pending';
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: _buildJobCard(context, job, dateLabel),
+        );
+      }).toList(),
+    );
+  }
 
+  Widget _buildScheduledJobsSection(List<_CaregiverJob> scheduledJobs) {
+    if (scheduledJobs.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(_cardRadius),
+          border: Border.all(color: Colors.grey.shade200),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.calendar_month, color: _primaryBlue),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'No scheduled bookings yet.',
+                style: TextStyle(
+                  color: Colors.black.withAlpha(180),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (horizontalJobs.isNotEmpty) ...[
-          SizedBox(
-            height: 220,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              physics: const BouncingScrollPhysics(),
-              itemCount: horizontalJobs.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 12),
-              padding: const EdgeInsets.only(right: 4),
-              itemBuilder: (context, index) {
-                final job = horizontalJobs[index];
-                return SizedBox(
-                  width: MediaQuery.of(context).size.width * 0.82,
-                  child: _ActiveJobCard(job: job),
-                );
-              },
-            ),
-          ),
-          const SizedBox(height: 14),
-        ],
-        ...otherJobs.map(
-          (job) => Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: _TodayJobTile(job: job),
-          ),
+        _buildSectionTitle(
+          title: 'Scheduled Jobs',
+          hint: 'Upcoming assignments sorted by date.',
         ),
+        const SizedBox(height: 12),
+        ...scheduledJobs.map((job) {
+          final dateLabel = job.scheduledDate != null
+              ? DateFormat('EEE, d MMM yyyy').format(job.scheduledDate!)
+              : 'Date pending';
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: _buildJobCard(context, job, dateLabel),
+          );
+        }),
       ],
     );
   }
@@ -565,8 +590,203 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     );
   }
 
-  void _showAction(BuildContext context, String message) {
-    ScaffoldMessenger.of(context)
+  void _openBookingDetails(BuildContext context, String bookingId) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ActivityBookingDetailsScreen(bookingId: bookingId),
+      ),
+    );
+  }
+
+  void _openCaregiverJobDetails(BuildContext context, String bookingId) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CaregiverJobDetailsScreen(bookingId: bookingId),
+      ),
+    );
+  }
+
+  Widget _buildJobCard(BuildContext context, _CaregiverJob job, String dateLabel) {
+    final userFuture = job.userId.isNotEmpty
+        ? FirebaseFirestore.instance.collection('users').doc(job.userId).get()
+        : Future<DocumentSnapshot<Map<String, dynamic>>?>.value(null);
+    return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>?>(
+      future: userFuture,
+      builder: (context, snapshot) {
+        final userData = snapshot.data?.data() ?? const <String, dynamic>{};
+        final userName = (userData['name'] as String?)?.trim() ?? '';
+        final userPhoto = (userData['photoUrl'] as String?)?.trim();
+        final phone = (userData['phone'] as String?)?.trim();
+        final actions = _homeCardActions(
+          context: context,
+          job: job,
+          phone: phone,
+          onView: () => _openBookingDetails(context, job.bookingId),
+          onTrack: () => _openCaregiverJobDetails(context, job.bookingId),
+        );
+        final avatarLabel = userName.isNotEmpty
+            ? userName[0].toUpperCase()
+            : job.personName.isNotEmpty
+                ? job.personName[0].toUpperCase()
+                : '?';
+        return CaregiverJobCard(
+          clientName: job.personName,
+          serviceLabel: job.service,
+          priceLabel: job.price,
+          status: job.status,
+          timeLabel: job.time,
+          dateLabel: dateLabel,
+          locationLabel: job.location,
+          notes: job.notes,
+          actions: actions,
+          avatarLabel: avatarLabel,
+          avatarPhotoUrl: userPhoto,
+          onTap: () => _openBookingDetails(context, job.bookingId),
+        );
+      },
+    );
+  }
+
+  List<ActionConfig> _homeCardActions({
+    required BuildContext context,
+    required _CaregiverJob job,
+    required String? phone,
+    required VoidCallback onView,
+    required VoidCallback onTrack,
+  }) {
+    final normalized = job.status.trim().toUpperCase();
+    final isCancelled = normalized == 'CANCELLED' ||
+        normalized == 'CANCELED' ||
+        normalized == 'COMPLETED';
+    final isUpcoming =
+        normalized == 'SCHEDULED' || normalized == 'PENDING' || normalized == 'READY';
+    final actions = <ActionConfig>[];
+    if (isCancelled) {
+      actions.add(
+        ActionConfig(
+          label: 'View',
+          icon: Icons.info_outline,
+          onPressed: onView,
+          tone: PillTone.outline,
+        ),
+      );
+    } else {
+      if (!isUpcoming) {
+        actions.add(
+          ActionConfig(
+            label: 'Track',
+            icon: Icons.navigation_outlined,
+            onPressed: onTrack,
+            gradient: const LinearGradient(
+              colors: [activityAccentBlue, activityAccentBlue],
+            ),
+            tone: PillTone.teal,
+          ),
+        );
+      }
+      actions.add(
+        ActionConfig(
+          label: 'View',
+          icon: Icons.info_outline,
+          onPressed: onView,
+          tone: PillTone.outline,
+        ),
+      );
+    }
+    actions.add(
+      ActionConfig(
+        label: 'Call',
+        icon: Icons.phone,
+        kind: ActionButtonKind.circle,
+        onPressed: phone?.isNotEmpty == true
+            ? () => _dialNumber(context, phone)
+            : null,
+      ),
+    );
+    actions.add(
+      ActionConfig(
+        label: 'Chat',
+        icon: Icons.chat_bubble_outline,
+        kind: ActionButtonKind.circle,
+        onPressed: () => _openChat(context, job),
+      ),
+    );
+    return actions;
+  }
+
+  Future<void> _dialNumber(BuildContext context, String? phone) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final trimmed = (phone ?? '').trim();
+    if (trimmed.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Phone number is not available.')),
+      );
+      return;
+    }
+    final telUri = Uri(scheme: 'tel', path: trimmed);
+    try {
+      if (await canLaunchUrl(telUri)) {
+        await launchUrl(telUri);
+      } else {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Unable to place the call.')),
+        );
+      }
+    } catch (_) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Unable to place the call.')),
+      );
+    }
+  }
+
+  Future<void> _openChat(BuildContext context, _CaregiverJob job) async {
+    final userId = job.userId.trim();
+    if (userId.isEmpty) {
+      _showMessage(context, 'Client not attached yet');
+      return;
+    }
+    final caregiverId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (caregiverId.isEmpty) {
+      _showMessage(context, 'Please sign in to chat');
+      return;
+    }
+    final chatService = ChatService();
+    final chatId = await chatService.createOrGetChat(
+      userId,
+      caregiverId,
+      personId: job.personId,
+    );
+    if (!context.mounted) return;
+    if (chatId.isEmpty) {
+      _showMessage(context, 'Unable to open chat');
+      return;
+    }
+    final personName = job.personName.isNotEmpty ? job.personName : 'Client';
+    await chatService.setChatLabel(chatId, personName);
+    await chatService.setChatPersonInfo(
+      chatId,
+      personId: job.personId,
+      personName: personName,
+    );
+    if (!context.mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => UserChatScreen(
+          chatId: chatId,
+          otherUserId: userId,
+          otherUserName: personName,
+          hideCallAction: true,
+        ),
+      ),
+    );
+  }
+
+  void _showMessage(BuildContext context, String message) {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger
       ..removeCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
   }
@@ -577,22 +797,14 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     bool hasAssignedBooking,
     bool isAvailable,
   ) async {
-    if (hasAssignedBooking) {
-      _showAction(
-        context,
-        'You cannot go available while a booking is still assigned to you.',
-      );
-      return;
-    }
-    if (isAvailable) {
-      _showAction(context, 'You are already marked available today.');
-      return;
-    }
+    if (hasAssignedBooking) return;
+    final targetAvailability = !isAvailable;
     try {
-      await caregiverRef.set({'availability': true}, SetOptions(merge: true));
-      _showAction(context, 'Availability turned on. Ready for bookings.');
-    } catch (e) {
-      _showAction(context, 'Failed to update availability: $e');
+      await caregiverRef.set({
+        'availability': targetAvailability,
+      }, SetOptions(merge: true));
+    } catch (_) {
+      // Intentionally silent: no snackbars per request.
     }
   }
 }
@@ -653,388 +865,6 @@ class _QuickActionButton extends StatelessWidget {
       ],
     );
   }
-}
-
-class _StatQuickActionData {
-  const _StatQuickActionData({
-    required this.icon,
-    required this.value,
-    required this.label,
-  });
-
-  final IconData icon;
-  final String value;
-  final String label;
-}
-
-class _StatQuickAction extends StatelessWidget {
-  const _StatQuickAction({required this.data});
-
-  final _StatQuickActionData data;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: _sectionCardHeight,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Icon(data.icon, size: 18, color: _primaryBlue),
-            Text(
-              data.value,
-              style: const TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-                color: _primaryBlue,
-              ),
-            ),
-            Text(
-              data.label,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 11,
-                color: _profileDarkText.withValues(alpha: 0.6),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _TodayJobTile extends StatelessWidget {
-  const _TodayJobTile({required this.job});
-
-  final _CaregiverJob job;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: _sectionCardHeight,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(_cardRadius),
-        border: Border.all(color: Colors.grey.withAlpha(80)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withAlpha(20),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      child: Row(
-        children: [
-          CircleAvatar(
-            radius: 28,
-            backgroundColor: Colors.grey.shade200,
-            child: Text(
-              job.client.isNotEmpty ? job.client[0].toUpperCase() : '?',
-              style: const TextStyle(color: Colors.black54),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: Text(
-                        job.client,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 14,
-                          color: _profileDarkText,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      job.price,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 14,
-                        color: _profileDarkText,
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    _StatusBadge(status: job.status),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  job.service,
-                  style: const TextStyle(fontSize: 12, color: Colors.black54),
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.access_time,
-                      size: 14,
-                      color: Colors.black54,
-                    ),
-                    const SizedBox(width: 4),
-                    Expanded(
-                      child: Text(
-                        job.time,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          color: Colors.black54,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.location_on,
-                      size: 14,
-                      color: Colors.black54,
-                    ),
-                    const SizedBox(width: 4),
-                    Expanded(
-                      child: Text(
-                        job.address,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          color: Colors.black45,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-                Row(
-                  children: [
-                    _JobActionIcon(
-                      icon: Icons.phone,
-                      label: 'Call',
-                      onTap: () =>
-                          _showAction(context, 'Call shortcut coming soon'),
-                    ),
-                    const SizedBox(width: 6),
-                    _JobActionIcon(
-                      icon: Icons.chat_bubble_outline,
-                      label: 'Message',
-                      onTap: () => _showAction(
-                        context,
-                        'Messaging shortcut coming soon',
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showAction(BuildContext context, String message) {
-    ScaffoldMessenger.of(context)
-      ..removeCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  Future<void> _onStartDayTap(
-    BuildContext context,
-    DocumentReference<Map<String, dynamic>> caregiverRef,
-    bool hasAssignedBooking,
-    bool isAvailable,
-  ) async {
-    if (hasAssignedBooking) {
-      _showAction(
-        context,
-        'You cannot go available while a booking is still assigned to you.',
-      );
-      return;
-    }
-    if (isAvailable) {
-      _showAction(context, 'You are already marked available today.');
-      return;
-    }
-    try {
-      await caregiverRef.set({'availability': true}, SetOptions(merge: true));
-      _showAction(context, 'Availability turned on. Ready for bookings.');
-    } catch (e) {
-      _showAction(context, 'Failed to update availability: $e');
-    }
-  }
-}
-
-class _ActiveJobCard extends StatelessWidget {
-  const _ActiveJobCard({required this.job});
-
-  final _CaregiverJob job;
-
-  @override
-  Widget build(BuildContext context) {
-    final price = job.price;
-    final timeLabel = job.time.isNotEmpty ? job.time : 'Time pending';
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(_cardRadius),
-        border: Border.all(color: Colors.grey.withAlpha(90)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withAlpha(18),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              CircleAvatar(
-                radius: 26,
-                backgroundColor: Colors.grey.shade200,
-                child: Text(
-                  job.client.isNotEmpty ? job.client[0].toUpperCase() : '?',
-                  style: const TextStyle(
-                    color: Colors.black54,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      job.client,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 15,
-                        color: _profileDarkText,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      job.service,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Colors.black54,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  _StatusBadge(status: job.status),
-                  const SizedBox(height: 6),
-                  Text(
-                    price,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 13,
-                      color: _primaryBlue,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              const Icon(Icons.access_time, size: 14, color: Colors.black54),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Text(
-                  timeLabel,
-                  style: const TextStyle(fontSize: 11, color: Colors.black54),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Row(
-            children: [
-              const Icon(Icons.location_on, size: 14, color: Colors.black54),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Text(
-                  job.address,
-                  style: const TextStyle(fontSize: 11, color: Colors.black45),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
-          if (job.notes.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            Text(
-              job.notes,
-              style: const TextStyle(fontSize: 11, color: Colors.black87),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              _JobActionIcon(
-                icon: Icons.phone,
-                label: 'Call',
-                onTap: () => _showAction(context, 'Call shortcut coming soon'),
-              ),
-              const SizedBox(width: 8),
-              _JobActionIcon(
-                icon: Icons.chat_bubble_outline,
-                label: 'Message',
-                onTap: () =>
-                    _showAction(context, 'Messaging shortcut coming soon'),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showAction(BuildContext context, String message) {
-    ScaffoldMessenger.of(context)
-      ..removeCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
-  }
-}
-
-bool _isActiveStatus(String status) {
-  final normalized = status.trim().toUpperCase();
-  return normalized == 'ONGOING' ||
-      normalized == 'IN_PROGRESS' ||
-      normalized == 'ASSIGNED';
-}
-
-bool _isAssignedStatus(String status) {
-  return status.trim().toUpperCase() == 'ASSIGNED';
 }
 
 class _SectionInfoIcon extends StatefulWidget {
@@ -1101,38 +931,47 @@ class _SectionInfoIconState extends State<_SectionInfoIcon> {
   }
 }
 
-class _JobActionIcon extends StatelessWidget {
-  const _JobActionIcon({
+class _StatQuickActionData {
+  const _StatQuickActionData({
     required this.icon,
+    required this.value,
     required this.label,
-    required this.onTap,
   });
 
   final IconData icon;
+  final String value;
   final String label;
-  final VoidCallback onTap;
+}
+
+class _StatQuickAction extends StatelessWidget {
+  const _StatQuickAction({required this.data});
+
+  final _StatQuickActionData data;
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        decoration: BoxDecoration(
-          color: Colors.grey.shade100,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(
+    return SizedBox(
+      height: _sectionCardHeight,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Icon(icon, size: 16, color: Colors.black54),
-            const SizedBox(width: 4),
+            Icon(data.icon, size: 18, color: _primaryBlue),
             Text(
-              label,
+              data.value,
               style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: _primaryBlue,
+              ),
+            ),
+            Text(
+              data.label,
+              textAlign: TextAlign.center,
+              style: TextStyle(
                 fontSize: 11,
-                fontWeight: FontWeight.w600,
-                color: Colors.black87,
+                color: _profileDarkText.withValues(alpha: 0.6),
               ),
             ),
           ],
@@ -1142,71 +981,42 @@ class _JobActionIcon extends StatelessWidget {
   }
 }
 
-class _StatusBadge extends StatelessWidget {
-  const _StatusBadge({required this.status});
-
-  final String status;
-
-  Color get _indicatorColor {
-    final normalized = status.trim().toLowerCase();
-    if (normalized.contains('ongoing') || normalized.contains('in_progress')) {
-      return Colors.blue.shade700;
-    }
-    if (normalized.contains('assigned') ||
-        normalized.contains('ready') ||
-        normalized.contains('scheduled')) {
-      return _primaryBlue;
-    }
-    if (normalized.contains('completed')) {
-      return Colors.green.shade700;
-    }
-    if (normalized.contains('cancelled') || normalized.contains('canceled')) {
-      return Colors.red.shade700;
-    }
-    return Colors.grey.shade600;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: _indicatorColor.withAlpha(40),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _indicatorColor.withAlpha(150)),
-      ),
-      child: Text(
-        status,
-        style: TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-          color: _indicatorColor,
-        ),
-      ),
-    );
-  }
-}
-
 class _CaregiverJob {
   const _CaregiverJob({
-    required this.client,
-    required this.time,
-    required this.address,
+    required this.bookingId,
+    required this.userId,
+    required this.personId,
+    required this.personName,
+    required this.scheduledDate,
     required this.status,
-    required this.service,
     required this.price,
     required this.notes,
-    required this.startDate,
+    required this.caregiverId,
+    required this.location,
+    required this.service,
+    required this.personAge,
+    required this.time,
+    required this.personLabel,
+    required this.personAddress,
+    required this.cancellationReason,
   });
 
-  final String client;
-  final String time;
-  final String address;
+  final String bookingId;
+  final String userId;
+  final String personId;
+  final String personName;
+  final DateTime? scheduledDate;
   final String status;
-  final String service;
   final String price;
   final String notes;
-  final DateTime? startDate;
+  final String caregiverId;
+  final String location;
+  final String service;
+  final String personAge;
+  final String time;
+  final String personLabel;
+  final String personAddress;
+  final String cancellationReason;
 }
 
 class _EarningsSummary {
@@ -1224,15 +1034,21 @@ class _EarningsSummary {
 List<_CaregiverJob> _extractTodayJobs(
   List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
 ) {
+  final now = DateTime.now();
   final jobs = <_CaregiverJob>[];
   for (final doc in docs) {
     final data = doc.data();
-    final scheduled = data['scheduledDate'] as String? ?? '';
-    final scheduledDate = _parseScheduledDate(scheduled);
-    if (scheduledDate == null || !_isSameDay(scheduledDate, DateTime.now())) {
-      continue;
-    }
-    final client =
+    final status = ((data['status'] as String?) ?? '').trim();
+    if (!_isActiveStatus(status)) continue;
+
+    final scheduledDate = _parseScheduledDate(
+      (data['scheduledDate'] as String?) ?? (data['date'] as String?),
+    );
+    if (scheduledDate == null || !_isSameDay(scheduledDate, now)) continue;
+
+    final userId = (data['userId'] as String?) ?? '';
+    final personId = (data['personId'] as String?) ?? '';
+    final personName =
         (data['personName'] as String?) ??
         (data['userName'] as String?) ??
         'Client';
@@ -1240,46 +1056,144 @@ List<_CaregiverJob> _extractTodayJobs(
         (data['address'] as String?) ??
         (data['personAddress'] as String?) ??
         'Location pending';
-    final service = (data['service'] as String?) ?? 'Daily Care';
+    final service = (data['service'] as String?) ?? 'Care services';
     final notes = (data['notes'] as String?) ?? '';
-    final price = _formatPrice(data['price']);
+    final price = _formatPrice(
+      data['servicePrice'] ?? data['price'] ?? 0,
+    );
     final start = data['startTime'] as String? ?? '';
     final end = data['endTime'] as String? ?? '';
-    final startDate = _parseTime(start);
     final timeLabel = _formatTimeLabel(start, end);
-    final status = (data['status'] as String?)?.trim() ?? 'SCHEDULED';
-    if (!_isAssignedStatus(status)) continue;
+    final caregiverId = (data['caregiverId'] as String?) ?? '';
+    final personLabel = (data['personLabel'] as String?) ?? '';
+    final personAddress = (data['personAddress'] as String?) ??
+        (data['address'] as String?) ??
+        '';
+    final cancellationReason = (data['cancellationReason'] as String?) ?? '';
+
     jobs.add(
       _CaregiverJob(
-        client: client,
-        time: timeLabel,
-        address: address,
-        service: service,
-        status: status,
-        notes: notes,
+        bookingId: doc.id,
+        userId: userId,
+        personId: personId,
+        personName: personName,
+        scheduledDate: scheduledDate,
+        status: status.isNotEmpty ? status : 'SCHEDULED',
         price: price,
-        startDate: startDate,
+        notes: notes,
+        caregiverId: caregiverId,
+        location: address,
+        service: service,
+        personAge: _parseAge(data),
+        time: timeLabel,
+        personLabel: personLabel,
+        personAddress: personAddress,
+        cancellationReason: cancellationReason,
       ),
     );
   }
+
   jobs.sort((a, b) {
-    if (a.startDate != null && b.startDate != null) {
-      return a.startDate!.compareTo(b.startDate!);
-    }
-    return 0;
+    final aDate = a.scheduledDate ?? DateTime.now();
+    final bDate = b.scheduledDate ?? DateTime.now();
+    final dateComparison = aDate.compareTo(bDate);
+    if (dateComparison != 0) return dateComparison;
+    return a.time.compareTo(b.time);
   });
   return jobs;
+}
+
+List<_CaregiverJob> _extractScheduledJobs(
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+) {
+  final now = DateTime.now();
+  final jobs = <_CaregiverJob>[];
+  for (final doc in docs) {
+    final data = doc.data();
+    final status = ((data['status'] as String?) ?? '').trim();
+    if (!_isScheduledStatus(status)) continue;
+
+    final scheduledDate = _parseScheduledDate(
+      (data['scheduledDate'] as String?) ?? (data['date'] as String?),
+    );
+    if (scheduledDate == null) continue;
+    final today = DateTime(now.year, now.month, now.day);
+    if (scheduledDate.isBefore(today)) continue;
+
+    final userId = (data['userId'] as String?) ?? '';
+    final personId = (data['personId'] as String?) ?? '';
+    final personName =
+        (data['personName'] as String?) ??
+        (data['userName'] as String?) ??
+        'Client';
+    final address =
+        (data['address'] as String?) ??
+        (data['personAddress'] as String?) ??
+        'Location pending';
+    final service = (data['service'] as String?) ?? 'Care services';
+    final notes = (data['notes'] as String?) ?? '';
+    final price = _formatPrice(
+      data['servicePrice'] ?? data['price'] ?? 0,
+    );
+    final start = data['startTime'] as String? ?? '';
+    final end = data['endTime'] as String? ?? '';
+    final timeLabel = _formatTimeLabel(start, end);
+    final caregiverId = (data['caregiverId'] as String?) ?? '';
+    final personLabel = (data['personLabel'] as String?) ?? '';
+    final personAddress = (data['personAddress'] as String?) ??
+        (data['address'] as String?) ??
+        '';
+    final cancellationReason = (data['cancellationReason'] as String?) ?? '';
+
+    jobs.add(
+      _CaregiverJob(
+        bookingId: doc.id,
+        userId: userId,
+        personId: personId,
+        personName: personName,
+        scheduledDate: scheduledDate,
+        status: status.isNotEmpty ? status : 'SCHEDULED',
+        price: price,
+        notes: notes,
+        caregiverId: caregiverId,
+        location: address,
+        service: service,
+        personAge: _parseAge(data),
+        time: timeLabel,
+        personLabel: personLabel,
+        personAddress: personAddress,
+        cancellationReason: cancellationReason,
+      ),
+    );
+  }
+
+  jobs.sort((a, b) {
+    final aDate = a.scheduledDate ?? DateTime.now();
+    final bDate = b.scheduledDate ?? DateTime.now();
+    final dateComparison = aDate.compareTo(bDate);
+    if (dateComparison != 0) return dateComparison;
+    return a.time.compareTo(b.time);
+  });
+  return jobs;
+}
+
+String _parseAge(Map<String, dynamic> data) {
+  final rawAge = data['personAge'] ?? data['age'];
+  if (rawAge is num) {
+    return rawAge.toInt().toString();
+  }
+  if (rawAge is String && rawAge.trim().isNotEmpty) {
+    return rawAge.trim();
+  }
+  return '';
 }
 
 _EarningsSummary _calculateEarnings(
   List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
 ) {
   final now = DateTime.now();
-  final startOfWeek = DateTime(
-    now.year,
-    now.month,
-    now.day,
-  ).subtract(Duration(days: now.weekday - 1));
+  final startOfWeek = DateTime(now.year, now.month, now.day)
+      .subtract(Duration(days: now.weekday - 1));
   final endOfWeek = startOfWeek.add(
     const Duration(days: 6, hours: 23, minutes: 59),
   );
@@ -1290,9 +1204,14 @@ _EarningsSummary _calculateEarnings(
     final data = doc.data();
     final status = (data['status'] as String?)?.toUpperCase() ?? '';
     if (status != 'COMPLETED') continue;
-    final price = (data['price'] as num?)?.toDouble() ?? 0.0;
+    final price = (data['price'] as num?)?.toDouble() ??
+        (data['servicePrice'] as num?)?.toDouble() ??
+        0.0;
+
     total += price;
-    final scheduled = DateTime.tryParse(data['scheduledDate'] as String? ?? '');
+    final scheduled = DateTime.tryParse(
+      (data['scheduledDate'] as String?) ?? '',
+    );
     if (scheduled != null &&
         !scheduled.isBefore(startOfWeek) &&
         !scheduled.isAfter(endOfWeek)) {
@@ -1401,3 +1320,27 @@ String _deriveAvatarInitial(String name) {
   if (cleaned.isNotEmpty) return cleaned[0].toUpperCase();
   return '?';
 }
+
+bool _isActiveStatus(String status) {
+  final normalized = status.trim().toUpperCase();
+  return normalized == 'ONGOING' ||
+      normalized == 'IN_PROGRESS' ||
+      normalized == 'ASSIGNED';
+}
+
+bool _isAssignedStatus(String status) {
+  return status.trim().toUpperCase() == 'ASSIGNED';
+}
+
+bool _isScheduledStatus(String status) {
+  final normalized = status.trim().toUpperCase();
+  return normalized == 'SCHEDULED' ||
+      normalized == 'PENDING' ||
+      normalized == 'READY';
+}
+
+bool _isCompletedStatus(String status) {
+  return status.trim().toUpperCase() == 'COMPLETED';
+}
+
+
