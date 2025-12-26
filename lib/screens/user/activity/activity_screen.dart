@@ -17,6 +17,7 @@ import '../booking/booking_summary_screen.dart';
 import '../booking/booking_person_screen.dart';
 import '../../../models/caregiver_model.dart';
 import 'package:intl/intl.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 
 const Color activityBackgroundColor = Colors.white;
 const Color activityPrimaryTextColor = Color(0xFF1B1D29);
@@ -77,6 +78,8 @@ class _ActivityScreenState extends State<ActivityScreen>
   List<_EnrichedBooking>? _cachedEnriched;
   final Set<String> _hiddenHistoryBookings = <String>{};
   final ChatService _chatService = ChatService();
+  final FirebaseFunctions _functions =
+      FirebaseFunctions.instanceFor(region: 'asia-southeast1');
 
   BookingStatus _statusFromString(String status) {
     final normalized = status.toUpperCase();
@@ -537,14 +540,22 @@ class _ActivityScreenState extends State<ActivityScreen>
   Future<bool> _cancelBooking(ActivityBooking booking, String reason) async {
     final messenger = ScaffoldMessenger.of(context);
     try {
-      await FirebaseFirestore.instance
-          .collection('bookings')
-          .doc(booking.id)
-          .update({'status': 'CANCELLED', 'cancellationReason': reason});
-      return mounted;
-    } catch (e) {
+      final callable = _functions.httpsCallable('cancelBooking');
+      await callable.call({
+        'bookingId': booking.id,
+        'reason': reason,
+      });
       if (!mounted) return false;
-      messenger.showSnackBar(SnackBar(content: Text('Unable to cancel: $e')));
+      messenger.showSnackBar(const SnackBar(
+        content: Text('Cancellation request submitted.'),
+      ));
+      return true;
+    } catch (e, st) {
+      if (!mounted) return false;
+      debugPrint('cancelBooking failed: $e\n$st');
+      messenger.showSnackBar(
+        SnackBar(content: Text('Unable to cancel booking: $e')),
+      );
       return false;
     }
   }

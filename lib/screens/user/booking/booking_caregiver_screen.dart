@@ -1045,6 +1045,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     final date = scheduleDate ?? DateTime.now();
     final start = startTime ?? TimeOfDay.fromDateTime(DateTime.now());
     final end = endTime ?? _endTimeFromStart(start);
+    final computedPrice =
+        _selectedCaregiver?.priceValue ?? _caregiverPrice(caregiver);
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => BookingSummaryScreen(
@@ -1053,7 +1055,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
           scheduleDate: date,
           startTime: start,
           endTime: end,
-          price: _caregiverPrice(caregiver),
+          price: computedPrice,
           selectedAddress: widget.selectedAddress,
           showScheduleSection: showSchedule,
         ),

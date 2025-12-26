@@ -663,56 +663,341 @@ exports.sendChatNotification = functions
 // =====================================================
 // TOYYIBPAY BILL (CALLABLE)
 // =====================================================
+// =====================================================
+// TOYYIBPAY CREATE BILL (CALLABLE - FROM APP)
+// =====================================================
+const qs = require("qs");
+
+async function createToyyibBill({
+  billName,
+  billDescription,
+  amount,
+  name,
+  email,
+  phone,
+}) {
+  const payload = {
+    userSecretKey: TOYYIBPAY_SECRET_KEY,
+    categoryCode: TOYYIBPAY_CATEGORY_CODE,
+
+    billName,
+    billDescription,
+
+    billPriceSetting: 1,
+    billPayorInfo: 1,
+
+    // RM + SEN
+    billAmount: Math.round((amount || 0) * 100),
+
+    billTo: name || "ElderAssist User",
+    billEmail: email || "noreply@elderassist.com",
+    billPhone: phone || "0123456789",
+
+    billReturnUrl: "elderassist://payment-success",
+
+    // ToyyibPay akan panggil function ni
+    billCallbackUrl: `https://asia-southeast1-${FB_PROJECT_ID}.cloudfunctions.net/toyyibpayCallback`,
+  };
+
+  const response = await axios.post(
+    "https://toyyibpay.com/index.php/api/createBill",
+    qs.stringify(payload),
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      timeout: 15000,
+    }
+  );
+
+  return {
+    billCode: response.data[0].BillCode,
+    paymentUrl: `https://toyyibpay.com/${response.data[0].BillCode}`,
+  };
+}
+
+function parseMultipartFormFields(bodyText) {
+  const result = {};
+  if (!bodyText) return result;
+  const lines = bodyText.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/Content-Disposition: form-data; name="([^"]+)"/);
+    if (!match) continue;
+    let valueIndex = i + 1;
+    while (valueIndex < lines.length && lines[valueIndex].trim() === "") {
+      valueIndex++;
+    }
+    if (valueIndex >= lines.length) break;
+    result[match[1]] = lines[valueIndex].trim();
+  }
+  return result;
+}
+
+exports.cancelBooking = functions
+  .region("asia-southeast1")
+  .https.onCall(async (data, context) => {
+    if (!context.auth) {
+      throw new functions.https.HttpsError("unauthenticated");
+    }
+    const bookingId = (data?.bookingId ?? '').toString();
+    const reason = (data?.reason ?? '').toString().trim();
+    const otherDetails = (data?.details ?? '').toString().trim();
+
+    if (bookingId.isEmpty || reason.isEmpty) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "bookingId and reason are required",
+      );
+    }
+
+    const bookingRef = db.collection("bookings").doc(bookingId);
+    const bookingSnap = await bookingRef.get();
+    if (!bookingSnap.exists) {
+      throw new functions.https.HttpsError("not-found", "Booking not found");
+    }
+
+    const booking = bookingSnap.data() || {};
+    const batch = db.batch();
+    batch.update(bookingRef, {
+      status: "CANCELLED",
+      cancellationReason: reason,
+      cancellationDetails: otherDetails,
+      cancellationRequestedAt: admin.firestore.FieldValue.serverTimestamp(),
+      cancellationRequestedBy: context.auth.uid,
+      notifyApp: true,
+    });
+
+    const billCode = booking.toyyibBillCode;
+    if (billCode) {
+      const paymentRef = db.collection("payments").doc(billCode);
+      batch.set(
+        paymentRef,
+        {
+          paymentStatus: "REFUND_REQUESTED",
+          refundRequestedAt: admin.firestore.FieldValue.serverTimestamp(),
+          refundRequestedBy: context.auth.uid,
+          refundReason: reason,
+        },
+        { merge: true },
+      );
+    }
+
+    await batch.commit();
+    return { success: true };
+  });
+
+exports.savePaymentDetails = functions
+  .region("asia-southeast1")
+  .https.onCall(async (data, context) => {
+    if (!context.auth) {
+      throw new functions.https.HttpsError("unauthenticated");
+    }
+    const uid = context.auth.uid;
+    const userRef = db.collection('users').doc(uid);
+    const paymentDetails = {
+      bankName: (data.bankName ?? '').trim(),
+      accountName: (data.accountName ?? '').trim(),
+      accountNumber: (data.accountNumber ?? '').trim(),
+      bankBranch: (data.bankBranch ?? '').trim(),
+      payoutRole: (data.payoutRole ?? 'client').trim(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    if (paymentDetails.bankName.isEmpty ||
+        paymentDetails.accountName.isEmpty ||
+        paymentDetails.accountNumber.isEmpty) {
+      throw new functions.https.HttpsError(
+        'invalid-argument',
+        'Please fill in the required fields.',
+      );
+    }
+    await userRef.set({'paymentDetails': paymentDetails}, {merge: true});
+    return { success: true };
+  });
+
 exports.createToyyibPayBill = functions
-  .region("us-central1")
+  .region("asia-southeast1")
   .https.onCall(async (data, context) => {
     if (!context.auth) {
       throw new functions.https.HttpsError("unauthenticated");
     }
 
-    const payload = {
-      userSecretKey: TOYYIBPAY_SECRET_KEY,
-      categoryCode: TOYYIBPAY_CATEGORY_CODE,
+    const result = await createToyyibBill({
       billName: data.billName,
       billDescription: data.billDescription,
-      billPriceSetting: 1,
-      billPayorInfo: 1,
-      billAmount: (data.amount * 100).toString(),
-      billReturnUrl: "https://elderassist.com/payment-success",
-      billCallbackUrl: `https://us-central1-${FB_PROJECT_ID}.cloudfunctions.net/toyyibpayCallback`,
-    };
-
-    const res = await axios.post(
-      "https://toyyibpay.com/index.php/api/createBill",
-      payload
-    );
+      amount: Number(data.amount) || 0,
+      name: data.name,
+      email: data.email,
+      phone: data.phone,
+    });
 
     return {
       success: true,
-      paymentUrl: `https://toyyibpay.com/${res.data[0].BillCode}`,
+      ...result,
+    };
+  });
+
+exports.createBookingAndPay = functions
+  .region("asia-southeast1")
+  .https.onCall(async (data, context) => {
+    if (!context.auth) {
+      throw new functions.https.HttpsError("unauthenticated");
+    }
+
+    const uid = context.auth.uid;
+    const bookingRef = db.collection("bookings").doc();
+    const amount = Number(data.amount) || Number(data.servicePrice) || 0;
+    const paymentResult = await createToyyibBill({
+      billName: data.billName,
+      billDescription: data.billDescription,
+      amount,
+      name: data.name,
+      email: data.email,
+      phone: data.phone,
+    });
+
+    const bookingData = {
+      bookingId: bookingRef.id,
+      userId: uid,
+      caregiverId: data.caregiverId || "",
+      caregiverName: data.caregiverName || "",
+      service: data.service || "",
+      personId: data.personId || "",
+      personName: data.personName || "",
+      personAddress: data.personAddress || "",
+      addressId: data.addressId || "",
+      addressLabel: data.addressLabel || "",
+      date: data.date || "",
+      time: data.time || "",
+      paymentMethod: data.paymentMethod || "ToyyibPay",
+      servicePrice: Number(data.servicePrice) || 0,
+      notes: data.notes || "",
+      status: "PENDING_PAYMENT",
+      toyyibBillCode: paymentResult.billCode,
+      toyyibPaymentUrl: paymentResult.paymentUrl,
+      notifyApp: true,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    await bookingRef.set(bookingData);
+
+    return {
+      success: true,
+      bookingId: bookingRef.id,
+      paymentUrl: paymentResult.paymentUrl,
     };
   });
 
 // =====================================================
 // TOYYIBPAY CALLBACK
 // =====================================================
+// =====================================================
+// TOYYIBPAY CALLBACK (SERVER → SERVER)
+// =====================================================
 exports.toyyibpayCallback = functions
-  .region("us-central1")
+  .region("asia-southeast1")
   .https.onRequest(async (req, res) => {
     try {
-      await db.collection("payments").doc(req.query.billcode).set(
+      console.log("Toyyib callback query:", req.query, req.body);
+
+      const rawBody = req.body;
+      let parsedBody = {};
+      let bodyText = "";
+      if (rawBody) {
+        if (Buffer.isBuffer(rawBody)) {
+          bodyText = rawBody.toString("utf8");
+          parsedBody = qs.parse(bodyText);
+        } else if (typeof rawBody === "string") {
+          bodyText = rawBody;
+          parsedBody = qs.parse(bodyText);
+        } else if (typeof rawBody === "object") {
+          parsedBody = rawBody;
+          bodyText = JSON.stringify(rawBody);
+        }
+      }
+      console.log("Toyyib callback bodyText:", bodyText.slice(0, 400));
+
+      const extractFromText = (key) => {
+        const regex = new RegExp(`${key}=([^\\r\\n&]+)`);
+        const match = bodyText.match(regex);
+        return match ? match[1] : undefined;
+      };
+
+      const multipartFields = parseMultipartFormFields(bodyText);
+      const billCode =
+        parsedBody.billcode ||
+        multipartFields.billcode ||
+        multipartFields.billcod ||
+        req.query?.billcode;
+      const statusValue =
+        parsedBody.status ||
+        multipartFields.status ||
+        multipartFields.stat ||
+        req.query?.status;
+      const fallbackBillCode = extractFromText("billcode");
+      const fallbackStatus = extractFromText("status");
+      const finalBillCode =
+        billCode ||
+        multipartFields.billcode ||
+        multipartFields.billcod ||
+        multipartFields.billCode ||
+        multipartFields.billcodex ||
+        fallbackBillCode;
+      const finalStatusValue =
+        statusValue ||
+        multipartFields.status ||
+        multipartFields.status_id ||
+        multipartFields.stat ||
+        fallbackStatus;
+      const status = finalStatusValue ? parseInt(finalStatusValue, 10) : null;
+
+      if (!finalBillCode) {
+        console.warn("Toyyib callback missing billcode", req.query, req.body);
+        return res.status(400).send("Missing billcode");
+      }
+
+      if (!finalStatusValue) {
+        console.warn("Toyyib callback missing status", req.query, req.body);
+        return res.status(400).send("Missing status");
+      }
+
+      await db.collection("payments").doc(finalBillCode).set(
         {
-          status: parseInt(req.query.status),
-          updatedAt: Date.now(),
+          status,          // 1 = success, 2 = pending, 3 = failed
+          paidAt: Date.now(),
         },
         { merge: true }
       );
-      res.send("OK");
+
+        const bookingSnap = await db
+          .collection("bookings")
+          .where("toyyibBillCode", "==", finalBillCode)
+        .limit(1)
+        .get();
+      if (!bookingSnap.empty) {
+        const bookingRef = bookingSnap.docs[0].ref;
+        const bookingUpdate = {
+          notifyApp: true,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+        if (status === 1) {
+          bookingUpdate.status = "ASSIGNED";
+          bookingUpdate.paymentStatus = "PAID";
+          bookingUpdate.paidAt = Date.now();
+        } else {
+          bookingUpdate.status = "PAYMENT_FAILED";
+          bookingUpdate.paymentStatus = status === 3 ? "FAILED" : "PENDING";
+        }
+        await bookingRef.update(bookingUpdate);
+      }
+
+      res.status(200).send("OK");
     } catch (err) {
-      console.error(err);
+      console.error("Toyyib callback error:", err);
       res.status(500).send("ERROR");
     }
   });
+
 
 // =====================================================
 // HELPER: DISTANCE CALCULATION

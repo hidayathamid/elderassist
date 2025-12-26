@@ -36,6 +36,7 @@ subprojects {
             when (project.name) {
                 "jitsi_meet" -> namespace = "com.gunschu.jitsi_meet"
                 "jitsi_meet_wrapper" -> namespace = "dev.saibotma.jitsi_meet_wrapper"
+                "uni_links" -> namespace = "name.avioli.unilinks"
             }
         }
     }

@@ -1,10 +1,11 @@
-﻿import 'package:cloud_firestore/cloud_firestore.dart';
+﻿import 'package:cloud_functions/cloud_functions.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:intl/intl.dart' as intl;
+import 'package:url_launcher/url_launcher.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
-import 'package:emergencies_disability_assistance_app/screens/user/user_root_screen.dart';
 import 'booking_person_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/profile/profile_addresses_screen.dart';
 import '../../../constants/service_options.dart';
@@ -12,9 +13,6 @@ import '../../../models/caregiver_model.dart';
 
 const Color _tealAccent = Color(0xFF00A8A7);
 const Color _actionGold = Color(0xFFF4B63D);
-const TextStyle _dialogTitleStyle = TextStyle(fontWeight: FontWeight.w700);
-const TextStyle _dialogContentStyle = TextStyle(color: Colors.black87);
-
 const Color _bookingAppBarText = Color(0xFF1B1D29);
 const TextStyle _sectionLabelTextStyle = TextStyle(
   fontSize: 14,
@@ -61,6 +59,7 @@ class BookingSummaryScreen extends StatefulWidget {
 class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   bool _isLoading = false;
   String _selectedService = '';
+  static const bool _forceToyyibTestAmount = true;
   late DateTime _selectedDate;
   late List<TimeOfDay> _timeOptions;
   late int _selectedTimeIndex;
@@ -159,41 +158,40 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
           ? 'General care'
           : _selectedService;
       final pickupDetails = _currentPerson.notes.trim();
-      final firestore = FirebaseFirestore.instance;
-      final bookingRef = firestore.collection('bookings').doc();
       final startTimeValue = _timeOptions[_selectedTimeIndex];
       final personAddress =
           (_activeAddress.addressLine ?? _activeAddress.subtitle).trim();
-      final bookingData = {
-        'bookingId': bookingRef.id,
-        'userId': user.uid,
-        'caregiverId': widget.caregiver.id,
-        'caregiverName': widget.caregiver.name,
-        'service': serviceLabel,
-        'personId': _currentPerson.id,
-        'personName': _currentPerson.name,
-        'personAddress': personAddress,
-        'addressId': _activeAddress.id,
-        'date': _formatDate(_selectedDate),
-        'time': _formatTimeOfDay(startTimeValue),
-        'paymentMethod': _selectedPaymentMethod!,
-        'servicePrice': widget.price,
-        'status': _isBookInAdvance ? 'SCHEDULED' : 'ASSIGNED',
-        'notes': pickupDetails,
-        'createdAt': FieldValue.serverTimestamp(),
-      };
-
-      await bookingRef.set(bookingData);
-
-      if (!mounted) return;
-      await _showBookingSuccessDialog();
-      if (!mounted) return;
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(
-          builder: (_) => const UserRootScreen(initialIndex: 3),
-        ),
-        (route) => false,
+      final billingAmount =
+          _forceToyyibTestAmount ? 1.0 : widget.price;
+      final formattedDate = _formatDate(_selectedDate);
+      final formattedTime = _formatTimeOfDay(startTimeValue);
+      final billName = 'Booking: $serviceLabel';
+      final billDescription =
+          'Care booking for $serviceLabel on ${intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate)} at $formattedTime';
+      final paymentUrl = await _createToyyibPayBill(
+        serviceLabel: serviceLabel,
+        billingAmount: billingAmount,
+        bookingInfo: {
+          'caregiverId': widget.caregiver.id,
+          'caregiverName': widget.caregiver.name,
+          'service': serviceLabel,
+          'personId': _currentPerson.id,
+          'personName': _currentPerson.name,
+          'personAddress': personAddress,
+          'addressId': _activeAddress.id,
+          'addressLabel': _activeAddress.label ?? _currentPerson.label ?? '',
+          'date': formattedDate,
+          'time': formattedTime,
+          'paymentMethod': _selectedPaymentMethod!,
+          'servicePrice': widget.price,
+          'notes': pickupDetails,
+        },
+        billName: billName,
+        billDescription: billDescription,
       );
+      if (paymentUrl == null) return;
+      await launchUrl(paymentUrl, mode: LaunchMode.externalApplication);
+      return;
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -224,8 +222,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         'personAddress': addressText,
         'personId': _currentPerson.id,
         'personPhone': _currentPerson.phone,
-        'addressLabel':
-            _activeAddress.label ?? _currentPerson.label ?? '',
+        'addressLabel': _activeAddress.label ?? _currentPerson.label ?? '',
         'caregiverName': widget.caregiver.name,
         'addressId': _activeAddress.id,
         'updatedAt': FieldValue.serverTimestamp(),
@@ -240,48 +237,6 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
-  }
-
-  Future<void> _showBookingSuccessDialog() async {
-    if (!mounted) return;
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: const Text(
-          'Success',
-          textAlign: TextAlign.center,
-          style: _dialogTitleStyle,
-        ),
-        content: const Text(
-          'Booking stored successfully.',
-          textAlign: TextAlign.center,
-          style: _dialogContentStyle,
-        ),
-        actionsAlignment: MainAxisAlignment.center,
-        actionsPadding: const EdgeInsets.only(bottom: 12),
-        actions: [
-          SizedBox(
-            width: 120,
-            child: ElevatedButton(
-              onPressed: () => Navigator.of(context).pop(),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _actionGold,
-                foregroundColor: Colors.black,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                textStyle: const TextStyle(fontWeight: FontWeight.w700),
-              ),
-              child: const Text('OK'),
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   String _formatDate(DateTime date) {
@@ -425,7 +380,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: ElevatedButton(
                 onPressed: _canConfirmBooking
-                    ? (_isEditingBooking ? _saveBookingChanges : _confirmBooking)
+                    ? (_isEditingBooking
+                          ? _saveBookingChanges
+                          : _confirmBooking)
                     : null,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _actionGold,
@@ -681,7 +638,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     final selectedItem = AddressItem.fromMap(selectedMap);
     setState(() {
       _activeAddress = selectedItem;
-      final selectedName = (selectedMap['name'] ?? selectedItem.title)?.toString();
+      final selectedName = (selectedMap['name'] ?? selectedItem.title)
+          ?.toString();
       final selectedLabel =
           (selectedMap['label'] ?? selectedMap['forWho'] ?? selectedItem.label)
               ?.toString();
@@ -692,10 +650,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
             ? selectedName!.trim()
             : _currentPerson.name,
         age: _currentPerson.age,
-        address:
-            selectedItem.addressLine?.trim().isNotEmpty == true
-                ? selectedItem.addressLine!
-                : selectedItem.subtitle,
+        address: selectedItem.addressLine?.trim().isNotEmpty == true
+            ? selectedItem.addressLine!
+            : selectedItem.subtitle,
         conditions: _currentPerson.conditions,
         photoUrl: _currentPerson.photoUrl,
         label: (selectedLabel?.trim().isNotEmpty ?? false)
@@ -768,7 +725,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         Text(
-                          DateFormat('EEE').format(date),
+                          intl.DateFormat('EEE').format(date),
                           style: TextStyle(
                             color: selected
                                 ? Colors.white
@@ -781,7 +738,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                         ),
                         const SizedBox(height: 3),
                         Text(
-                          DateFormat('d').format(date).padLeft(2, '0'),
+                          intl.DateFormat('d').format(date).padLeft(2, '0'),
                           style: TextStyle(
                             color: selected
                                 ? Colors.white
@@ -891,7 +848,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: GestureDetector(
-        onTap: canSelect ? () => setState(() => _selectedService = service) : null,
+        onTap: canSelect
+            ? () => setState(() => _selectedService = service)
+            : null,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
           decoration: BoxDecoration(
@@ -979,7 +938,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   }
 
   Widget _buildBookingSummaryDetails() {
-    final dateLabel = DateFormat('EEE, d MMM yyyy').format(_selectedDate);
+    final dateLabel = intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate);
     final timeLabel = _formatTimeOfDay(_timeOptions[_selectedTimeIndex]);
     final serviceLabel = _selectedService.isEmpty
         ? 'General care'
@@ -1031,12 +990,6 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       'label': 'TP',
       'color': Color(0xFF1A73E8),
       'asset': 'assets/images/toyyib_logo.png',
-    },
-    {
-      'title': 'PayPal',
-      'label': 'PP',
-      'color': Color(0xFF0B5BA1),
-      'asset': 'assets/images/paypal_logo.png',
     },
   ];
 
@@ -1137,8 +1090,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
 
   Widget _buildAddPaymentCard() {
     final locked = _lockServiceAndPayment;
-    final displayLabel =
-        _selectedPaymentMethod ?? 'Add payment method';
+    final displayLabel = _selectedPaymentMethod ?? 'Add payment method';
     final cardContent = Row(
       children: [
         Icon(
@@ -1298,5 +1250,85 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       time.minute,
     );
     return candidate.isBefore(now);
+  }
+
+  Future<Uri?> _createToyyibPayBill({
+    required String serviceLabel,
+    required double billingAmount,
+    required Map<String, dynamic> bookingInfo,
+    required String billName,
+    required String billDescription,
+  }) async {
+    try {
+      final authUser = FirebaseAuth.instance.currentUser;
+      final userSnapshot = authUser != null
+          ? await FirebaseFirestore.instance
+              .collection('users')
+              .doc(authUser.uid)
+              .get()
+          : null;
+      final userData = userSnapshot?.data();
+      final payerName =
+          _stringValue(userData?['name']) ??
+          authUser?.displayName ??
+          'ElderAssist User';
+      final payerEmail =
+          _stringValue(userData?['email']) ??
+          authUser?.email ??
+          'noreply@elderassist.com';
+      final payerPhone =
+          _stringValue(userData?['phone']) ??
+          _stringValue(userData?['mobile']) ??
+          authUser?.phoneNumber ??
+          '0123456789';
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'asia-southeast1',
+      ).httpsCallable('createBookingAndPay');
+      debugPrint(
+        'ToyyibPay callable payload: billName=$billName, '
+        'amount=$billingAmount (displayed price=${bookingInfo['servicePrice']})',
+      );
+      final response = await callable.call({
+        ...bookingInfo,
+        'billName': billName,
+        'billDescription': billDescription,
+        'amount': billingAmount,
+        'name': payerName,
+        'email': payerEmail,
+        'phone': payerPhone,
+      });
+      debugPrint('ToyyibPay callable response: ${response.data}');
+      final paymentUrl = response.data?['paymentUrl'] as String?;
+      if (paymentUrl != null && paymentUrl.isNotEmpty) {
+        return Uri.parse(paymentUrl);
+      }
+      await _showPaymentErrorDialog(
+        'ToyyibPay did not return a payment link. Please try again.',
+      );
+    } catch (err, stack) {
+      final message = err is FirebaseFunctionsException
+          ? err.message ?? err.code
+          : err.toString();
+      debugPrint('ToyyibPay create bill failed: $err\n$stack');
+      await _showPaymentErrorDialog('Payment initialization failed: $message');
+    }
+    return null;
+  }
+
+  Future<void> _showPaymentErrorDialog(String message) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Payment Error'),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
   }
 }

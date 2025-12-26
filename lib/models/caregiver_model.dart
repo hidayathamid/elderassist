@@ -41,8 +41,8 @@ class CaregiverModel {
       rating: (data['rating']).toDouble(),
       jobsCompleted: data['jobsCompleted'],
       availability: data['availability'],
-      lat: (data['lat']).toDouble(),
-      lng: (data['lng']).toDouble(),
+      lat: _latFromData(data),
+      lng: _lngFromData(data),
       price: data['price'],
     );
   }
@@ -95,6 +95,40 @@ class CaregiverModel {
       return value.toDouble();
     }
     return fallback;
+  }
+
+  static double _latFromData(Map<String, dynamic> data) {
+    final lat = data['lat'];
+    if (lat is num) return lat.toDouble();
+    final addressLat = _addressCoordinate(data, 'latitude') ?? _addressCoordinate(data, 'lat');
+    return addressLat ?? 0.0;
+  }
+
+  static double _lngFromData(Map<String, dynamic> data) {
+    final lng = data['lng'];
+    if (lng is num) return lng.toDouble();
+    final addressLng = _addressCoordinate(data, 'longitude') ?? _addressCoordinate(data, 'lng');
+    return addressLng ?? 0.0;
+  }
+
+  static double? _addressCoordinate(
+    Map<String, dynamic> data,
+    String key,
+  ) {
+    final rawAddresses = data['address'];
+    if (rawAddresses is Iterable) {
+      for (final entry in rawAddresses) {
+        if (entry is Map<String, dynamic>) {
+          final value = entry[key];
+          if (value is num) return value.toDouble();
+          if (value is String) {
+            final parsed = double.tryParse(value);
+            if (parsed != null) return parsed;
+          }
+        }
+      }
+    }
+    return null;
   }
 
   static int _safeInt(dynamic value, [int fallback = 0]) {

@@ -88,8 +88,12 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
       if (!hasPermission) return;
       final position = await Geolocator.getCurrentPosition();
       if (!mounted) return;
+      debugPrint(
+        'UserHomeScreen: location loaded ${position.latitude}, ${position.longitude}',
+      );
       setState(() => _currentPosition = position);
     } catch (_) {
+      debugPrint('UserHomeScreen: failed to load location');
       // ignore
     }
   }
@@ -243,6 +247,9 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
   double? _distanceToCaregiver(CaregiverModel model) {
     final position = _currentPosition;
     if (position == null) return null;
+    debugPrint(
+      'calc distance to ${model.name} using position ${position.latitude},${position.longitude}',
+    );
     return Geolocator.distanceBetween(
       position.latitude,
       position.longitude,
