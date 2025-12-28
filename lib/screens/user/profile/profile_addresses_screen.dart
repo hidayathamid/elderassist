@@ -8,6 +8,7 @@ import 'profile_overview_screen.dart';
 
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _tealAccent = Color(0xFF00B8C6);
+const Color _reminderIconColor = Color(0xFF00A8A7);
 const Color _accentGold = Color(0xFFF4B63D);
 
 class ProfileAddressesScreen extends StatefulWidget {
@@ -35,6 +36,7 @@ class _ProfileAddressesScreenState extends State<ProfileAddressesScreen> {
       !_isSelectionMode || widget.selectionModeForBookingEdit == false;
   bool get _showActionButtons =>
       !_isSelectionMode || widget.selectionModeForBookingEdit == false;
+  bool _autoDefaulting = false;
 
   Future<void> _setAsDefault(String userId, String addressId) async {
     final userRef = FirebaseFirestore.instance.collection("users").doc(userId);
@@ -57,6 +59,14 @@ class _ProfileAddressesScreenState extends State<ProfileAddressesScreen> {
     if (changed) {
       await userRef.update({"address": list});
     }
+  }
+
+  void _autoDefaultSingleAddress(String userId, String addressId) {
+    if (_autoDefaulting) return;
+    _autoDefaulting = true;
+    _setAsDefault(userId, addressId).whenComplete(() {
+      _autoDefaulting = false;
+    });
   }
 
   Future<void> _deleteAddress(String userId, String addressId) async {
@@ -149,6 +159,16 @@ class _ProfileAddressesScreenState extends State<ProfileAddressesScreen> {
               if (ad != bd) return bd - ad;
               return 0;
             });
+          if (sortedDocs.length == 1) {
+            final onlyEntry = sortedDocs.first;
+            final id = onlyEntry["id"]?.toString();
+            final isDefault = onlyEntry["isDefault"] ?? false;
+            if (id != null && !isDefault) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _autoDefaultSingleAddress(user.uid, id);
+              });
+            }
+          }
 
           return SingleChildScrollView(
             physics: const BouncingScrollPhysics(),
@@ -171,23 +191,11 @@ class _ProfileAddressesScreenState extends State<ProfileAddressesScreen> {
                   const SizedBox(height: 12),
                 ],
                 if (sortedDocs.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: const [
-                        Icon(
-                          Icons.location_off,
-                          color: Colors.black26,
-                          size: 32,
-                        ),
-                        SizedBox(height: 10),
-                        Text(
-                          "You haven't added any addresses yet.",
-                          style: TextStyle(color: Colors.black45, fontSize: 14),
-                        ),
-                      ],
-                    ),
+                  _buildEmptyReminder(
+                    icon: Icons.location_off,
+                    headline: 'No addresses yet',
+                    explanation:
+                        'Add your family members so we can book caregivers for them.',
                   ),
                 ...sortedDocs.map((entry) {
                   final id = entry["id"]?.toString();
@@ -201,6 +209,7 @@ class _ProfileAddressesScreenState extends State<ProfileAddressesScreen> {
                       name: entry["name"] ?? "",
                       phone: entry["phone"] ?? "",
                       address: entry["address"] ?? "",
+                      photoUrl: entry["photoUrl"]?.toString(),
                       label: label,
                       isDefault: isDefault,
                       isSelected: _isSelectionMode && id == _selectedAddressId,
@@ -339,6 +348,7 @@ class _AddressCard extends StatelessWidget {
   final String phone;
   final String address;
   final String label;
+  final String? photoUrl;
   final bool isDefault;
   final VoidCallback onEdit;
   final VoidCallback? onSetDefault;
@@ -355,6 +365,7 @@ class _AddressCard extends StatelessWidget {
     required this.phone,
     required this.address,
     required this.label,
+    this.photoUrl,
     required this.isDefault,
     required this.onEdit,
     required this.onSetDefault,
@@ -405,6 +416,7 @@ class _AddressCard extends StatelessWidget {
               children: [
                 DefaultProfileAvatar(
                   radius: compact ? 24 : 26,
+                  photoUrl: photoUrl,
                   label: name,
                 ),
                 const SizedBox(width: 10),
@@ -492,18 +504,18 @@ class _AddressCard extends StatelessWidget {
                 children: [
                   Expanded(
                     child: _ActionButton(
-                      label: "Edit",
-                      icon: Icons.edit_outlined,
-                      onTap: onEdit,
+                      label: isDefault ? "Default" : "Set Default",
+                      icon: isDefault ? Icons.check : Icons.star_outline,
+                      isPrimary: !isDefault,
+                      onTap: onSetDefault,
                     ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: _ActionButton(
-                      label: isDefault ? "Default" : "Set Default",
-                      icon: isDefault ? Icons.check : Icons.star_outline,
-                      isPrimary: !isDefault,
-                      onTap: onSetDefault,
+                      label: "Edit",
+                      icon: Icons.edit_outlined,
+                      onTap: onEdit,
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -536,6 +548,39 @@ class _AddressCard extends StatelessWidget {
       child: cardContent,
     );
   }
+}
+
+Widget _buildEmptyReminder({
+  required IconData icon,
+  required String headline,
+  required String explanation,
+  Color iconColor = _reminderIconColor,
+}) {
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 12),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Icon(icon, size: 32, color: iconColor),
+        const SizedBox(height: 10),
+        Text(
+          headline,
+          style: const TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 15,
+            color: _profileDarkText,
+          ),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          explanation,
+          style: const TextStyle(fontSize: 12, color: Colors.black54),
+          textAlign: TextAlign.center,
+        ),
+      ],
+    ),
+  );
 }
 
 class _ActionButton extends StatelessWidget {

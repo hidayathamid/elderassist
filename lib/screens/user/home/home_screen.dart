@@ -26,6 +26,7 @@ class UserHomeScreen extends StatefulWidget {
 
 const Color _homeHeadingTextColor = Color(0xFF1B1D29);
 const Color _serviceTagBlue = Color(0xFF00A8A7);
+const Color _primaryBlue = Color(0xFF00A8A7);
 const double _sheetInitialExtent = 0.83;
 const double _nearbyRadiusMeters = 30000;
 const double _sheetSectionSpacing = 18.0;
@@ -356,9 +357,7 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
         return _CaregiverSection(
           title: 'Nearby Caregivers',
           caregivers: caregivers,
-          emptyMessage: caregivers.isEmpty
-              ? 'No caregiver near you only'
-              : null,
+          emptyMessage: caregivers.isEmpty ? 'No caregiver near you' : null,
           trailing: _SectionInfoIcon(
             message: 'Within 30 km of your current location.',
           ),
@@ -416,9 +415,8 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
           trailing: _SectionInfoIcon(
             message: 'Matches your selected service preferences.',
           ),
-          emptyMessage: caregivers.isEmpty
-              ? 'No caregiver near you only'
-              : null,
+          emptyMessage:
+              caregivers.isEmpty ? 'No caregiver near you' : null,
           onHide: caregivers.isEmpty
               ? () => _collapseSection(_CaregiverSectionType.recommended)
               : null,
@@ -888,18 +886,19 @@ class _QuickActionButton extends StatelessWidget {
           child: InkWell(
             customBorder: const CircleBorder(),
             onTap: onTap,
-            child: Container(
-              height: _buttonSize,
-              width: _buttonSize,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: Colors.grey.withAlpha(_alphaFromOpacity(0.2)),
+              child: Container(
+                height: _buttonSize,
+                width: _buttonSize,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _serviceTagBlue.withOpacity(0.12),
+                  border: Border.all(
+                    color: _serviceTagBlue.withOpacity(0.4),
+                  ),
                 ),
+                child: Icon(icon, size: 22, color: _serviceTagBlue),
               ),
-              child: Icon(icon, size: 22, color: _serviceTagBlue),
-            ),
           ),
         ),
         const SizedBox(height: 4),
@@ -1043,19 +1042,7 @@ class _CaregiverSection extends StatelessWidget {
       content = SizedBox(
         height: _caregiverTileHeight,
         child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.location_off, size: 32, color: Colors.grey),
-              const SizedBox(height: 6),
-              Text(
-                emptyMessage!,
-                style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
+          child: _emptyCaregiverPlaceholder(message: emptyMessage!),
         ),
       );
     } else {
@@ -1078,6 +1065,35 @@ class _CaregiverSection extends StatelessWidget {
       children: [headerRow, const SizedBox(height: 6), content],
     );
   }
+}
+
+Widget _emptyCaregiverPlaceholder({
+  required String message,
+  String explanation =
+      'They’ll show up as soon as they become available near you.',
+}) {
+  return Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      const Icon(Icons.flash_on, size: 32, color: _serviceTagBlue),
+      const SizedBox(height: 10),
+      Text(
+        message,
+        style: const TextStyle(
+          fontSize: 14,
+          color: Color(0xFF1B1D29),
+          fontWeight: FontWeight.w500,
+        ),
+        textAlign: TextAlign.center,
+      ),
+      const SizedBox(height: 4),
+      Text(
+        explanation,
+        textAlign: TextAlign.center,
+        style: const TextStyle(fontSize: 12, color: Colors.black54),
+      ),
+    ],
+  );
 }
 
 const double _caregiverTileHeight = 120;

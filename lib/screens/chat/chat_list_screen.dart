@@ -311,11 +311,10 @@ class _ChatListScreenState extends State<ChatListScreen> {
             return !_isChatDocHidden(doc) && !_hiddenChatIds.contains(doc.id);
           }).toList();
           if (visibleChats.isEmpty) {
-            return const Center(
-              child: Text(
-                'No chats yet',
-                style: TextStyle(fontSize: 16, color: _chatMutedText),
-              ),
+            return _buildEmptyGuidance(
+              icon: Icons.chat,
+              headline: 'No chats yet',
+              explanation: 'Start a conversation after you book a caregiver.',
             );
           }
 
@@ -411,6 +410,40 @@ class _ChatListScreenState extends State<ChatListScreen> {
       ),
     );
   }
+}
+
+Widget _buildEmptyGuidance({
+  required IconData icon,
+  required String headline,
+  required String explanation,
+}) {
+  return Align(
+    alignment: Alignment.topCenter,
+    child: Padding(
+      padding: const EdgeInsets.only(top: 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 32, color: activityAccentBlue),
+          const SizedBox(height: 10),
+          Text(
+            headline,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              color: activityPrimaryTextColor,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            explanation,
+            style: const TextStyle(fontSize: 12, color: Colors.black54),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 class _ChatTile extends StatelessWidget {

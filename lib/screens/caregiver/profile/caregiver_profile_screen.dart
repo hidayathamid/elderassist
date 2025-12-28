@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import 'package:emergencies_disability_assistance_app/models/payment_document_target.dart';
 import '../../../services/auth_service.dart';
 import '../../auth/touchdown_screen.dart';
 import '../../../widgets/default_profile_avatar.dart';
@@ -15,6 +16,7 @@ import 'profile_availability_schedule_screen.dart';
 import 'profile_documents_screen.dart';
 
 const Color _accentGold = Color(0xFFF4B63D);
+const Color _accentBlue = Color(0xFF00A8A7);
 const Color _tealAccent = Color(0xFF00A8A7);
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _serviceChipBorder = Color(0xFFCCCCCC);
@@ -72,7 +74,9 @@ class CaregiverProfileScreen extends StatelessWidget {
         final photoUrl = (data['photoUrl'] as String?) ?? '';
         final rating = (data['rating'] as num?)?.toDouble() ?? 0.0;
         final available = (data['availability'] as bool?) ?? true;
-        final services = _stringListFromField(data['services']);
+        final services = _stringListFromField(
+          data['servicePreferences'] ?? data['services'],
+        );
         final availabilitySchedule = data['availabilitySchedule'] as Iterable?;
         final availabilityCount =
             availabilitySchedule?.length ?? (available ? 1 : 0);
@@ -252,21 +256,17 @@ class CaregiverProfileScreen extends StatelessWidget {
                                 Icon(
                                   Icons.star,
                                   size: 12,
-                                  color: available
-                                      ? _tealAccent
-                                      : Colors.grey.shade500,
+                                  color: _accentBlue,
                                 ),
                                 const SizedBox(width: 4),
                                 Text(
                                   rating != null
                                       ? rating.toStringAsFixed(1)
                                       : '-',
-                                  style: TextStyle(
+                                  style: const TextStyle(
                                     fontWeight: FontWeight.w600,
                                     fontSize: 11,
-                                    color: available
-                                        ? _profileDarkText
-                                        : Colors.grey.shade700,
+                                    color: _accentBlue,
                                   ),
                                 ),
                               ],
@@ -519,7 +519,9 @@ class CaregiverProfileScreen extends StatelessWidget {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => const ProfilePaymentsScreen(),
+                          builder: (_) => const ProfilePaymentsScreen(
+                            target: PaymentDocumentTarget.caregiver,
+                          ),
                         ),
                       );
                     },
@@ -613,7 +615,10 @@ class CaregiverProfileScreen extends StatelessWidget {
               ),
               child: const Text(
                 'Cancel',
-                style: TextStyle(fontWeight: FontWeight.w700),
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  color: Colors.black,
+                ),
               ),
             ),
           ),

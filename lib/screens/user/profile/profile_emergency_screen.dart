@@ -9,6 +9,23 @@ import 'profile_emergency_edit_screen.dart';
 
 const Color _tealAccent = Color(0xFF00A8A7);
 const Color _profileDarkText = Color(0xFF1B1D29);
+const Color _reminderIconColor = Color(0xFF00A8A7);
+const TextStyle _emergencyNameStyle = TextStyle(
+  fontSize: 14,
+  fontWeight: FontWeight.w600,
+  color: Colors.black87,
+);
+final TextStyle _emergencyRelationshipStyle = TextStyle(
+  fontSize: 11,
+  fontWeight: FontWeight.w500,
+  color: Colors.grey[500],
+);
+final TextStyle _emergencyPhoneStyle = TextStyle(
+  fontSize: 12,
+  fontWeight: FontWeight.w500,
+  color: Colors.grey[700],
+  height: 1.2,
+);
 
 class ProfileEmergencyScreen extends StatelessWidget {
   const ProfileEmergencyScreen({super.key});
@@ -123,19 +140,11 @@ class ProfileEmergencyScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 12),
                 if (contacts.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: const [
-                        Icon(Icons.call, color: Colors.black26, size: 32),
-                        SizedBox(height: 10),
-                        Text(
-                          "You haven't added any emergency contacts yet.",
-                          style: TextStyle(color: Colors.black45, fontSize: 14),
-                        ),
-                      ],
-                    ),
+                  _buildEmptyReminder(
+                    icon: Icons.call,
+                    headline: 'No emergency contacts',
+                    explanation:
+                        'Add someone we can reach in case you need urgent support.',
                   ),
                 ...contacts.map((entry) {
                   final id = entry['id']?.toString() ?? '';
@@ -149,6 +158,7 @@ class ProfileEmergencyScreen extends StatelessWidget {
                       name: name,
                       phone: phone,
                       relationship: relationship,
+                      photoUrl: entry['photoUrl']?.toString(),
                       onCall: phone.isNotEmpty
                           ? () => _dialNumber(context, phone)
                           : null,
@@ -247,6 +257,7 @@ class _EmergencyContactCard extends StatelessWidget {
   final String name;
   final String phone;
   final String relationship;
+  final String? photoUrl;
   final VoidCallback? onCall;
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;
@@ -255,6 +266,7 @@ class _EmergencyContactCard extends StatelessWidget {
     required this.name,
     required this.phone,
     required this.relationship,
+    this.photoUrl,
     this.onCall,
     this.onEdit,
     this.onDelete,
@@ -274,8 +286,8 @@ class _EmergencyContactCard extends StatelessWidget {
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.07),
             blurRadius: 12,
-            spreadRadius: 0.5,
             offset: const Offset(0, 6),
+            spreadRadius: 0.5,
           ),
         ],
       ),
@@ -283,11 +295,12 @@ class _EmergencyContactCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
             child: Row(
               children: [
                 DefaultProfileAvatar(
-                  radius: 16,
+                  radius: 26,
+                  photoUrl: photoUrl,
                   label: name,
                 ),
                 const SizedBox(width: 10),
@@ -297,32 +310,19 @@ class _EmergencyContactCard extends StatelessWidget {
                     children: [
                       Text(
                         name,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.black87,
-                        ),
+                        style: _emergencyNameStyle,
                       ),
                       if (relationship.isNotEmpty) ...[
-                        const SizedBox(height: 3),
+                        const SizedBox(height: 4),
                         Text(
                           relationship,
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w500,
-                            color: Colors.grey[500],
-                          ),
+                          style: _emergencyRelationshipStyle,
                         ),
                       ],
                       const SizedBox(height: 4),
                       Text(
                         phone,
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                          color: Colors.grey[700],
-                          height: 1.2,
-                        ),
+                        style: _emergencyPhoneStyle,
                       ),
                     ],
                   ),
@@ -337,15 +337,14 @@ class _EmergencyContactCard extends StatelessWidget {
               child: FractionallySizedBox(
                 widthFactor: 0.85,
                 child: Container(
-                  height: 1.5,
+                  height: 1.2,
                   color: Colors.black.withAlpha(20),
                 ),
               ),
             ),
           ),
-          const SizedBox(height: 4),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
             child: Row(
               children: [
                 Expanded(
@@ -447,4 +446,37 @@ class _ActionButton extends StatelessWidget {
       ),
     );
   }
+}
+
+Widget _buildEmptyReminder({
+  required IconData icon,
+  required String headline,
+  required String explanation,
+  Color iconColor = _reminderIconColor,
+}) {
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 12),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Icon(icon, size: 32, color: iconColor),
+        const SizedBox(height: 10),
+        Text(
+          headline,
+          style: const TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 15,
+            color: _profileDarkText,
+          ),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          explanation,
+          style: const TextStyle(fontSize: 12, color: Colors.black54),
+          textAlign: TextAlign.center,
+        ),
+      ],
+    ),
+  );
 }

@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:math';
-import 'dart:ui';
+import 'dart:ui' as ui;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/cupertino.dart';
@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter/services.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 import 'package:emergencies_disability_assistance_app/widgets/service_tag_chip.dart';
 
@@ -18,10 +19,68 @@ import 'booking_summary_screen.dart';
 
 enum CaregiverCategory { forYou, recommendation, nearby }
 
+const double _maxRuleDistance = 12.0;
+const double _preferredDistance = 6.0;
+const double _ratingPenaltyThreshold = 3.5;
+const double _minAcceptableRating = 3.0;
+
 const Color _bookingAppBarText = Color(0xFF1B1D29);
 const Color _caregiverMatchAccent = Color(0xFF00A8A7);
-const Color _caregiverMatchBackground = Color(0xFFE4F4FF);
+const Color _bookingTextDark = Color(0xFF1B1D29);
+const Color _categoryIndicatorColor = Color(0xFFF4F5F7);
+const double _categorySegmentRadius = 26.0;
 const Color _serviceTagBlue = Color(0xFF00A8A7);
+const double _recommendationScoreThreshold = 2200.0;
+
+const Color _primaryColor = Color(0xFFF4B63D);
+
+const String _gentleMapStyle = '''
+[
+  {
+    "elementType": "geometry",
+    "stylers": [
+      {
+        "color": "#f7f8fb"
+      }
+    ]
+  },
+  {
+    "elementType": "labels.text.fill",
+    "stylers": [
+      {
+        "color": "#3c415b"
+      }
+    ]
+  },
+  {
+    "featureType": "poi",
+    "elementType": "labels.text.fill",
+    "stylers": [
+      {
+        "color": "#8f92a1"
+      }
+    ]
+  },
+  {
+    "featureType": "road",
+    "elementType": "geometry",
+    "stylers": [
+      {
+        "color": "#dfe1e6"
+      }
+    ]
+  },
+  {
+    "featureType": "transit",
+    "elementType": "geometry",
+    "stylers": [
+      {
+        "color": "#cfd4dc"
+      }
+    ]
+  }
+]
+''';
 
 class CaregiverOption {
   CaregiverOption({
@@ -130,6 +189,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _caregiverSub;
   DateTime? _lastTap;
   late final AnimationController _shineController;
+  late final TabController _categoryTabController;
   static const String _mapsApiKey = String.fromEnvironment(
     'AIzaSyDADYhy-AAeikw72w9jq22FnMDCVXRJark',
     defaultValue: 'AIzaSyDADYhy-AAeikw72w9jq22FnMDCVXRJark',
@@ -157,6 +217,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     super.initState();
     _panelController = AnimationController(
       vsync: this,
+
       lowerBound: 0,
       upperBound: 1,
       value: 0,
@@ -168,6 +229,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       widget.person.longitude ?? 101.6869,
     );
     _markers = {_selectedMarker()};
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _refreshMarkers();
+    });
     _listController.addListener(_handleScrollCategoryDetection);
     _updatePanelVisuals();
     _loadClientPreferences();
@@ -175,11 +239,17 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       vsync: this,
       duration: const Duration(milliseconds: 1600),
     )..repeat();
+    _categoryTabController = TabController(
+      length: CaregiverCategory.values.length,
+      vsync: this,
+      initialIndex: _activeCategory.index,
+    );
   }
 
   @override
   void dispose() {
     _shineController.dispose();
+    _categoryTabController.dispose();
     _panelController.dispose();
     _listController
       ..removeListener(_handleScrollCategoryDetection)
@@ -236,7 +306,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         _selectedCaregiver = null;
         _markers = {_selectedMarker()};
         _route = {};
-        _errorMessage = 'Tiada caregiver ditemui';
+        _errorMessage = 'No caregiver found nearby.';
       });
       return;
     }
@@ -251,7 +321,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         _selectedCaregiver = null;
         _markers = {_selectedMarker()};
         _route = {};
-        _errorMessage = 'Tiada caregiver ditemui';
+        _errorMessage = 'No caregiver found nearby.';
       });
       return;
     }
@@ -287,7 +357,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     DocumentSnapshot<Map<String, dynamic>> doc,
   ) {
     final data = doc.data() ?? {};
-    final List<String> services = _stringListFromField(data['services']);
+    final List<String> services =
+        _stringListFromField(data['servicePreferences'] ?? data['services']);
     final List<Map<String, dynamic>> addresses = _extractAddressList(
       data['address'] ?? data['addresses'],
     );
@@ -339,8 +410,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   }
 
   List<CaregiverOption> _applyCategories(List<CaregiverOption> source) {
-    final available = source.where((c) => c.available).toList();
-    available.sort((a, b) {
+    final ranked = List<CaregiverOption>.from(source)
+      ..sort((a, b) {
       // priority: matchCount desc, rating desc, price asc, distance asc
       final matchCmp = b.matchCount.compareTo(a.matchCount);
       if (matchCmp != 0) return matchCmp;
@@ -350,15 +421,19 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       if (priceCmp != 0) return priceCmp;
       return a.distanceKm.compareTo(b.distanceKm);
     });
-    return available;
+    return ranked;
   }
 
   List<CaregiverOption> _buildRecommendationList(
     List<CaregiverOption> available,
   ) {
-    final matched = available.where((c) => c.matchCount > 0).toList();
-    final fallback = available.take(3).toList();
-    return (matched.isNotEmpty ? matched : fallback).take(3).toList();
+    final qualified = available.where((c) => !_shouldExcludeCaregiver(c)).toList();
+    final recommended = qualified
+        .where((c) => c.score >= _recommendationScoreThreshold)
+        .toList();
+    final fallback = qualified.take(3).toList();
+    final pool = recommended.isNotEmpty ? recommended : fallback;
+    return pool.take(3).toList();
   }
 
   List<CaregiverOption> _buildNearbyList(List<CaregiverOption> available) {
@@ -375,6 +450,12 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     return services.where((s) => prefs.contains(s.toLowerCase().trim())).length;
   }
 
+  bool _shouldExcludeCaregiver(CaregiverOption caregiver) {
+    if (caregiver.rating < _minAcceptableRating) return true;
+    if (caregiver.distanceKm > _maxRuleDistance) return true;
+    return false;
+  }
+
   double _score({
     required double distanceKm,
     required double rating,
@@ -382,12 +463,26 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     required double price,
     required int matchCount,
   }) {
-    final double distanceScore = max(0, 5 - min(distanceKm, 5)) * 5;
-    final double ratingScore = rating * 10;
-    final double matchScore = matchCount * 1000;
-    final double serviceScore = min(serviceCount, 6) * 2;
-    final double priceScore = -price * 8; // lower price => higher score
-    return distanceScore + ratingScore + serviceScore + priceScore + matchScore;
+    final double normalizedDistance = max(
+      0,
+      _preferredDistance - min(distanceKm, _preferredDistance),
+    );
+    final double distanceScore = normalizedDistance * 8;
+    final double ratingScore = rating * 15;
+    final double matchScore = matchCount * 1200;
+    final double serviceScore = min(serviceCount, 6) * 3;
+    final double priceScore = -price * 6;
+    final double ratingPenalty = rating < _ratingPenaltyThreshold ? -10 : 0;
+    final double distancePenalty = distanceKm > _preferredDistance
+        ? -(distanceKm - _preferredDistance) * 2
+        : 0;
+    return distanceScore +
+        ratingScore +
+        serviceScore +
+        priceScore +
+        matchScore +
+        ratingPenalty +
+        distancePenalty;
   }
 
   double _distanceKm(LatLng a, LatLng b) {
@@ -411,7 +506,11 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   }
 
   double _currentSheetHeight(BuildContext context) {
-    return lerpDouble(_minSheetSize, _maxSheetSize, _panelController.value)! *
+    return ui.lerpDouble(
+          _minSheetSize,
+          _maxSheetSize,
+          _panelController.value,
+        )! *
         MediaQuery.of(context).size.height;
   }
 
@@ -481,6 +580,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         _selectedCategory = current;
         _selectedCaregiver = first;
       });
+      _categoryTabController.animateTo(current.index);
     }
   }
 
@@ -494,6 +594,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       _selectedCaregiver = first;
     }
     setState(() {});
+    if (_categoryTabController.index != category.index) {
+      _categoryTabController.animateTo(category.index);
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final ctx = key?.currentContext;
@@ -527,12 +630,11 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     return AnimatedBuilder(
       animation: _shineController,
       builder: (context, child) {
-        final double t = _shineController.value;
         return Container(
           height: 48,
           width: 48,
           decoration: const BoxDecoration(
-            color: Colors.white,
+            color: Color(0xFFF4B63D),
             shape: BoxShape.circle,
             boxShadow: [
               BoxShadow(
@@ -542,22 +644,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
               ),
             ],
           ),
-          child: ShaderMask(
-            shaderCallback: (Rect rect) {
-              return LinearGradient(
-                begin: Alignment(-1 + t * 2, -1),
-                end: Alignment(0 + t * 2, 1),
-                colors: [
-                  Colors.yellow.withOpacity(0.0),
-                  Colors.yellow.withOpacity(0.35),
-                  Colors.yellow.withOpacity(0.0),
-                ],
-                stops: const [0.0, 0.5, 1.0],
-              ).createShader(rect);
-            },
-            blendMode: BlendMode.srcATop,
-            child: child,
-          ),
+          child: child,
         );
       },
       child: IconButton(
@@ -567,7 +654,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         icon: const Icon(
           Icons.calendar_today_rounded,
           size: 18,
-          color: Color(0xFFF4B63D),
+          color: Colors.black,
         ),
         splashRadius: 24,
         onPressed: () {
@@ -713,7 +800,14 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                         borderRadius: BorderRadius.circular(18),
                       ),
                     ),
-                    child: const Text('Book in advance'),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        Icon(Icons.calendar_today, color: Colors.black),
+                        SizedBox(width: 8),
+                        Text('Book in advance'),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -888,15 +982,12 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                                   )
                                 else if (_caregivers.isEmpty)
                                   Padding(
-                                    padding: EdgeInsets.all(24),
+                                    padding: const EdgeInsets.all(24),
                                     child: Center(
-                                      child: Text(
-                                        _errorMessage ??
-                                            'No caregivers available',
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.black54,
-                                        ),
+                                      child: _buildNoCaregiversHint(
+                                        message:
+                                            _errorMessage ??
+                                            'No caregivers nearby',
                                       ),
                                     ),
                                   )
@@ -968,7 +1059,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 DefaultProfileAvatar(
-                  radius: 18,
+                  radius: 24,
                   photoUrl: widget.person.photoUrl,
                   label: name,
                 ),
@@ -1003,30 +1094,35 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
               ],
             ),
             const SizedBox(height: 4),
-            Row(
-              children: [
-                _calendarButton(),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: ElevatedButton(
-                    onPressed: _selectedCaregiver != null ? _goToSummary : null,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: primary,
-                      foregroundColor: const Color.fromARGB(255, 20, 20, 20),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      textStyle: const TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 15,
+            Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _calendarButton(),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: _selectedCaregiver != null
+                          ? _goToSummary
+                          : null,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: primary,
+                        foregroundColor: const Color.fromARGB(255, 20, 20, 20),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        textStyle: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        elevation: 0,
                       ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(18),
-                      ),
-                      elevation: 0,
+                      child: const Text('Book caregiver'),
                     ),
-                    child: const Text('Book caregiver'),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ],
         ),
@@ -1092,57 +1188,78 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   Widget _categoryTabs({required bool show}) {
     if (!show) return const SizedBox.shrink();
     return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        decoration: BoxDecoration(
-          color: _caregiverMatchBackground,
-          borderRadius: BorderRadius.circular(14),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.04),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(
-            children: CaregiverCategory.values.map((cat) {
-              final bool active = _activeCategory == cat;
-              return Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: ChoiceChip(
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  selected: active,
-                  onSelected: (_) => _scrollToCategory(cat),
-                  label: Text(
-                    _labelFor(cat),
-                    style: TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 11,
-                      color: active ? Colors.black : Colors.black87,
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 4),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final width = min(constraints.maxWidth, 420.0);
+          return Center(
+            child: SizedBox(
+              width: width,
+              height: 34,
+              child: Stack(
+                children: [
+                  Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(
+                        _categorySegmentRadius,
+                      ),
+                      border: Border.all(color: Colors.grey.shade300),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.04),
+                          blurRadius: 10,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
                     ),
                   ),
-                  selectedColor: _caregiverMatchBackground,
-                  backgroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 2,
+                  Positioned.fill(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(
+                        _categorySegmentRadius,
+                      ),
+                      child: TabBar(
+                        controller: _categoryTabController,
+                        indicator: BoxDecoration(
+                          color: _categoryIndicatorColor,
+                          borderRadius: BorderRadius.circular(
+                            _categorySegmentRadius,
+                          ),
+                        ),
+                        indicatorPadding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 5,
+                        ),
+                        indicatorSize: TabBarIndicatorSize.tab,
+                        labelStyle: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 11,
+                        ),
+                        labelPadding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 0,
+                        ),
+                        labelColor: Colors.black,
+                        unselectedLabelColor: Colors.black54,
+                        onTap: (index) {
+                          _scrollToCategory(CaregiverCategory.values[index]);
+                        },
+                        tabs: CaregiverCategory.values
+                            .map(
+                              (cat) => Tab(
+                                child: Center(child: Text(_labelFor(cat))),
+                              ),
+                            )
+                            .toList(),
+                      ),
+                    ),
                   ),
-                  side: BorderSide(
-                    color: active ? _caregiverMatchAccent : Colors.transparent,
-                    width: active ? 1.2 : 0,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                ),
-              );
-            }).toList(),
-          ),
-        ),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -1190,11 +1307,39 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     );
   }
 
+  Widget _buildNoCaregiversHint({String? message}) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.flash_on, size: 32, color: _caregiverMatchAccent),
+        const SizedBox(height: 10),
+        Text(
+          message ?? 'No caregivers nearby',
+          style: const TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 15,
+            color: Colors.black87,
+          ),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          'Caregivers matching your request will appear.',
+          style: TextStyle(fontSize: 12, color: Colors.black54),
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ],
+    );
+  }
+
   Widget _caregiverTile(
     CaregiverOption caregiver, {
     bool showRecommendationBadges = true,
     required CaregiverCategory tileCategory,
   }) {
+    final reasons = _recommendationReasons(caregiver);
     final bool isSelected =
         _selectedCaregiver?.id == caregiver.id &&
         _selectedCategory == tileCategory;
@@ -1217,7 +1362,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         .toSet();
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 5),
-      constraints: const BoxConstraints(minHeight: 70, maxHeight: 80),
+      constraints: const BoxConstraints(minHeight: 84, maxHeight: 110),
       decoration: BoxDecoration(
         color: isSelected ? const Color(0xFFE3F2FF) : Colors.white,
         borderRadius: BorderRadius.circular(10),
@@ -1241,7 +1386,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               CircleAvatar(
-                radius: 18,
+                radius: 24,
                 backgroundColor: accent.withValues(alpha: 0.18),
                 backgroundImage: hasAvatar
                     ? NetworkImage(caregiver.avatarUrl!.trim())
@@ -1258,80 +1403,159 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
               ),
               const SizedBox(width: 10),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      caregiver.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 11,
+                child: Align(
+                  alignment: Alignment.center,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        caregiver.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 11,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 3),
-                    Row(
-                      children: [
-                        const Icon(Icons.star, size: 12, color: Colors.orange),
-                        const SizedBox(width: 4),
-                        Text(
-                          caregiver.rating.toStringAsFixed(1),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 10,
+                      const SizedBox(height: 3),
+                      Row(
+                        mainAxisAlignment:
+                            tileCategory == CaregiverCategory.recommendation
+                            ? MainAxisAlignment.start
+                            : MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.star,
+                            size: 12,
+                            color: Color(0xFFF4B63D),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            caregiver.rating.toStringAsFixed(1),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 10,
+                              color: Colors.black87,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Icon(
+                            Icons.timer,
+                            size: 12,
+                            color: Color(0xFFF4B63D),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Est. ${(max(caregiver.distanceKm, 0.6) / 0.6).ceil()} mins',
+                            style: const TextStyle(
+                              color: Colors.black87,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Icon(
+                            Icons.place,
+                            size: 12,
+                            color: Color(0xFFF4B63D),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${caregiver.distanceKm.toStringAsFixed(1)} km',
+                            style: const TextStyle(
+                              color: Colors.black87,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      SizedBox(
+                        height: 20,
+                        child: ListView(
+                          scrollDirection: Axis.horizontal,
+                          children: _serviceChips(
+                            servicesDisplay,
+                            prefsLower: prefsLower,
+                            isRecommendation: isRecommendation,
+                            matchCount: caregiver.matchCount,
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        const Icon(
-                          Icons.timer,
-                          size: 12,
-                          color: Colors.black54,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          'Est. ${(max(caregiver.distanceKm, 0.6) / 0.6).ceil()} mins',
-                          style: const TextStyle(
-                            color: Colors.black54,
-                            fontSize: 10,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        const Icon(
-                          Icons.place,
-                          size: 12,
-                          color: Colors.black45,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          '${caregiver.distanceKm.toStringAsFixed(1)} km',
-                          style: const TextStyle(
-                            color: Colors.black54,
-                            fontSize: 10,
+                      ),
+                      if (isRecommendation && reasons.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Center(
+                          child: SizedBox(
+                            height: 26,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                Expanded(
+                                  child: SingleChildScrollView(
+                                    scrollDirection: Axis.horizontal,
+                                    physics: const BouncingScrollPhysics(),
+                                    child: Row(
+                                      mainAxisAlignment:
+                                          tileCategory ==
+                                              CaregiverCategory.recommendation
+                                          ? MainAxisAlignment.start
+                                          : MainAxisAlignment.center,
+                                      children: reasons
+                                          .map(
+                                            (reason) => Padding(
+                                              padding: const EdgeInsets.only(
+                                                right: 4,
+                                              ),
+                                              child: ServiceTagChip(
+                                                label: reason,
+                                                backgroundColor: _serviceTagBlue
+                                                    .withAlpha(46),
+                                                foregroundColor:
+                                                    _serviceTagBlue,
+                                                borderColor: _serviceTagBlue,
+                                                fontSize: 8,
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                      horizontal: 6,
+                                                      vertical: 2,
+                                                    ),
+                                                minHeight: 18,
+                                              ),
+                                            ),
+                                          )
+                                          .toList(),
+                                    ),
+                                  ),
+                                ),
+                                IconButton(
+                                  icon: const Icon(
+                                    Icons.info_outline,
+                                    size: 18,
+                                    color: Color(0xFFF4B63D),
+                                  ),
+                                  padding: const EdgeInsets.all(4),
+                                  constraints: const BoxConstraints(),
+                                  onPressed: () =>
+                                      _showRecommendationDialog(reasons),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ],
-                    ),
-                    const SizedBox(height: 4),
-                    SizedBox(
-                      height: 24,
-                      child: ListView(
-                        scrollDirection: Axis.horizontal,
-                        children: _serviceChips(
-                          servicesDisplay,
-                          prefsLower: prefsLower,
-                          isRecommendation: isRecommendation,
-                          matchCount: caregiver.matchCount,
-                        ),
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
               SizedBox(
                 width: 64,
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     Row(
                       mainAxisSize: MainAxisSize.min,
@@ -1353,19 +1577,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                         ),
                       ],
                     ),
-                    if (isRecommendation)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 2),
-                        child: Text(
-                          _bestIn(caregiver),
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            fontSize: 9.5,
-                            color: Colors.black54,
-                            height: 1.1,
-                          ),
-                        ),
-                      ),
                   ],
                 ),
               ),
@@ -1407,15 +1618,18 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     }
 
     final LatLng caregiverLoc = caregiver.latLng!;
+    final BitmapDescriptor personIcon = await _personAvatarIcon(size: 110);
+    final BitmapDescriptor caregiverIcon =
+        await _caregiverAvatarIcon(caregiver, size: 110);
     final Marker personMarker = Marker(
       markerId: const MarkerId('person'),
       position: _currentLatLng,
-      icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+      icon: personIcon,
     );
     final Marker caregiverMarker = Marker(
       markerId: const MarkerId('caregiver'),
       position: caregiverLoc,
-      icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+      icon: caregiverIcon,
     );
     final String cacheKey =
         '${_currentLatLng.latitude.toStringAsFixed(5)},${_currentLatLng.longitude.toStringAsFixed(5)}:${caregiverLoc.latitude.toStringAsFixed(5)},${caregiverLoc.longitude.toStringAsFixed(5)}';
@@ -1441,6 +1655,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     if (_panelController.value > 0.01) {
       _animatePanelTo(0);
     }
+    _refreshMarkers();
   }
 
   void _fitMapToPins(LatLng a, LatLng b) {
@@ -1506,6 +1721,207 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     );
 
     return [start, control1, control2, end];
+  }
+
+  // ignore: unused_element
+  List<CaregiverOption> _caregiversWithinRadius(double radiusKm) {
+    return _caregivers
+        .where((caregiver) => caregiver.distanceKm <= radiusKm)
+        .toList();
+  }
+
+  final Map<String, BitmapDescriptor> _markerCache = {};
+  final Map<String, ui.Image> _avatarImageCache = {};
+
+  Future<BitmapDescriptor> _cachedAvatarMarker(
+    String key, {
+    required Color fillColor,
+    String? label,
+    String? photoUrl,
+    double size = 68,
+  }) async {
+    final cached = _markerCache[key];
+    if (cached != null) return cached;
+    final ui.Image? avatar = await _loadAvatarImage(photoUrl);
+    final descriptor = await _buildAvatarMarker(
+      fillColor: fillColor,
+      label: label,
+      textColor: Colors.black,
+      size: size,
+      avatar: avatar,
+    );
+    _markerCache[key] = descriptor;
+    return descriptor;
+  }
+
+  Future<ui.Image?> _loadAvatarImage(String? url) async {
+    if (url == null || url.trim().isEmpty) return null;
+    final cached = _avatarImageCache[url];
+    if (cached != null) return cached;
+    try {
+      final uri = Uri.parse(url);
+      final ByteData data = await NetworkAssetBundle(uri).load('');
+      final Uint8List bytes = data.buffer.asUint8List();
+      final ui.Codec codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: 120,
+        targetHeight: 120,
+      );
+      final ui.FrameInfo frame = await codec.getNextFrame();
+      _avatarImageCache[url] = frame.image;
+      return frame.image;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _refreshMarkers() async {
+    if (!mounted) return;
+    final nearby = _caregiversWithinRadius(15);
+    final List<Marker> markers = [];
+    final BitmapDescriptor personIcon = await _personAvatarIcon(size: 68);
+    markers.add(
+      Marker(
+        markerId: const MarkerId('person'),
+        position: _currentLatLng,
+        icon: personIcon,
+      ),
+    );
+    for (final caregiver in nearby) {
+      if (caregiver.latLng == null) continue;
+      final label = caregiver.name.trim().isNotEmpty
+          ? caregiver.name.trim()[0].toUpperCase()
+          : 'C';
+      final BitmapDescriptor caregiverIcon =
+          await _caregiverAvatarIcon(caregiver, size: 68);
+      markers.add(
+        Marker(
+          markerId: MarkerId('caregiver_${caregiver.id}'),
+          position: caregiver.latLng!,
+          icon: caregiverIcon,
+        ),
+      );
+    }
+    if (!mounted) return;
+    setState(() {
+      _markers = markers.toSet();
+    });
+  }
+
+  String _avatarLabel(String? name, {String fallback = 'C'}) {
+    final trimmed = name?.trim();
+    if (trimmed != null && trimmed.isNotEmpty) {
+      return trimmed[0].toUpperCase();
+    }
+    return fallback;
+  }
+
+  Future<BitmapDescriptor> _personAvatarIcon({double size = 110}) {
+    final label = _avatarLabel(widget.person.name, fallback: 'P');
+    return _cachedAvatarMarker(
+      'person_${size.toInt()}',
+      fillColor: _primaryColor,
+      label: label,
+      photoUrl: widget.person.photoUrl,
+      size: size,
+    );
+  }
+
+  Future<BitmapDescriptor> _caregiverAvatarIcon(
+    CaregiverOption caregiver, {
+    double size = 110,
+  }) {
+    final label = _avatarLabel(caregiver.name, fallback: 'C');
+    return _cachedAvatarMarker(
+      'caregiver_${caregiver.id}_${size.toInt()}',
+      fillColor: _primaryColor,
+      label: label,
+      photoUrl: caregiver.avatarUrl,
+      size: size,
+    );
+  }
+
+  // ignore: unused_element
+  Future<BitmapDescriptor> _buildAvatarMarker({
+    required Color fillColor,
+    String? label,
+    Color textColor = Colors.black,
+    double size = 110,
+    ui.Image? avatar,
+  }) async {
+    final ui.PictureRecorder recorder = ui.PictureRecorder();
+    final Canvas canvas = Canvas(recorder);
+    final double radius = size / 2;
+    final double tailHeight = size * 0.25;
+    final double circleRadius = size * 0.45;
+    final double circleCenterY = radius - tailHeight * 0.35;
+    final Paint paint = Paint()..color = fillColor;
+    final Path tailPath = Path()
+      ..moveTo(radius - circleRadius * 0.45, circleCenterY + circleRadius * 0.4)
+      ..quadraticBezierTo(
+        radius,
+        size - tailHeight * 0.08,
+        radius + circleRadius * 0.45,
+        circleCenterY + circleRadius * 0.4,
+      )
+      ..lineTo(radius, size)
+      ..close();
+    canvas.drawPath(tailPath, paint);
+    final Path headPath = Path()
+      ..addOval(
+        Rect.fromCircle(
+          center: Offset(radius, circleCenterY),
+          radius: circleRadius,
+        ),
+      );
+    canvas.drawPath(headPath, paint);
+    if (avatar != null) {
+      final Rect src = Rect.fromLTWH(
+        0,
+        0,
+        avatar.width.toDouble(),
+        avatar.height.toDouble(),
+      );
+      final double inset = size * 0.15;
+      final Rect dst = Rect.fromCircle(
+        center: Offset(radius, circleCenterY),
+        radius: circleRadius - inset,
+      );
+      final Path clip = Path()..addOval(dst);
+      canvas.save();
+      canvas.clipPath(clip);
+      canvas.drawImageRect(avatar, src, dst, Paint());
+      canvas.restore();
+    }
+    if (avatar == null && label != null && label.isNotEmpty) {
+      const TextStyle textStyle = TextStyle(
+        color: Colors.black,
+        fontSize: 22,
+        fontWeight: FontWeight.bold,
+      );
+      final TextPainter textPainter = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: textStyle.copyWith(color: textColor),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final Offset offset = Offset(
+        radius - textPainter.width / 2,
+        circleCenterY - textPainter.height / 2,
+      );
+      textPainter.paint(canvas, offset);
+    }
+    final ui.Picture picture = recorder.endRecording();
+    final ui.Image image = await picture.toImage(size.toInt(), size.toInt());
+    final ByteData? byteData = await image.toByteData(
+      format: ui.ImageByteFormat.png,
+    );
+    if (byteData == null || byteData.lengthInBytes == 0) {
+      debugPrint('Avatar marker drawing failed; using default marker');
+      return BitmapDescriptor.defaultMarker;
+    }
+    return BitmapDescriptor.fromBytes(byteData.buffer.asUint8List());
   }
 
   List<String> _stringListFromField(dynamic raw) {
@@ -1598,37 +2014,27 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   }) {
     final List<Widget> chips = [];
     for (final s in services) {
-      final matched = prefsLower.contains(s.toLowerCase().trim());
       chips.add(
         Padding(
           padding: const EdgeInsets.only(right: 6),
           child: ServiceTagChip(
             label: s,
-            backgroundColor: matched
-                ? _caregiverMatchBackground
-                : _serviceTagBlue,
-            foregroundColor: matched ? _caregiverMatchAccent : Colors.white,
-            borderColor: matched ? _caregiverMatchAccent : _serviceTagBlue,
+            backgroundColor: const Color(0x2E00A8A7),
+            foregroundColor: _serviceTagBlue,
+            borderColor: _serviceTagBlue,
           ),
         ),
       );
     }
     if (isRecommendation) {
       chips.add(
-        Container(
-          margin: const EdgeInsets.only(right: 6),
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            color: _caregiverMatchBackground,
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: Text(
-            'Matched $matchCount svc',
-            style: const TextStyle(
-              color: _caregiverMatchAccent,
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-            ),
+        Padding(
+          padding: const EdgeInsets.only(right: 6),
+          child: ServiceTagChip(
+            label: 'Matched $matchCount services',
+            backgroundColor: const Color(0xFFF4B63D),
+            foregroundColor: Colors.black87,
+            borderColor: const Color(0xFFF4B63D),
           ),
         ),
       );
@@ -1636,11 +2042,109 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     return chips;
   }
 
-  String _bestIn(CaregiverOption c) {
-    if (c.matchCount > 0) return 'Best in prefs';
-    if (c.rating >= 4.7) return 'Best rating';
-    if (c.distanceKm <= 1.2) return 'Best distance';
-    return 'Best price';
+  List<String> _recommendationReasons(CaregiverOption caregiver) {
+    final List<String> reasons = [];
+    if (caregiver.matchCount > 0) reasons.add('Matching services');
+    if (caregiver.rating >= 4.5) reasons.add('High rating');
+    if (caregiver.distanceKm <= 3) reasons.add('Close distance');
+    if (caregiver.priceValue < 120) reasons.add('Reasonable price');
+    return reasons;
+  }
+
+  void _showRecommendationDialog(List<String> reasons) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: const Text(
+          'Why this caregiver?',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontWeight: FontWeight.w700),
+        ),
+        contentPadding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'These badges explain why this caregiver matches your needs.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.black87),
+              ),
+              const SizedBox(height: 10),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 220),
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: reasons
+                        .map(
+                          (reason) => Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 6),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 24,
+                                  height: 24,
+                                  padding: const EdgeInsets.all(2),
+                                  decoration: const BoxDecoration(
+                                    color: Color(0xFFFFF0CA),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const Icon(
+                                    Icons.check,
+                                    size: 16,
+                                    color: Color(0xFFB68F00),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    reason,
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      color: _bookingTextDark,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        )
+                        .toList(),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actionsPadding: const EdgeInsets.only(bottom: 12),
+        actions: [
+          SizedBox(
+            width: 140,
+            child: ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFF9C12A),
+                foregroundColor: Colors.black87,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+              child: const Text(
+                'Got it',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   List<String> _servicesForDisplay(

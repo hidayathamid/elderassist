@@ -24,7 +24,7 @@ const TextStyle _sectionHintStyle = TextStyle(
   color: _profileDarkText,
 );
 const TextStyle _documentTitleStyle = TextStyle(
-  fontSize: 15,
+  fontSize: 14,
   fontWeight: FontWeight.w600,
   color: _profileDarkText,
 );
@@ -34,10 +34,12 @@ const TextStyle _documentFileStyle = TextStyle(
   color: _profileDarkText60,
 );
 const TextStyle _documentMetaStyle = TextStyle(
-  fontSize: 11,
+  fontSize: 12,
   fontWeight: FontWeight.w500,
   color: _profileDarkText60,
 );
+const Color _primaryBlue = Color(0xFF00A8A7);
+
 const TextStyle _statusChipTextStyle = TextStyle(
   fontSize: 10,
   fontWeight: FontWeight.w600,
@@ -234,24 +236,7 @@ class _ProfileDocumentsScreenState extends State<ProfileDocumentsScreen> {
           _AddDocumentCard(onTap: () => _navigateToEdit()),
           const SizedBox(height: 12),
           if (sorted.isEmpty) ...[
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: const [
-                  Icon(
-                    Icons.description_outlined,
-                    color: Colors.black26,
-                    size: 32,
-                  ),
-                  SizedBox(height: 10),
-                  Text(
-                    "You haven't added any documents yet.",
-                    style: TextStyle(color: Colors.black45, fontSize: 14),
-                  ),
-                ],
-              ),
-            ),
+            _buildDocumentsEmptyState(),
           ],
           for (final doc in sorted) ...[
             Padding(
@@ -267,6 +252,36 @@ class _ProfileDocumentsScreenState extends State<ProfileDocumentsScreen> {
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDocumentsEmptyState() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: const [
+          Icon(Icons.description_outlined, size: 32, color: _tealAccent),
+          SizedBox(height: 10),
+          Text(
+            'No documents yet',
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 15,
+              color: _profileDarkText,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          SizedBox(height: 4),
+          Text(
+            'Upload ID cards or certifications to share your qualifications.',
+            style: TextStyle(fontSize: 12, color: Colors.black54),
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
         ],
       ),
     );
@@ -404,24 +419,31 @@ class _DocumentCard extends StatelessWidget {
     final fileLabel = (data['fileName'] as String?) ?? 'PDF File';
     final isVerified = data['status'] as bool? ?? false;
     final iconColor = Colors.grey.shade200;
+    final borderColor = Colors.grey.shade300;
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(UiTokens.r16),
-        border: Border.all(color: Colors.grey.shade300),
+        border: Border.all(color: borderColor, width: 1.1),
         boxShadow: _cardShadow,
       ),
-      padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+      padding: const EdgeInsets.all(12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Container(
-                padding: const EdgeInsets.all(UiTokens.s10),
+                width: 52,
+                height: 52,
                 decoration: BoxDecoration(
-                  color: iconColor,
-                  borderRadius: BorderRadius.circular(UiTokens.r14),
+                  color: _primaryBlue.withOpacity(0.12),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: _primaryBlue.withOpacity(0.4),
+                    width: 1.2,
+                  ),
                 ),
                 child: const Icon(
                   Icons.description_outlined,
@@ -451,7 +473,19 @@ class _DocumentCard extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: UiTokens.s10),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: UiTokens.s12),
+            child: Align(
+              alignment: Alignment.center,
+              child: FractionallySizedBox(
+                widthFactor: 0.85,
+                child: Container(
+                  height: 1.2,
+                  color: Colors.black.withAlpha(20),
+                ),
+              ),
+            ),
+          ),
           Row(
             children: [
               Expanded(
@@ -459,6 +493,7 @@ class _DocumentCard extends StatelessWidget {
                   icon: Icons.remove_red_eye,
                   label: 'View',
                   onTap: onView,
+                  primary: true,
                 ),
               ),
               const SizedBox(width: UiTokens.s8),
@@ -467,7 +502,6 @@ class _DocumentCard extends StatelessWidget {
                   icon: Icons.edit_outlined,
                   label: 'Edit',
                   onTap: onEdit,
-                  primary: true,
                 ),
               ),
               const SizedBox(width: UiTokens.s8),

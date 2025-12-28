@@ -84,7 +84,10 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isLoading = false);
 
     if (result == null) {
-      _showSnack('Login failed');
+      _showErrorDialog(
+        title: 'Login failed',
+        message: 'Please double-check your email and password, then try again.',
+      );
       return;
     }
 
@@ -96,6 +99,49 @@ class _LoginScreenState extends State<LoginScreen> {
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(builder: (_) => destination),
+    );
+  }
+
+  Future<void> _showErrorDialog({
+    required String title,
+    required String message,
+  }) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: Text(
+          title,
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+        content: Text(
+          message,
+          style: const TextStyle(color: Colors.black87),
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actionsPadding: const EdgeInsets.only(bottom: 12),
+        actions: [
+          SizedBox(
+            width: 120,
+            child: ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFF4B63D),
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                textStyle: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              child: const Text('OK'),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

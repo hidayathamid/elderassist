@@ -13,6 +13,8 @@ import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
+import 'package:emergencies_disability_assistance_app/constants/service_options.dart';
+import 'package:emergencies_disability_assistance_app/widgets/service_chip.dart';
 import 'touchdown_screen.dart';
 
 import 'login_screen.dart';
@@ -45,14 +47,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
   int _currentStep = 0;
   String? _selectedRole;
 
-  final List<String> _serviceOptions = [
-    'Physiotherapy',
-    'Meal Preparation',
-    'Medication Reminder',
-    'Mobility Assistance',
-    'Companionship',
-    'Elderly Care',
-  ];
   final List<String> _selectedServices = [];
 
   String _fullPhoneNumber = '';
@@ -78,6 +72,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
   String? _roleError;
   String? _servicesError;
   String? _otpError;
+  Timer? _otpCooldownTimer;
+  int _otpCooldownSeconds = 0;
 
   @override
   void initState() {
@@ -120,6 +116,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     _addressFocus.dispose();
     _scrollController.dispose();
     _mapCtrl?.dispose();
+    _otpCooldownTimer?.cancel();
     super.dispose();
   }
 
@@ -358,6 +355,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }
 
   Future<void> _sendOtp() async {
+    if (_otpCooldownSeconds > 0) {
+      _showSnack(
+          'Please try again in $_otpCooldownSeconds seconds before requesting another code.');
+      return;
+    }
     setState(() {
       _isSendingCode = true;
       _otpSent = false;
@@ -367,8 +369,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
     try {
       await FirebaseAuth.instance.verifyPhoneNumber(
         phoneNumber: _fullPhoneNumber,
-        verificationCompleted: (credential) {},
+        verificationCompleted: (credential) {
+          debugPrint('verifyPhoneNumber: verificationCompleted');
+        },
         verificationFailed: (e) {
+          debugPrint('verifyPhoneNumber: verificationFailed ${e.message}');
           final msg = (e.message ?? '').contains('BILLING_NOT_ENABLED')
               ? 'We could not send the code. Please try again.'
               : 'We could not send the verification code. Please try again.';
@@ -379,18 +384,28 @@ class _RegisterScreenState extends State<RegisterScreen> {
             _otpSent = false;
             _verificationId = null;
           });
+          final errMsg = e.message ?? '';
+          if (errMsg.toLowerCase().contains('blocked all requests')) {
+            _startOtpCooldown();
+            _showDialogMessage(
+              title: 'Too many attempts',
+              message:
+                  'We blocked requests from this device because of unusual activity. Please try again later.',
+            );
+          }
         },
         codeSent: (verificationId, _) {
+          debugPrint('verifyPhoneNumber: codeSent id=$verificationId');
           setState(() {
-            _verificationId = verificationId;
-            _otpSent = true;
-            _otpCtrl.clear();
-            _otpError = null;
-            _phoneHasError = false;
-            _phoneMessage = 'Verification code sent to $_fullPhoneNumber.';
+      _verificationId = verificationId;
+      _otpSent = true;
+      _otpCtrl.clear();
+      _otpError = null;
+      _phoneHasError = false;
+      _phoneMessage = 'Verification code sent to $_fullPhoneNumber.';
             _phoneMessageColor = Colors.green;
           });
-          Future.delayed(const Duration(milliseconds: 800), () {
+      Future.delayed(const Duration(milliseconds: 800), () {
             if (mounted) {
               setState(() {
                 _phoneMessage = null;
@@ -405,7 +420,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
           _verificationId = verificationId;
         },
       );
-    } catch (_) {
+    } catch (error, stack) {
+      debugPrint('sendOtp: exception $error');
+      debugPrint('$stack');
       setState(() {
         _phoneHasError = true;
         _phoneMessage = 'Failed to send code. Please try again.';
@@ -416,6 +433,33 @@ class _RegisterScreenState extends State<RegisterScreen> {
         setState(() => _isSendingCode = false);
       }
     }
+  }
+
+  void _startOtpCooldown([int seconds = 60]) {
+    _otpCooldownTimer?.cancel();
+    setState(() {
+      _otpCooldownSeconds = seconds;
+      _phoneMessage =
+          'Please wait $_otpCooldownSeconds seconds before requesting a new code.';
+      _phoneMessageColor = Colors.orange;
+    });
+    _otpCooldownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (_otpCooldownSeconds <= 1) {
+        timer.cancel();
+        setState(() {
+          _otpCooldownSeconds = 0;
+          _phoneMessage = null;
+          _phoneHasError = false;
+          _phoneMessageColor = Colors.black54;
+        });
+        return;
+      }
+      setState(() => _otpCooldownSeconds--);
+    });
   }
 
   void _showSnack(String message) {
@@ -592,21 +636,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
         return;
       }
 
-      final addressData = <String, dynamic>{
-        'address': _addressCtrl.text.trim(),
-        'forWho': 'Home',
-        'latitude': _pickedLatLng?.latitude,
-        'longitude': _pickedLatLng?.longitude,
-      };
-
-      final res = await _authService.registerUser(
-        name: fullName,
-        email: email,
-        password: pwd,
-        role: _selectedRole ?? 'client',
-        phone: _fullPhoneNumber,
-        addresses: [addressData],
-      );
+        final res = await _authService.registerUser(
+          name: fullName,
+          email: email,
+          password: pwd,
+          role: _selectedRole ?? 'client',
+          phone: _fullPhoneNumber,
+          defaultAddress: _addressCtrl.text.trim(),
+        );
 
       if (res == null) {
         _showSnack('Failed to register');
@@ -615,14 +652,20 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
       final uid = FirebaseAuth.instance.currentUser!.uid;
       final userRef = FirebaseFirestore.instance.collection('users').doc(uid);
+      final caregiverRef =
+          FirebaseFirestore.instance.collection('caregivers').doc(uid);
       final extras = <String, dynamic>{
         'servicePreferences': _selectedServices,
         'phoneVerified': true,
         'updatedAt': FieldValue.serverTimestamp(),
       };
-      if (_selectedRole == 'caregiver') extras['rating'] = 0.0;
 
-      await userRef.update(extras);
+      if (_selectedRole == 'caregiver') {
+        extras['rating'] = 0.0;
+        await caregiverRef.update(extras);
+      } else {
+        await userRef.update(extras);
+      }
 
       if (!mounted) return;
       final Widget destination;
@@ -918,14 +961,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
         ),
         const SizedBox(height: 16),
         Wrap(
-          spacing: 12,
-          runSpacing: 12,
-          children: _serviceOptions.map((service) {
+          spacing: 8,
+          runSpacing: 8,
+          children: kServiceOptions.map((service) {
             final isSelected = _selectedServices.contains(service);
-            return ChoiceChip(
-              label: Text(service),
+            return ServiceChip(
+              label: service,
               selected: isSelected,
-              onSelected: (_) {
+              onTap: () {
                 setState(() {
                   if (isSelected) {
                     _selectedServices.remove(service);
@@ -934,13 +977,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   }
                 });
               },
-              selectedColor: const Color(0xFFE5F7F6),
-              labelStyle: TextStyle(
-                color: isSelected ? const Color(0xFF00A8A7) : Colors.black87,
-              ),
-              side: BorderSide(
-                color: isSelected ? const Color(0xFF00A8A7) : Colors.grey[300]!,
-              ),
             );
           }).toList(),
         ),
@@ -1349,7 +1385,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
         _isCurrentStepReady() &&
         !_isRegistering &&
         !_isSendingCode &&
-        !_isCheckingEmail;
+        !_isCheckingEmail &&
+        !(_currentStep == 4 && _otpCooldownSeconds > 0);
     const Color primaryColor = Color(0xFFF4B63D);
     const Color disabledColor = Color(0xFFE5E5E5);
     final bool showLoader =

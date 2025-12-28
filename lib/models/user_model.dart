@@ -7,6 +7,7 @@ class UserModel {
   final String phone;
   final String role;
   final List<Map<String, dynamic>> address;
+  final String? defaultAddress;
   final Timestamp? createdAt;
   final String? photoUrl;
 
@@ -17,21 +18,24 @@ class UserModel {
     required this.phone,
     required this.role,
     required this.address,
+    this.defaultAddress,
     this.createdAt,
     this.photoUrl,
   });
 
   factory UserModel.fromMap(Map<String, dynamic> data) {
-    return UserModel(
-      uid: data["uid"],
-      name: data["name"] ?? "",
-      email: data["email"] ?? "",
-      phone: data["phone"] ?? "",
-      role: data["role"] ?? "user",
-      address: List<Map<String, dynamic>>.from(data["address"] ?? []),
-      createdAt: data["created_at"],
-      photoUrl: data["photoUrl"],
-    );
+      final rawAddress = data['defaultAddress'];
+      return UserModel(
+        uid: data["uid"],
+        name: data["name"] ?? "",
+        email: data["email"] ?? "",
+        phone: data["phone"] ?? "",
+        role: data["role"] ?? "user",
+        address: List<Map<String, dynamic>>.from(data["address"] ?? []),
+      defaultAddress: rawAddress as String?,
+        createdAt: data["created_at"],
+        photoUrl: data["photoUrl"],
+      );
   }
 
   Map<String, dynamic> toMap() {
@@ -42,6 +46,7 @@ class UserModel {
       "phone": phone,
       "role": role,
       "address": address,
+      "defaultAddress": defaultAddress,
       "created_at": createdAt,
       "photoUrl": photoUrl,
     };

@@ -73,7 +73,6 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   Marker? _marker;
   MapType _mapType = MapType.normal;
   bool _locating = false;
-  String? _currentLocationDisplay;
   static const LatLng _defaultMapPosition = LatLng(3.1390, 101.6869);
   bool get _canSave =>
       _hasChanges &&
@@ -111,7 +110,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         email != _initialEmail ||
         _fullPhoneNumber != _initialPhoneFull ||
         (_isCaregiver && bioValue != _bioInitial) ||
-        (_isCaregiver && addressValue != _addressInitial);
+        addressValue != _addressInitial;
     final emailLower = email.toLowerCase();
     final emailError = email.isEmpty
         ? "Email is required"
@@ -317,13 +316,23 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
       'ProfileEdit source: caregiver=$hasCaregiverData showCaregiver=$showCaregiverFields name=${sourceData["name"]} email=${sourceData["email"]}',
     );
     _existingAddresses = _addressListFromSources(dataMap, caregiverData);
+    final savedDefaultAddress =
+        (caregiverData?['defaultAddress'] as String?)?.trim() ??
+        (dataMap['defaultAddress'] as String?)?.trim() ??
+        '';
     final addressValue = _existingAddresses.isNotEmpty
         ? _formatAddressEntry(_existingAddresses.first)
-        : '';
+        : savedDefaultAddress;
     _addressController.text = addressValue;
     _addressInitial = addressValue;
+    _bioController.text = bioValue;
+    _bioInitial = bioValue;
     if (_existingAddresses.isNotEmpty) {
-      _applyLocationFromEntry(_existingAddresses.first);
+      await _applyLocationFromEntry(_existingAddresses.first);
+    } else if (savedDefaultAddress.isNotEmpty) {
+      await _searchAddress(savedDefaultAddress, markInitial: true);
+    } else if (_pickedLatLng == null) {
+      await _autoDetectLocation();
     }
     _bioController.text = bioValue;
     _bioInitial = bioValue;
@@ -340,9 +349,6 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         _nameError = null;
         _phoneError = null;
       });
-      if (_pickedLatLng == null) {
-        _autoDetectLocation();
-      }
     }
   }
 
@@ -390,12 +396,12 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     return '';
   }
 
-  void _applyLocationFromEntry(Map<String, dynamic> entry) {
+  Future<void> _applyLocationFromEntry(Map<String, dynamic> entry) async {
     final lat = entry['lat'];
     final lng = entry['lng'];
     if (lat is num && lng is num) {
       final coords = LatLng(lat.toDouble(), lng.toDouble());
-      _placeMarker(coords, animate: false, updateAddress: false);
+      await _placeMarker(coords, animate: false, updateAddress: false);
     }
   }
 
@@ -403,6 +409,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     LatLng pos, {
     bool animate = true,
     bool updateAddress = true,
+    bool markAddressAsInitial = false,
   }) async {
     final newMarker = Marker(
       markerId: const MarkerId('profile'),
@@ -419,11 +426,19 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
       await controller.animateCamera(CameraUpdate.newLatLngZoom(pos, 15));
     }
     if (updateAddress) {
-      await _reverseGeocode(pos.latitude, pos.longitude);
+      await _reverseGeocode(
+        pos.latitude,
+        pos.longitude,
+        markAsInitial: markAddressAsInitial,
+      );
     }
   }
 
-  Future<void> _reverseGeocode(double lat, double lng) async {
+  Future<void> _reverseGeocode(
+    double lat,
+    double lng, {
+    bool markAsInitial = false,
+  }) async {
     try {
       final placemarks = await placemarkFromCoordinates(lat, lng);
       if (placemarks.isNotEmpty) {
@@ -433,16 +448,14 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           offset: formatted.length,
         );
         setState(() {
-          _currentLocationDisplay = formatted;
+          if (markAsInitial) {
+            _addressInitial = formatted;
+            _hasChanges = false;
+          }
         });
       }
     } catch (_) {
-      setState(() {
-        _currentLocationDisplay =
-            'Lat: ${lat.toStringAsFixed(5)}, '
-            'Lng: ${lng.toStringAsFixed(5)}';
-      });
-    }
+    } catch (_) {}
   }
 
   String _formatPlacemark(Placemark placemark) {
@@ -485,38 +498,18 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     }
   }
 
-  Future<void> _searchAddress(String query) async {
+  Future<void> _searchAddress(String query, {bool markInitial = false}) async {
     if (query.trim().isEmpty) return;
     try {
       final results = await locationFromAddress(query);
       if (results.isNotEmpty) {
         final first = results.first;
         final coords = LatLng(first.latitude, first.longitude);
-        await _placeMarker(coords);
+        await _placeMarker(coords, markAddressAsInitial: markInitial);
       }
     } catch (_) {
       debugPrint('Unable to locate address.');
     }
-  }
-
-  List<Map<String, dynamic>> _buildUpdatedAddressList(String addressValue) {
-    final updated = _existingAddresses
-        .map((entry) => Map<String, dynamic>.from(entry))
-        .toList();
-    if (updated.isNotEmpty) {
-      final updatedFirst = Map<String, dynamic>.from(updated.first);
-      updatedFirst["address"] = addressValue;
-      updatedFirst["formattedAddress"] = addressValue;
-      updated[0] = updatedFirst;
-    } else if (addressValue.isNotEmpty) {
-      updated.add({
-        "id": "primary",
-        "label": "Primary",
-        "address": addressValue,
-        "formattedAddress": addressValue,
-      });
-    }
-    return updated;
   }
 
   Future<void> _pickPhoto() async {
@@ -594,15 +587,18 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
 
     try {
       final trimmedAddress = _addressController.text.trim();
-      final updatedAddresses = _buildUpdatedAddressList(trimmedAddress);
+      final defaultAddressLabel = trimmedAddress.isNotEmpty
+          ? trimmedAddress
+          : null;
       if (_isCaregiver) {
         final caregiverUpdate = <String, dynamic>{
           "name": firstName,
           "email": email,
           "phone": phoneToSave,
           "bio": bioValue,
-          "address": updatedAddresses,
           "photoUrl": _photoUrl ?? '',
+          if (defaultAddressLabel != null)
+            "defaultAddress": defaultAddressLabel,
         };
         await FirebaseFirestore.instance
             .collection("caregivers")
@@ -613,6 +609,8 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           "name": firstName,
           "email": email,
           "phone": phoneToSave,
+          if (defaultAddressLabel != null)
+            "defaultAddress": defaultAddressLabel,
         };
         await FirebaseFirestore.instance
             .collection("users")
@@ -627,10 +625,9 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         _initialEmail = email;
         _initialPhoneFull = _fullPhoneNumber;
         _bioInitial = bioValue;
-        if (_isCaregiver) {
-          _initialAddress = trimmedAddress;
-          _existingAddresses = updatedAddresses;
-        }
+          if (_isCaregiver) {
+            _initialAddress = trimmedAddress;
+          }
         _hasChanges = false;
       });
 
@@ -868,9 +865,9 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
                             if (_isCaregiver) ...[
                               const SizedBox(height: 10),
                               _bioField(),
-                              const SizedBox(height: 10),
-                              _addressField(),
                             ],
+                            const SizedBox(height: 10),
+                            _addressField(),
                             const SizedBox(height: 24),
                           ],
                         ),
@@ -1185,203 +1182,148 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   Widget _addressField() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          "Address",
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            color: _profileDarkText,
+      children: [_addressCard()],
+    );
+  }
+
+  Widget _addressCard() {
+    const double cardHeight = 180;
+    final initialPosition = _pickedLatLng ?? _defaultMapPosition;
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.grey[200]!),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.08),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
           ),
-        ),
-        const SizedBox(height: 6),
-        Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: Colors.grey[200]!),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.08),
-                blurRadius: 16,
-                offset: const Offset(0, 6),
-              ),
-            ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              ClipRRect(
-                borderRadius: const BorderRadius.vertical(
-                  top: Radius.circular(20),
-                ),
-                child: SizedBox(
-                  height: 160,
-                  child: Stack(
-                    children: [
-                      GoogleMap(
-                        initialCameraPosition: CameraPosition(
-                          target: _pickedLatLng ?? _defaultMapPosition,
-                          zoom: _pickedLatLng == null ? 12 : 15,
-                        ),
-                        mapType: _mapType,
-                        zoomControlsEnabled: false,
-                        myLocationEnabled: true,
-                        myLocationButtonEnabled: false,
-                        mapToolbarEnabled: false,
-                        onMapCreated: (controller) {
-                          if (!_mapControllerCompleter.isCompleted) {
-                            _mapControllerCompleter.complete(controller);
-                          }
-                          _mapController = controller;
-                        },
-                        markers: _marker != null ? {_marker!} : <Marker>{},
-                        onTap: (pos) => _placeMarker(pos),
-                      ),
-                      if (_locating)
-                        const Positioned.fill(
-                          child: Center(child: CircularProgressIndicator()),
-                        ),
-                      Positioned(
-                        top: 12,
-                        right: 12,
-                        child: Column(
-                          children: [
-                            _mapControlButton(
-                              icon: Icons.layers_outlined,
-                              tooltip: 'Toggle map view',
-                              onTap: () {
-                                setState(() {
-                                  _mapType = _mapType == MapType.normal
-                                      ? MapType.satellite
-                                      : MapType.normal;
-                                });
-                              },
-                            ),
-                            const SizedBox(height: 6),
-                            _mapControlButton(
-                              icon: Icons.my_location_rounded,
-                              tooltip: 'Current location',
-                              onTap: _autoDetectLocation,
-                            ),
-                          ],
-                        ),
-                      ),
-                      const Positioned(
-                        top: 12,
-                        left: 12,
-                        child: Icon(
-                          Icons.location_pin,
-                          size: 28,
-                          color: Colors.white,
-                        ),
-                      ),
-                      Positioned(
-                        bottom: 12,
-                        left: 16,
-                        right: 16,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 6,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.92),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.grey.shade300),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.05),
-                                blurRadius: 8,
-                                offset: const Offset(0, 2),
-                              ),
-                            ],
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(
-                                Icons.my_location_outlined,
-                                size: 16,
-                                color: Colors.black87,
-                              ),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Text(
-                                  _currentLocationDisplay ??
-                                      "Determining current location...",
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.black87,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+            child: SizedBox(
+              height: cardHeight,
+              child: Stack(
+                children: [
+                  GoogleMap(
+                    initialCameraPosition: CameraPosition(
+                      target: initialPosition,
+                      zoom: _pickedLatLng == null ? 12 : 15,
+                    ),
+                    mapType: _mapType,
+                    zoomControlsEnabled: false,
+                    myLocationEnabled: true,
+                    myLocationButtonEnabled: false,
+                    mapToolbarEnabled: false,
+                    onMapCreated: (controller) {
+                      if (!_mapControllerCompleter.isCompleted) {
+                        _mapControllerCompleter.complete(controller);
+                      }
+                      _mapController = controller;
+                    },
+                    markers: _marker != null ? {_marker!} : <Marker>{},
+                    onTap: (pos) => _placeMarker(pos),
                   ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Confirm your location',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
-                      ),
+                  if (_locating)
+                    const Positioned.fill(
+                      child: Center(child: CircularProgressIndicator()),
                     ),
-                    const SizedBox(height: 6),
-                    TextField(
-                      controller: _addressController,
-                      textInputAction: TextInputAction.search,
-                      maxLines: 2,
-                      style: _inputFieldTextStyle,
-                      decoration: InputDecoration(
-                        hintText: "Street, city, postcode",
-                        hintStyle: _inputFieldHintStyle,
-                        filled: true,
-                        fillColor: Colors.grey[50],
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
+                  Positioned(
+                    top: 12,
+                    right: 12,
+                    child: Column(
+                      children: [
+                        _mapControlButton(
+                          icon: Icons.layers_outlined,
+                          tooltip: 'Toggle map view',
+                          onTap: () {
+                            setState(() {
+                              _mapType = _mapType == MapType.normal
+                                  ? MapType.satellite
+                                  : MapType.normal;
+                            });
+                          },
                         ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: BorderSide(color: Colors.grey[300]!),
+                        const SizedBox(height: 6),
+                        _mapControlButton(
+                          icon: Icons.my_location_rounded,
+                          tooltip: 'Current location',
+                          onTap: _autoDetectLocation,
                         ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: BorderSide(color: Colors.grey[300]!),
-                        ),
-                        focusedBorder: const OutlineInputBorder(
-                          borderRadius: BorderRadius.all(Radius.circular(16)),
-                          borderSide: BorderSide(
-                            color: _profileDarkText,
-                            width: 1.1,
-                          ),
-                        ),
-                        suffixIcon: IconButton(
-                          icon: const Icon(Icons.search),
-                          onPressed: () =>
-                              _searchAddress(_addressController.text.trim()),
-                        ),
-                      ),
-                      onSubmitted: (value) => _searchAddress(value),
+                      ],
                     ),
-                  ],
-                ),
+                  ),
+                  const Positioned(
+                    top: 12,
+                    left: 12,
+                    child: Icon(
+                      Icons.location_pin,
+                      size: 28,
+                      color: Colors.white,
+                    ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
-      ],
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Address',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+                ),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _addressController,
+                  textInputAction: TextInputAction.search,
+                  maxLines: 2,
+                  style: _inputFieldTextStyle,
+                  decoration: InputDecoration(
+                    hintText: "Street, city, postcode",
+                    hintStyle: _inputFieldHintStyle,
+                    filled: true,
+                    fillColor: Colors.grey[50],
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      borderSide: BorderSide(color: Colors.grey[300]!),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      borderSide: BorderSide(color: Colors.grey[300]!),
+                    ),
+                    focusedBorder: const OutlineInputBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(16)),
+                      borderSide: BorderSide(
+                        color: _profileDarkText,
+                        width: 1.1,
+                      ),
+                    ),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.search),
+                      onPressed: () =>
+                          _searchAddress(_addressController.text.trim()),
+                    ),
+                  ),
+                  onSubmitted: (value) => _searchAddress(value),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 

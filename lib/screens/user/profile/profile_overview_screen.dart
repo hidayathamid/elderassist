@@ -12,6 +12,7 @@ import 'profile_services_screen.dart';
 import 'profile_edit_screen.dart';
 
 import '../../../models/activity_booking.dart';
+import 'package:emergencies_disability_assistance_app/models/payment_document_target.dart';
 import '../../../models/user_model.dart';
 import '../../../services/auth_service.dart';
 import '../../auth/touchdown_screen.dart';
@@ -495,7 +496,9 @@ class ProfileOverviewScreen extends StatelessWidget {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => const ProfilePaymentsScreen(),
+                          builder: (_) => const ProfilePaymentsScreen(
+                            target: PaymentDocumentTarget.user,
+                          ),
                         ),
                       );
                     },
@@ -576,7 +579,10 @@ class ProfileOverviewScreen extends StatelessWidget {
               ),
               child: const Text(
                 'Cancel',
-                style: TextStyle(fontWeight: FontWeight.w700),
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  color: Colors.black,
+                ),
               ),
             ),
           ),

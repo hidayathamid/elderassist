@@ -794,23 +794,40 @@ exports.savePaymentDetails = functions
     }
     const uid = context.auth.uid;
     const userRef = db.collection('users').doc(uid);
+    const caregiverRef = db.collection('caregivers').doc(uid);
     const paymentDetails = {
       bankName: (data.bankName ?? '').trim(),
       accountName: (data.accountName ?? '').trim(),
       accountNumber: (data.accountNumber ?? '').trim(),
-      bankBranch: (data.bankBranch ?? '').trim(),
-      payoutRole: (data.payoutRole ?? 'client').trim(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
-    if (paymentDetails.bankName.isEmpty ||
-        paymentDetails.accountName.isEmpty ||
-        paymentDetails.accountNumber.isEmpty) {
+   if (
+      paymentDetails.bankName.length === 0 ||
+      paymentDetails.accountName.length === 0 ||
+      paymentDetails.accountNumber.length === 0
+    ) {
       throw new functions.https.HttpsError(
         'invalid-argument',
         'Please fill in the required fields.',
       );
     }
-    await userRef.set({'paymentDetails': paymentDetails}, {merge: true});
+    const targetRaw = (data?.target ?? 'auto').toString().toLowerCase();
+    const target = ['caregiver', 'user', 'auto'].includes(targetRaw)
+      ? targetRaw
+      : 'auto';
+    const caregiverSnap = await caregiverRef.get();
+    const batch = db.batch();
+    const shouldWriteCaregiver =
+      target === 'caregiver' || (target === 'auto' && caregiverSnap.exists);
+    const shouldWriteUser =
+      target === 'user' || (target === 'auto' && !caregiverSnap.exists);
+    if (shouldWriteCaregiver) {
+      batch.set(caregiverRef, { paymentDetails }, { merge: true });
+    }
+    if (shouldWriteUser) {
+      batch.set(userRef, { paymentDetails }, { merge: true });
+    }
+    await batch.commit();
     return { success: true };
   });
 

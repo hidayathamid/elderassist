@@ -1,17 +1,20 @@
 import 'dart:async';
-import 'dart:ui';
+import 'dart:ui' as ui;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart' show DragStartBehavior;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart' as geocoding;
 import 'package:emergencies_disability_assistance_app/screens/user/profile/profile_address_edit_screen.dart';
+import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
 import 'booking_caregiver_screen.dart';
 
@@ -35,6 +38,10 @@ class AddressItem {
     this.addressLine,
     this.id,
     this.label,
+    this.isCurrentLocation = false,
+    this.isUserEntry = false,
+    this.avatarUrl,
+    this.photoUrl,
   });
 
   final String title;
@@ -46,6 +53,10 @@ class AddressItem {
   final String? addressLine;
   final String? id;
   final String? label;
+  final bool isCurrentLocation;
+  final bool isUserEntry;
+  final String? avatarUrl;
+  final String? photoUrl;
 
   factory AddressItem.fromMap(Map<String, dynamic> map) {
     final lat = _safeDouble(map['lat']) ?? _safeDouble(map['latitude']);
@@ -74,6 +85,8 @@ class AddressItem {
         map['city'] ??
         '';
     final forWhoValue = map['forWho'] ?? map['person'] ?? map['owner'] ?? '';
+    final photoUrlValue = map['photoUrl'];
+    final avatarValue = map['photoUrl'];
 
     return AddressItem(
       id: map['id']?.toString(),
@@ -87,6 +100,8 @@ class AddressItem {
           ? '$addressLineValue'.trim()
           : null,
       label: '$labelValue'.trim().isNotEmpty ? '$labelValue'.trim() : null,
+      avatarUrl: avatarValue?.trim(),
+      photoUrl: photoUrlValue?.trim(),
     );
   }
 
@@ -151,6 +166,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   double _backdropOpacity = 0.0;
   double _panelBlend = 0.0;
   bool _hasLocation = false;
+  final MapType _mapType = MapType.normal;
   bool _emptySelected = false;
   List<Map<String, dynamic>> _addressData = [];
   final ScrollController _addressScrollController = ScrollController();
@@ -172,6 +188,11 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   final List<Ticker> _tickers = [];
   String? _currentLocationName;
   String? _userFullName;
+  String? _userPhotoUrl;
+  String? _defaultAddressText;
+  final Map<String, BitmapDescriptor> _markerCache = {};
+  final Map<String, ui.Image> _avatarImageCache = {};
+  BitmapDescriptor? _selectedPersonIcon;
 
   @override
   Ticker createTicker(TickerCallback onTick) {
@@ -204,6 +225,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         );
       }
       setState(() {});
+      _updateSelectedPersonMarkerIcon();
     }
   }
 
@@ -238,7 +260,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
 
   void _updatePanelVisuals() {
     final size =
-        lerpDouble(_minSheetSize, _maxSheetSize, _panelController.value) ??
+        ui.lerpDouble(_minSheetSize, _maxSheetSize, _panelController.value) ??
         _minSheetSize;
     final double t = _panelController.value;
     setState(() {
@@ -256,8 +278,16 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   }
 
   double _currentSheetHeight(BuildContext context) {
-    return lerpDouble(_minSheetSize, _maxSheetSize, _panelController.value)! *
+    return ui.lerpDouble(
+          _minSheetSize,
+          _maxSheetSize,
+          _panelController.value,
+        )! *
         MediaQuery.of(context).size.height;
+  }
+
+  double _minSheetHeightPx(BuildContext context) {
+    return _minSheetSize * MediaQuery.of(context).size.height;
   }
 
   TickerFuture _animatePanelTo(double target, {double velocity = 0}) {
@@ -355,6 +385,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         _hasLocation = true;
         _selected ??= _currentAddressItem();
       });
+      _updateSelectedPersonMarkerIcon();
       _mapController?.animateCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(target: latLng, zoom: 20),
@@ -370,12 +401,19 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   ) {
     final items = snapshot.docs.map((doc) {
       final entry = Map<String, dynamic>.from(doc.data());
-      entry['id'] = doc.id;
+      final existingId = entry['id']?.toString();
+      if (existingId == null || existingId.isEmpty) {
+        entry['id'] = doc.id;
+      }
+      entry['docRefId'] = doc.id;
       return entry;
     }).toList();
+    if (items.isNotEmpty) {
+      debugPrint('Address collection snapshot sample: ${items.first}');
+    }
     _collectionAddressData = items;
     if (items.isNotEmpty) {
-      _updateAddressList(items);
+      _updateAddressList(_mergeAddressListWithDoc(items));
     } else if (_docAddressData.isNotEmpty) {
       _updateAddressList(_docAddressData);
     } else {
@@ -390,6 +428,9 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       FirebaseAuth.instance.currentUser?.displayName,
       snapshot.data(),
     );
+    _userPhotoUrl = _normalizePhotoUrl(snapshot.data()?['photoUrl'] as String?);
+    _defaultAddressText = (snapshot.data()?['defaultAddress'] as String?)
+        ?.trim();
     final fallback = _prepareDocAddressList(snapshot.data());
     _docAddressData = fallback;
     if (_collectionAddressData.isEmpty) {
@@ -398,6 +439,8 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       } else {
         _clearAddressList();
       }
+    } else {
+      _updateAddressList(_mergeAddressListWithDoc(_collectionAddressData));
     }
   }
 
@@ -416,6 +459,74 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       result.add(Map<String, dynamic>.from(raw));
     }
     return result;
+  }
+
+  List<Map<String, dynamic>> _mergeAddressListWithDoc(
+    List<Map<String, dynamic>> source,
+  ) {
+    if (_docAddressData.isEmpty) return source;
+    final fallbackById = <String, Map<String, dynamic>>{};
+    final fallbackByAddress = <String, Map<String, dynamic>>{};
+    final fallbackByName = <String, Map<String, dynamic>>{};
+    String? normalizeKey(dynamic value) {
+      final raw = value?.toString().trim();
+      if (raw == null || raw.isEmpty) return null;
+      return raw.toLowerCase();
+    }
+
+    for (final entry in _docAddressData) {
+      final idKey = normalizeKey(entry['id']);
+      if (idKey != null) fallbackById[idKey] = entry;
+      final addressKey = normalizeKey(
+        entry['address'] ?? entry['addressLine'] ?? entry['subtitle'],
+      );
+      if (addressKey != null) fallbackByAddress[addressKey] = entry;
+      final nameKey = normalizeKey(entry['name'] ?? entry['label']);
+      if (nameKey != null) fallbackByName[nameKey] = entry;
+    }
+
+    Map<String, dynamic>? lookupFallback(Map<String, dynamic> entry) {
+      final idKey = normalizeKey(entry['id']);
+      if (idKey != null && fallbackById.containsKey(idKey)) {
+        return fallbackById[idKey];
+      }
+      final addressKey = normalizeKey(
+        entry['address'] ?? entry['addressLine'] ?? entry['subtitle'],
+      );
+      if (addressKey != null && fallbackByAddress.containsKey(addressKey)) {
+        return fallbackByAddress[addressKey];
+      }
+      final nameKey = normalizeKey(entry['name'] ?? entry['label']);
+      if (nameKey != null && fallbackByName.containsKey(nameKey)) {
+        return fallbackByName[nameKey];
+      }
+      return null;
+    }
+
+    return source.map((entry) {
+      final merged = Map<String, dynamic>.from(entry);
+      final existingPhoto = merged['photoUrl']?.toString().trim();
+      if (existingPhoto?.isNotEmpty == true) return merged;
+      final docEntry = lookupFallback(entry);
+      if (docEntry == null) return merged;
+      final docPhoto = docEntry['photoUrl']?.toString().trim();
+      if (docPhoto?.isNotEmpty == true) {
+        merged['photoUrl'] = docPhoto;
+      }
+      final existingLabel = merged['label']?.toString().trim();
+      if (existingLabel == null || existingLabel.isEmpty) {
+        final docLabel = (docEntry['label'] ??
+                docEntry['title'] ??
+                docEntry['name'] ??
+                docEntry['forWho'])
+            ?.toString()
+            .trim();
+        if (docLabel?.isNotEmpty == true) {
+          merged['label'] = docLabel!;
+        }
+      }
+      return merged;
+    }).toList();
   }
 
   String? _resolveUserName(String? displayName, Map<String, dynamic>? data) {
@@ -448,6 +559,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     } else if (mounted) {
       setState(() {});
     }
+    _updateSelectedPersonMarkerIcon();
   }
 
   void _clearAddressList() {
@@ -455,6 +567,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     _addresses = [];
     _selected = null;
     if (mounted) setState(() {});
+    _updateSelectedPersonMarkerIcon();
   }
 
   Future<void> _refreshAddresses() async {
@@ -546,6 +659,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         _selected = newSelected;
       }
     });
+    _updateSelectedPersonMarkerIcon();
   }
 
   Future<void> _onAddressSelected(AddressItem item, int index) async {
@@ -560,6 +674,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       _currentScrollIndex = index;
       _pendingScrollIndex = index;
     });
+    _updateSelectedPersonMarkerIcon();
     final bool shouldCollapse = _panelController.value > _minSheetSize + 0.001;
     if (shouldCollapse) {
       _animatePanelTo(
@@ -615,6 +730,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     _selected = _currentAddressItem();
     _currentScrollIndex = 0;
     _pendingScrollIndex = 0;
+    _updateSelectedPersonMarkerIcon();
     _animatePanelTo(
       _panelDownValue,
     ).whenComplete(() => _scrollAfterPanelReady(0));
@@ -788,18 +904,25 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                 onVerticalDragUpdate: _onNotePanelDragUpdate,
                 onVerticalDragEnd: _onNotePanelDragEnd,
                 behavior: HitTestBehavior.opaque,
-                child: Container(
-                  width: 44,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 10),
-                  decoration: BoxDecoration(
-                    color: Colors.black26,
-                    borderRadius: BorderRadius.circular(12),
+                child: SizedBox(
+                  height: 44,
+                  width: double.infinity,
+                  child: Center(
+                    child: Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[400],
+                        borderRadius: BorderRadius.circular(24),
+                      ),
+                    ),
                   ),
                 ),
               ),
               const Text(
                 'Note to Caregiver',
+                textAlign: TextAlign.start,
+                textDirection: TextDirection.ltr,
                 style: TextStyle(
                   fontWeight: FontWeight.w700,
                   fontSize: 16,
@@ -867,7 +990,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                       fontSize: 15,
                     ),
                   ),
-                  child: const Text('Save note'),
+                  child: const Text('Save'),
                 ),
               ),
             ],
@@ -897,16 +1020,23 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     final name = isSelf && _userFullName?.isNotEmpty == true
         ? _userFullName!
         : baseName;
-    final addressText = item.addressLine?.isNotEmpty == true
-        ? item.addressLine!
-        : item.subtitle;
+    final defaultAddressLine = _defaultAddressText?.isNotEmpty == true
+        ? _defaultAddressText!
+        : null;
+    final addressText =
+        (isSelf ? defaultAddressLine : null) ??
+        (item.addressLine?.isNotEmpty == true
+            ? item.addressLine!
+            : item.subtitle);
+    final photoUrl = _avatarUrlForTile(item);
+    final photo = (isSelf ? (_userPhotoUrl ?? photoUrl) : photoUrl) ?? '';
     return PersonProfile(
       id: item.id ?? UniqueKey().toString(),
       name: name,
       age: 0,
       address: addressText,
       conditions: const [],
-      photoUrl: '',
+      photoUrl: photo,
       label: isSelf ? 'You' : item.label,
       phone: '',
       notes: _note ?? '',
@@ -929,6 +1059,97 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       return true;
     }
     return false;
+  }
+
+  String? _avatarUrlForTile(AddressItem item) {
+    final bool isSelf = _isSelfAddress(item);
+    final candidate = isSelf
+        ? (_userPhotoUrl ?? item.avatarUrl)
+        : item.avatarUrl;
+    final normalized = _normalizePhotoUrl(candidate);
+    if (normalized != null) return normalized;
+    return _photoUrlFromDocList(item);
+  }
+
+  String? _photoUrlFromDocList(AddressItem item) {
+    if (_docAddressData.isEmpty) return null;
+    final candidateKeys = _collectAddressKeys(
+      id: item.id,
+      address: item.addressLine,
+      subtitle: item.subtitle,
+      forWho: item.forWho,
+      title: item.title,
+    );
+    if (candidateKeys.isEmpty) return null;
+    for (final entry in _docAddressData) {
+      final entryKeys = _collectAddressKeys(
+        id: entry['id'],
+        address: entry['address'] ?? entry['addressLine'],
+        subtitle: entry['subtitle'],
+        forWho: entry['forWho'] ?? entry['name'],
+        title: entry['label'],
+      );
+      if (entryKeys.any(candidateKeys.contains)) {
+        return _normalizePhotoUrl(entry['photoUrl']?.toString());
+      }
+    }
+    return null;
+  }
+
+  String? _labelFromDocList(AddressItem item) {
+    if (_docAddressData.isEmpty) return null;
+    final candidateKeys = _collectAddressKeys(
+      id: item.id,
+      address: item.addressLine,
+      subtitle: item.subtitle,
+      forWho: item.forWho,
+      title: item.title,
+    );
+    if (candidateKeys.isEmpty) return null;
+    for (final entry in _docAddressData) {
+      final entryKeys = _collectAddressKeys(
+        id: entry['id'],
+        address: entry['address'] ?? entry['addressLine'],
+        subtitle: entry['subtitle'],
+        forWho: entry['forWho'] ?? entry['name'],
+        title: entry['label'] ?? entry['title'],
+      );
+      if (entryKeys.any(candidateKeys.contains)) {
+        final docLabel = (entry['label'] ??
+                entry['title'] ??
+                entry['name'] ??
+                entry['forWho'])
+            ?.toString()
+            .trim();
+        if (docLabel?.isNotEmpty == true) {
+          return docLabel;
+        }
+      }
+    }
+    return null;
+  }
+
+  Set<String> _collectAddressKeys({
+    dynamic id,
+    dynamic address,
+    dynamic subtitle,
+    dynamic forWho,
+    dynamic title,
+  }) {
+    final result = <String>{};
+    for (final value in [id, address, subtitle, forWho, title]) {
+      final normalized = _normalizeComparisonValue(value);
+      if (normalized != null) {
+        result.add(normalized);
+      }
+    }
+    return result;
+  }
+
+  String? _normalizeComparisonValue(dynamic value) {
+    final raw = value?.toString().trim();
+    if (raw == null || raw.isEmpty) return null;
+    return raw.toLowerCase();
   }
 
   static const Color _bookingAppBarText = Color(0xFF1B1D29);
@@ -992,7 +1213,11 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
           clipBehavior: Clip.hardEdge,
           child: Stack(
             children: [
-              Positioned.fill(
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: _minSheetHeightPx(context),
                 child: GoogleMap(
                   initialCameraPosition: CameraPosition(
                     target: _currentLatLng,
@@ -1000,7 +1225,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                   ),
                   zoomControlsEnabled: false,
                   myLocationButtonEnabled: false,
-                  myLocationEnabled: true,
+                  myLocationEnabled: false,
                   markers: {_buildMarker()},
                   onMapCreated: (c) {
                     _mapController = c;
@@ -1015,7 +1240,6 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                   color: Colors.black.withValues(alpha: _backdropOpacity),
                 ),
               ),
-              if (_hasLocation) _currentLocationButton(),
               Positioned(
                 left: 0,
                 right: 0,
@@ -1271,12 +1495,21 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         (item.forWho != null && item.forWho!.trim().isNotEmpty)
         ? item.forWho!
         : item.title;
-    final String addressLine = item.addressLine?.isNotEmpty == true
-        ? item.addressLine!
-        : item.subtitle;
+    final bool isSelf = _isSelfAddress(item);
+    final String addressLine = (isSelf && _defaultAddressText?.isNotEmpty == true)
+        ? _defaultAddressText!
+        : (item.addressLine?.isNotEmpty == true ? item.addressLine! : item.subtitle);
     final String distanceText = item.distanceKm != null
         ? '${item.distanceKm!.toStringAsFixed(1)}km'
         : '--';
+    String? labelTag = !isSelf && item.label?.trim().isNotEmpty == true
+        ? item.label!.trim()
+        : null;
+    labelTag ??= _labelFromDocList(item);
+    final avatarUrl = _avatarUrlForTile(item);
+    debugPrint(
+      'AddressTile avatar for $displayTitle: $avatarUrl (docId=${item.id ?? item.photoUrl})',
+    );
     return InkWell(
       onTap: onTap,
       child: Container(
@@ -1301,10 +1534,10 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            Icon(
-              isCurrent ? Icons.my_location : Icons.location_on,
-              color: isActive ? const Color(0xFF00B8C6) : Colors.black54,
-              size: 18,
+            DefaultProfileAvatar(
+              radius: 14,
+              photoUrl: _avatarUrlForTile(item),
+              label: displayTitle,
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -1312,20 +1545,41 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text(
-                    displayTitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 14,
-                      color: isActive
-                          ? const Color(0xFF00B8C6)
-                          : Colors.black87,
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: RichText(
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      text: TextSpan(
+                        text: displayTitle,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                          color: isActive
+                              ? const Color(0xFF00B8C6)
+                              : Colors.black87,
+                        ),
+                        children: labelTag != null
+                            ? [
+                                const TextSpan(text: ' - '),
+                                TextSpan(
+                                  text: labelTag,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                    color: isActive
+                                        ? const Color(0xFF00B8C6)
+                                        : Colors.black54,
+                                  ),
+                                ),
+                              ]
+                            : null,
+                      ),
                     ),
                   ),
                   const SizedBox(height: 2),
                   Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       Text(
                         distanceText,
@@ -1373,29 +1627,37 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       },
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.add_home_outlined,
-            size: 28,
-            color: _emptySelected ? _accentBlue : Colors.black45,
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'No saved addresses yet',
-            style: TextStyle(
-              fontWeight: FontWeight.w700,
-              fontSize: 12,
-              color: _emptySelected ? _accentBlue : Colors.black87,
-            ),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            'Add an address to use for booking your caregiver.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.black54),
-          ),
-        ],
+        children: [_buildEmptyAddressHint(selected: _emptySelected)],
       ),
+    );
+  }
+
+  Widget _buildEmptyAddressHint({bool selected = false}) {
+    const Color iconColor = _accentBlue;
+    final headlineColor = selected ? _accentBlue : Colors.black87;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.add_home_outlined, size: 32, color: iconColor),
+        const SizedBox(height: 10),
+        Text(
+          'No saved addresses yet',
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 15,
+            color: headlineColor,
+          ),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          'Add an address to book a caregiver near you.',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 12, color: Colors.black54),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ],
     );
   }
 
@@ -1403,8 +1665,146 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     return Marker(
       markerId: const MarkerId('selected'),
       position: _currentLatLng,
-      icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+      icon:
+          _selectedPersonIcon ??
+          BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+      anchor: const Offset(0.5, 0.95),
     );
+  }
+
+  Future<void> _updateSelectedPersonMarkerIcon() async {
+    if (_selected == null) {
+      if (_selectedPersonIcon != null && mounted) {
+        setState(() => _selectedPersonIcon = null);
+      }
+      return;
+    }
+    final person = _personFromAddress(_selected!);
+    final label = person.name.trim().isNotEmpty
+        ? person.name.trim()[0].toUpperCase()
+        : 'P';
+    final String? photoUrl = person.photoUrl.trim().isNotEmpty
+        ? person.photoUrl.trim()
+        : null;
+    final descriptor = await _cachedAvatarMarker(
+      "selected_person:${photoUrl ?? 'default'}:$label",
+      fillColor: _primaryColor,
+      label: label,
+      photoUrl: photoUrl,
+    );
+    if (!mounted) return;
+    setState(() => _selectedPersonIcon = descriptor);
+  }
+
+  Future<BitmapDescriptor> _cachedAvatarMarker(
+    String key, {
+    required Color fillColor,
+    String? label,
+    String? photoUrl,
+  }) async {
+    final cached = _markerCache[key];
+    if (cached != null) return cached;
+    final ui.Image? avatar = await _loadAvatarImage(photoUrl);
+    final descriptor = await _buildAvatarMarker(
+      fillColor: fillColor,
+      label: label,
+      size: 110,
+      avatar: avatar,
+    );
+    _markerCache[key] = descriptor;
+    return descriptor;
+  }
+
+  Future<ui.Image?> _loadAvatarImage(String? url) async {
+    if (url == null || url.trim().isEmpty) return null;
+    final cached = _avatarImageCache[url];
+    if (cached != null) return cached;
+    try {
+      final uri = Uri.parse(url);
+      final ByteData data = await NetworkAssetBundle(uri).load('');
+      final Uint8List bytes = data.buffer.asUint8List();
+      final ui.Codec codec = await ui.instantiateImageCodec(bytes);
+      final ui.FrameInfo frame = await codec.getNextFrame();
+      _avatarImageCache[url] = frame.image;
+      return frame.image;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<BitmapDescriptor> _buildAvatarMarker({
+    required Color fillColor,
+    String? label,
+    Color textColor = Colors.black,
+    double size = 110,
+    ui.Image? avatar,
+  }) async {
+    final ui.PictureRecorder recorder = ui.PictureRecorder();
+    final Canvas canvas = Canvas(recorder);
+    final double radius = size / 2;
+    final double tailHeight = size * 0.25;
+    final double circleRadius = size * 0.45;
+    final double circleCenterY = radius - tailHeight * 0.35;
+    final Paint paint = Paint()..color = fillColor;
+    final Path tailPath = Path()
+      ..moveTo(radius - circleRadius * 0.45, circleCenterY + circleRadius * 0.4)
+      ..quadraticBezierTo(
+        radius,
+        size - tailHeight * 0.08,
+        radius + circleRadius * 0.45,
+        circleCenterY + circleRadius * 0.4,
+      )
+      ..lineTo(radius, size)
+      ..close();
+    canvas.drawPath(tailPath, paint);
+    canvas.drawCircle(Offset(radius, circleCenterY), circleRadius, paint);
+    if (avatar != null) {
+      final Rect src = Rect.fromLTWH(
+        0,
+        0,
+        avatar.width.toDouble(),
+        avatar.height.toDouble(),
+      );
+      final double inset = size * 0.15;
+      final Rect dst = Rect.fromCircle(
+        center: Offset(radius, circleCenterY),
+        radius: circleRadius - inset,
+      );
+      final Path clip = Path()..addOval(dst);
+      canvas.save();
+      canvas.clipPath(clip);
+      canvas.drawImageRect(avatar, src, dst, Paint());
+      canvas.restore();
+    }
+    if (avatar == null && label != null && label.isNotEmpty) {
+      const TextStyle textStyle = TextStyle(
+        color: Colors.black,
+        fontSize: 22,
+        fontWeight: FontWeight.bold,
+      );
+      final TextPainter textPainter = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: textStyle.copyWith(color: textColor),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final Offset offset = Offset(
+        radius - textPainter.width / 2,
+        circleCenterY - textPainter.height / 2,
+      );
+      textPainter.paint(canvas, offset);
+    }
+    final ui.Picture picture = recorder.endRecording();
+    final ui.Image image = await picture.toImage(size.toInt(), size.toInt());
+    final ByteData? byteData = await image.toByteData(
+      format: ui.ImageByteFormat.png,
+    );
+    if (byteData == null || byteData.lengthInBytes == 0) {
+      debugPrint('Avatar marker drawing failed; using default marker');
+      return BitmapDescriptor.defaultMarker;
+    }
+    return BitmapDescriptor.fromBytes(byteData.buffer.asUint8List());
   }
 
   List<AddressItem> _visibleAddresses() {
@@ -1425,6 +1825,8 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       long: _currentLatLng.longitude,
       forWho: 'You',
       addressLine: _currentLocationName,
+      avatarUrl: _userPhotoUrl,
+      photoUrl: _userPhotoUrl,
     );
   }
 
@@ -1543,4 +1945,9 @@ class _ItemSnapScrollPhysics extends ClampingScrollPhysics {
     }
     return null;
   }
+}
+
+String? _normalizePhotoUrl(String? value) {
+  final trimmed = value?.trim();
+  return trimmed?.isNotEmpty == true ? trimmed : null;
 }

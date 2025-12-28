@@ -15,7 +15,9 @@ import '../../../widgets/default_profile_avatar.dart';
 import '../../../widgets/standard_app_bar.dart';
 import '../booking/booking_summary_screen.dart';
 import '../booking/booking_person_screen.dart';
+import '../profile/profile_payments_screen.dart';
 import '../../../models/caregiver_model.dart';
+import 'package:emergencies_disability_assistance_app/models/payment_document_target.dart';
 import 'package:intl/intl.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 
@@ -78,8 +80,9 @@ class _ActivityScreenState extends State<ActivityScreen>
   List<_EnrichedBooking>? _cachedEnriched;
   final Set<String> _hiddenHistoryBookings = <String>{};
   final ChatService _chatService = ChatService();
-  final FirebaseFunctions _functions =
-      FirebaseFunctions.instanceFor(region: 'asia-southeast1');
+  final FirebaseFunctions _functions = FirebaseFunctions.instanceFor(
+    region: 'asia-southeast1',
+  );
 
   BookingStatus _statusFromString(String status) {
     final normalized = status.toUpperCase();
@@ -221,75 +224,10 @@ class _ActivityScreenState extends State<ActivityScreen>
     }
 
     final userId = user.uid;
+    final unreadStream = _chatService.streamUnreadCountForUser(userId);
     return Scaffold(
       backgroundColor: activityBackgroundColor,
-      appBar: buildProfileStyleAppBar(
-        title: 'Activity',
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: StreamBuilder<int>(
-              stream: _chatService.streamUnreadCountForUser(userId),
-              builder: (context, snapshot) {
-                final badgeCount = snapshot.data ?? 0;
-                return IconButton(
-                  onPressed: () async {
-                    if (!mounted) return;
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) =>
-                            const UserChatListScreen(showBackButton: true),
-                      ),
-                    );
-                  },
-                  icon: Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                      Icon(
-                        Icons.chat_bubble_outline,
-                        color: activityPrimaryTextColor,
-                        size: 22,
-                      ),
-                      if (badgeCount > 0)
-                        Positioned(
-                          top: -2,
-                          right: -4,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 6,
-                              vertical: 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: activityAccentBlue,
-                              borderRadius: BorderRadius.circular(999),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(0.1),
-                                  blurRadius: 6,
-                                  offset: const Offset(0, 2),
-                                ),
-                              ],
-                            ),
-                            child: Text(
-                              badgeCount.toString(),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w700,
-                                fontSize: 10,
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                  tooltip: 'Messages',
-                );
-              },
-            ),
-          ),
-        ],
-      ),
+      appBar: buildProfileStyleAppBar(title: 'Activity'),
       body: StreamBuilder<List<_EnrichedBooking>>(
         stream: _enrichedBookingsStream(user.uid),
         builder: (context, enrichedSnapshot) {
@@ -306,6 +244,82 @@ class _ActivityScreenState extends State<ActivityScreen>
           _cachedEnriched = enriched;
           return _buildActivityContent(enriched);
         },
+      ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
+      floatingActionButton: StreamBuilder<int>(
+        stream: unreadStream,
+        builder: (context, snapshot) {
+          final badgeCount = snapshot.data ?? 0;
+          return Stack(
+            alignment: Alignment.center,
+            clipBehavior: Clip.none,
+            children: [
+              GestureDetector(
+                onTap: _navigateToChatList,
+                child: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.12),
+                        blurRadius: 8,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.chat_bubble_outline,
+                    color: activityAccentBlue,
+                    size: 20,
+                  ),
+                ),
+              ),
+              if (badgeCount > 0)
+                Positioned(
+                  top: 2,
+                  right: 2,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(999),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.1),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Text(
+                      badgeCount.toString(),
+                      style: const TextStyle(
+                        color: activityAccentBlue,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _navigateToChatList() {
+    if (!mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const UserChatListScreen(showBackButton: true),
       ),
     );
   }
@@ -541,14 +555,11 @@ class _ActivityScreenState extends State<ActivityScreen>
     final messenger = ScaffoldMessenger.of(context);
     try {
       final callable = _functions.httpsCallable('cancelBooking');
-      await callable.call({
-        'bookingId': booking.id,
-        'reason': reason,
-      });
+      await callable.call({'bookingId': booking.id, 'reason': reason});
       if (!mounted) return false;
-      messenger.showSnackBar(const SnackBar(
-        content: Text('Cancellation request submitted.'),
-      ));
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Cancellation request submitted.')),
+      );
       return true;
     } catch (e, st) {
       if (!mounted) return false;
@@ -560,8 +571,10 @@ class _ActivityScreenState extends State<ActivityScreen>
     }
   }
 
-  void _promptCancellation(ActivityBooking booking) {
+  Future<void> _promptCancellation(ActivityBooking booking) async {
     if (_isReasonPanelVisible) return;
+    final canCancel = await _ensurePaymentDetailsBeforeCancelling();
+    if (!canCancel) return;
     setState(() {
       _resetSwipeFor = booking.id;
       _pendingCancellationBooking = booking;
@@ -570,6 +583,97 @@ class _ActivityScreenState extends State<ActivityScreen>
       _isReasonPanelVisible = true;
     });
     _reasonSheetController.forward(from: 0);
+  }
+
+  Future<bool> _ensurePaymentDetailsBeforeCancelling() async {
+    if (await _hasSavedPaymentDetails()) return true;
+    final shouldSetup = await _showPaymentSetupDialog();
+    if (shouldSetup && mounted) {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) =>
+              const ProfilePaymentsScreen(target: PaymentDocumentTarget.user),
+        ),
+      );
+    }
+    return false;
+  }
+
+  Future<bool> _showPaymentSetupDialog() async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: const Text(
+          'Payment details required',
+          style: TextStyle(fontWeight: FontWeight.w700),
+          textAlign: TextAlign.center,
+        ),
+        content: const Text(
+          'Please complete your payout account details first so refunds can be handled when cancellations are approved.',
+          style: TextStyle(color: Colors.black87),
+          textAlign: TextAlign.center,
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actionsPadding: const EdgeInsets.only(bottom: 12),
+        actions: [
+          SizedBox(
+            width: 120,
+            child: OutlinedButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              style: OutlinedButton.styleFrom(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                side: BorderSide(color: Colors.grey.shade300),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+              child: const Text(
+                'Cancel',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 120,
+            child: ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: activityButtonYellow,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                textStyle: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              child: const Text('OK'),
+            ),
+          ),
+        ],
+      ),
+    );
+    return result == true;
+  }
+
+  Future<bool> _hasSavedPaymentDetails() async {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return false;
+    final doc = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId)
+        .get();
+    final details = doc.data()?['paymentDetails'] as Map<String, dynamic>?;
+    if (details == null) return false;
+    final bank = (details['bankName'] as String?)?.trim().isNotEmpty ?? false;
+    final name =
+        (details['accountName'] as String?)?.trim().isNotEmpty ?? false;
+    final number =
+        (details['accountNumber'] as String?)?.trim().isNotEmpty ?? false;
+    return bank && name && number;
   }
 
   Widget _buildTabContent(
@@ -1805,7 +1909,8 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
                 children: [
                   DefaultProfileAvatar(
                     radius: 14,
-                    photoUrl: personProfile.photoUrl.trim().isNotEmpty
+                    photoUrl:
+                        (personProfile.photoUrl.trim().isNotEmpty ?? false)
                         ? personProfile.photoUrl.trim()
                         : null,
                     label: personName,

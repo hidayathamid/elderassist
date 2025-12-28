@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -8,6 +9,7 @@ import 'package:intl_phone_field/countries.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:uuid/uuid.dart';
+import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
 const Color _accentGold = Color(0xFFF4B63D);
 const Color _tealAccent = Color(0xFF00A8A7);
@@ -22,6 +24,12 @@ final TextStyle _inputFieldHintStyle = TextStyle(
   fontWeight: FontWeight.w600,
   color: _profileDarkText.withValues(alpha: 0.45),
 );
+const List<String> _relationshipOptions = [
+  'Sibling',
+  'Friend',
+  'Doctor',
+  'Other',
+];
 
 class ProfileEmergencyEditScreen extends StatefulWidget {
   const ProfileEmergencyEditScreen({super.key, this.contactId});
@@ -43,6 +51,7 @@ class _ProfileEmergencyEditScreenState
   bool _loading = true;
   final _picker = ImagePicker();
   bool _uploadingPhoto = false;
+  String? _photoUrl;
   String _fullPhoneNumber = '';
   bool _dirty = false;
   bool _isSubmitting = false;
@@ -55,7 +64,14 @@ class _ProfileEmergencyEditScreenState
   bool _isGeneratingLink = false;
   String? _currentPairCode;
   String? _currentPairingLink;
-  bool get _canSave => !_loading && !_isSubmitting && _hasRequiredValues;
+  final LayerLink _relationshipFieldLink = LayerLink();
+  final GlobalKey _relationshipFieldKey = GlobalKey();
+  OverlayEntry? _relationshipOverlayEntry;
+  final TextEditingController _relationshipFieldController =
+      TextEditingController();
+  final TextEditingController _customRelationshipCtrl = TextEditingController();
+  bool get _canSave =>
+      !_loading && !_isSubmitting && _dirty && _hasRequiredValues;
   bool get _canGeneratePairLink =>
       !_loading && !_isGeneratingLink && widget.contactId != null;
 
@@ -86,6 +102,14 @@ class _ProfileEmergencyEditScreenState
     super.initState();
     _nameController.addListener(_markDirty);
     _phoneController.addListener(_markDirty);
+    _customRelationshipCtrl.addListener(() {
+      if (_relationship == 'Other') {
+        final text = _customRelationshipCtrl.text.trim();
+        _relationshipFieldController.text = text.isNotEmpty ? text : 'Other';
+      }
+      _markDirty();
+    });
+    _relationshipFieldController.text = _relationship;
     _loadContact();
   }
 
@@ -125,8 +149,25 @@ class _ProfileEmergencyEditScreenState
           _fullPhoneNumber,
           _selectedDialCode,
         );
-        _relationship = match['relationship'] as String? ?? 'Sibling';
+        final rawRelationship = (match['relationship'] as String?)?.trim() ?? '';
+        if (_relationshipOptions.contains(rawRelationship) && rawRelationship != 'Other') {
+          _relationship = rawRelationship;
+          _customRelationshipCtrl.clear();
+          _relationshipFieldController.text = rawRelationship;
+        } else if (rawRelationship.isNotEmpty) {
+          _relationship = 'Other';
+          _customRelationshipCtrl.text = rawRelationship;
+          _relationshipFieldController.text = rawRelationship;
+        } else {
+          _relationship = 'Sibling';
+          _customRelationshipCtrl.clear();
+          _relationshipFieldController.text = 'Sibling';
+        }
         _currentPairCode = match['pairCode'] as String?;
+        final entryPhoto = match['photoUrl']?.toString();
+        if (entryPhoto?.isNotEmpty ?? false) {
+          _photoUrl = entryPhoto;
+        }
         if (_currentPairCode?.isNotEmpty ?? false) {
           _currentPairingLink = _pairingDeepLink(_currentPairCode!);
           _pairingLinkCtrl.text = _currentPairingLink!;
@@ -171,11 +212,18 @@ class _ProfileEmergencyEditScreenState
           : rawPhone.replaceAll(RegExp('[^0-9+]'), '');
       phoneValue = _collapseRepeatedDialPrefix(phoneValue, dialSegment);
     }
+    final entryPhoto = _photoUrl?.isNotEmpty == true ? _photoUrl : null;
+    final relationshipValue = _relationship == 'Other'
+        ? (_customRelationshipCtrl.text.trim().isNotEmpty
+            ? _customRelationshipCtrl.text.trim()
+            : 'Other')
+        : _relationship;
     final data = {
       'id': entryId,
       'name': _nameController.text.trim(),
       'phone': phoneValue,
-      'relationship': _relationship,
+      'relationship': relationshipValue,
+      if (entryPhoto != null) 'photoUrl': entryPhoto,
     };
 
     final index = contacts.indexWhere(
@@ -293,7 +341,7 @@ class _ProfileEmergencyEditScreenState
                                 _labeledField(
                                   label: 'Relationship',
                                   helperText: null,
-                                  child: _buildDropdown(),
+                                  child: _relationshipSelector(),
                                 ),
                                 const SizedBox(height: 10),
                                 _buildPhoneField(),
@@ -345,44 +393,48 @@ class _ProfileEmergencyEditScreenState
                                     suffixIconConstraints: const BoxConstraints(
                                       minWidth: 90,
                                     ),
-                                suffixIcon: Padding(
-                                  padding: const EdgeInsets.only(right: 6),
-                                  child: SizedBox(
-                                    height: 32,
-                                    child: ElevatedButton(
-                                      onPressed: _isGeneratingLink
-                                          ? null
-                                          : telegramButtonAction,
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor: telegramButtonColor,
-                                        foregroundColor: Colors.white,
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 16,
-                                        ),
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius:
-                                              BorderRadius.circular(12),
+                                    suffixIcon: Padding(
+                                      padding: const EdgeInsets.only(right: 6),
+                                      child: SizedBox(
+                                        height: 32,
+                                        child: ElevatedButton(
+                                          onPressed: _isGeneratingLink
+                                              ? null
+                                              : telegramButtonAction,
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor:
+                                                telegramButtonColor,
+                                            foregroundColor: Colors.white,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 16,
+                                            ),
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(12),
+                                            ),
+                                          ),
+                                          child: _isGeneratingLink
+                                              ? const SizedBox(
+                                                  width: 16,
+                                                  height: 16,
+                                                  child:
+                                                      CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                        color: Colors.white,
+                                                      ),
+                                                )
+                                              : Text(
+                                                  hasPairingLink
+                                                      ? 'Copy'
+                                                      : 'Generate',
+                                                  style: const TextStyle(
+                                                    fontWeight: FontWeight.w600,
+                                                    fontSize: 12,
+                                                  ),
+                                                ),
                                         ),
                                       ),
-                                      child: _isGeneratingLink
-                                          ? const SizedBox(
-                                              width: 16,
-                                              height: 16,
-                                              child: CircularProgressIndicator(
-                                                strokeWidth: 2,
-                                                color: Colors.white,
-                                              ),
-                                            )
-                                          : Text(
-                                              hasPairingLink ? 'Copy' : 'Generate',
-                                              style: const TextStyle(
-                                                fontWeight: FontWeight.w600,
-                                                fontSize: 12,
-                                              ),
-                                            ),
                                     ),
-                                  ),
-                                ),
                                   ),
                                 ),
                                 const SizedBox(height: 6),
@@ -402,23 +454,7 @@ class _ProfileEmergencyEditScreenState
                           width: double.infinity,
                           child: ElevatedButton(
                             onPressed: _canSave ? _saveAndClose : null,
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: _canSave
-                                  ? _accentGold
-                                  : Colors.grey.shade300,
-                              foregroundColor: _canSave
-                                  ? Colors.black
-                                  : Colors.white70,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(18),
-                              ),
-                              textStyle: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                              ),
-                              elevation: _canSave ? 2 : 0,
-                            ),
+                            style: _primaryButtonStyle(),
                             child: _isSubmitting
                                 ? const SizedBox(
                                     height: 18,
@@ -428,7 +464,7 @@ class _ProfileEmergencyEditScreenState
                                       color: Colors.black,
                                     ),
                                   )
-                                : const Text('Save contact'),
+                                : const Text('Save'),
                           ),
                         ),
                       ],
@@ -450,14 +486,10 @@ class _ProfileEmergencyEditScreenState
               clipBehavior: Clip.none,
               alignment: Alignment.bottomRight,
               children: [
-                CircleAvatar(
+                DefaultProfileAvatar(
                   radius: 40,
-                  backgroundColor: _tealAccent.withValues(alpha: 0.12),
-                  child: const Icon(
-                    Icons.person_outline,
-                    size: 32,
-                    color: _tealAccent,
-                  ),
+                  photoUrl: _photoUrl,
+                  label: _contactAvatarLabel(),
                 ),
                 Positioned(
                   right: -4,
@@ -547,30 +579,29 @@ class _ProfileEmergencyEditScreenState
   }
 
   Future<void> _pickPhoto() async {
+    final picked = await _picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 800,
+      imageQuality: 80,
+    );
+    if (picked == null) return;
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
     setState(() => _uploadingPhoto = true);
     try {
-      final picked = await _picker.pickImage(
-        source: ImageSource.gallery,
-        maxWidth: 800,
-        imageQuality: 80,
+      final bytes = await picked.readAsBytes();
+      final ref = FirebaseStorage.instance.ref().child(
+        "emergency-photos/$uid/${_uuid.v4()}.jpg",
       );
-      if (picked != null && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Selected ${picked.name}'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Unable to pick photo'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
+      await ref.putData(bytes, SettableMetadata(contentType: "image/jpeg"));
+      final downloadUrl = await ref.getDownloadURL();
+      if (!mounted) return;
+      setState(() {
+        _photoUrl = downloadUrl;
+        _dirty = true;
+      });
+    } catch (e) {
+      _showSnack('Unable to upload photo: $e');
     } finally {
       if (mounted) setState(() => _uploadingPhoto = false);
     }
@@ -901,8 +932,9 @@ class _ProfileEmergencyEditScreenState
       _isGeneratingLink = true;
     });
     try {
-      final callable = FirebaseFunctions.instance
-          .httpsCallable('generateTelegramPairCode');
+      final callable = FirebaseFunctions.instance.httpsCallable(
+        'generateTelegramPairCode',
+      );
       final result = await callable.call(<String, dynamic>{
         'role': 'role4',
         'contactId': widget.contactId,
@@ -918,7 +950,7 @@ class _ProfileEmergencyEditScreenState
               _currentPairCode = pairCode ?? _currentPairCode;
               _pairingLinkCtrl.text = link;
             });
-          // link now displayed in field and copy button available; skip dialog
+            // link now displayed in field and copy button available; skip dialog
           }
           return;
         }
@@ -930,12 +962,16 @@ class _ProfileEmergencyEditScreenState
     } on FirebaseFunctionsException catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.message ?? 'Unable to generate pairing link.')),
+        SnackBar(
+          content: Text(error.message ?? 'Unable to generate pairing link.'),
+        ),
       );
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Unable to generate pairing link. ${error.toString()}')),
+        SnackBar(
+          content: Text('Unable to generate pairing link. ${error.toString()}'),
+        ),
       );
     } finally {
       if (mounted) setState(() => _isGeneratingLink = false);
@@ -955,63 +991,235 @@ class _ProfileEmergencyEditScreenState
   String _pairingDeepLink(String pairCode) =>
       'https://t.me/Elder_AssistBot?start=$pairCode';
 
-  Widget _buildDropdown() {
-    const relationshipOptions = ['Sibling', 'Friend', 'Doctor', 'Other'];
-    return DropdownButtonFormField<String>(
-      value: _relationship,
-      decoration: InputDecoration(
-        filled: true,
-        fillColor: Colors.white,
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 12,
-          vertical: 10,
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Widget _relationshipSelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        CompositedTransformTarget(
+          link: _relationshipFieldLink,
+          child: TextFormField(
+            key: _relationshipFieldKey,
+            controller: _relationshipFieldController,
+            readOnly: true,
+            showCursor: false,
+            style: _inputFieldTextStyle,
+            decoration: InputDecoration(
+              filled: true,
+              fillColor: Colors.white,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
+              ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide(color: Colors.grey[300]!),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide(color: Colors.grey[300]!),
+              ),
+              focusedBorder: const OutlineInputBorder(
+                borderRadius: BorderRadius.all(Radius.circular(16)),
+                borderSide: BorderSide(color: _profileDarkText, width: 1.1),
+              ),
+              suffixIcon: const Icon(Icons.expand_more, size: 18),
+            ),
+            onTap: _toggleRelationshipMenu,
+          ),
         ),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(16),
-          borderSide: BorderSide(color: Colors.grey[300]!),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(16),
-          borderSide: BorderSide(color: Colors.grey[300]!),
-        ),
-        focusedBorder: const OutlineInputBorder(
-          borderRadius: BorderRadius.all(Radius.circular(16)),
-          borderSide: BorderSide(color: _profileDarkText, width: 1.1),
-        ),
-      ),
-      style: _inputFieldTextStyle,
-      dropdownColor: Colors.white,
-      elevation: 2,
-      isDense: true,
-      menuMaxHeight: 220,
-      alignment: AlignmentDirectional.centerStart,
-      isExpanded: true,
-      items: relationshipOptions
-          .map(
-            (option) => DropdownMenuItem(
-              value: option,
-              child: Text(
-                option,
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
+        if (_relationship == 'Other') ...[
+          const SizedBox(height: 8),
+          TextFormField(
+            controller: _customRelationshipCtrl,
+            style: _inputFieldTextStyle,
+            decoration: InputDecoration(
+              hintText: 'Specify relationship',
+              hintStyle: _inputFieldHintStyle,
+              filled: true,
+              fillColor: Colors.white,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
+              ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide(color: Colors.grey[300]!),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide(color: Colors.grey[300]!),
+              ),
+              focusedBorder: const OutlineInputBorder(
+                borderRadius: BorderRadius.all(Radius.circular(16)),
+                borderSide: BorderSide(color: _profileDarkText, width: 1.1),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  void _toggleRelationshipMenu() {
+    if (_relationshipOverlayEntry != null) {
+      _closeRelationshipMenu();
+      return;
+    }
+    _showRelationshipMenu();
+  }
+
+  void _showRelationshipMenu() {
+    final overlay = Overlay.of(context);
+    final renderBox = _relationshipFieldKey.currentContext?.findRenderObject()
+        as RenderBox?;
+    if (renderBox == null || overlay == null) return;
+    final size = renderBox.size;
+    final offset = renderBox.localToGlobal(Offset.zero);
+    _relationshipOverlayEntry = OverlayEntry(
+      builder: (context) {
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: _closeRelationshipMenu,
+                behavior: HitTestBehavior.translucent,
+                child: Container(color: Colors.transparent),
+              ),
+            ),
+            Positioned(
+              left: offset.dx,
+              top: offset.dy + size.height + 6,
+              width: size.width,
+              child: Material(
+                elevation: 10,
+                borderRadius: BorderRadius.circular(18),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: Colors.grey.shade300),
+                  ),
+                  constraints: const BoxConstraints(maxHeight: 220),
+                  child: ListView.separated(
+                    padding: EdgeInsets.zero,
+                    shrinkWrap: true,
+                    itemCount: _relationshipOptions.length,
+                    separatorBuilder: (_, __) => Divider(
+                      height: 1,
+                      color: Colors.grey.shade200,
+                    ),
+                    itemBuilder: (context, index) {
+                      final option = _relationshipOptions[index];
+                      final selected = option == _relationship;
+                      return InkWell(
+                        onTap: () => _selectRelationship(option),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 12,
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                option,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              if (selected)
+                                const Icon(
+                                  Icons.check,
+                                  size: 16,
+                                  color: Colors.black54,
+                                ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                 ),
               ),
             ),
-          )
-          .toList(),
-      onChanged: (value) {
-        if (value != null) {
-          setState(() => _relationship = value);
-          _markDirty();
-        }
+          ],
+        );
       },
-      icon: const Icon(Icons.expand_more, size: 18),
+    );
+    overlay.insert(_relationshipOverlayEntry!);
+  }
+
+  void _selectRelationship(String option) {
+    setState(() {
+      _relationship = option;
+      if (option == 'Other') {
+        final custom = _customRelationshipCtrl.text.trim();
+        _relationshipFieldController.text = custom.isNotEmpty ? custom : 'Other';
+      } else {
+        _customRelationshipCtrl.clear();
+        _relationshipFieldController.text = option;
+      }
+    });
+    _markDirty();
+    _closeRelationshipMenu();
+  }
+
+  void _closeRelationshipMenu() {
+    _relationshipOverlayEntry?.remove();
+    _relationshipOverlayEntry = null;
+  }
+
+  String _contactAvatarLabel() {
+    final name = _nameController.text.trim();
+    if (name.isNotEmpty) return name;
+    return 'Contact';
+  }
+
+  ButtonStyle _primaryButtonStyle() {
+    return ButtonStyle(
+      backgroundColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.disabled)) {
+          return _dirty
+              ? const Color(0xFFF4B63D).withAlpha(230)
+              : Colors.grey.shade300;
+        }
+        return _accentGold;
+      }),
+      foregroundColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.disabled)) {
+          return _dirty ? Colors.black87 : Colors.grey.shade600;
+        }
+        return Colors.black;
+      }),
+      padding: WidgetStateProperty.all(
+        const EdgeInsets.symmetric(vertical: 12),
+      ),
+      shape: WidgetStateProperty.all(
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      ),
+      textStyle: WidgetStateProperty.all(
+        const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+      ),
+      elevation: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.disabled)) return 0;
+        return 2;
+      }),
     );
   }
 
   @override
   void dispose() {
+    _closeRelationshipMenu();
+    _relationshipFieldController.dispose();
+    _customRelationshipCtrl.dispose();
     _nameController.dispose();
     _phoneController.dispose();
     _pairingLinkCtrl.dispose();

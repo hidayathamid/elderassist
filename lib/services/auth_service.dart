@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import '../models/user_model.dart';
 import '../models/caregiver_model.dart';
 
@@ -17,7 +18,7 @@ class AuthService {
     required String password,
     required String role, // user / caregiver
     required String phone,
-    required List<Map<String, dynamic>> addresses,
+    String? defaultAddress,
   }) async {
     try {
       final cred = await _auth.createUserWithEmailAndPassword(
@@ -34,11 +35,14 @@ class AuthService {
           email: email,
           phone: phone,
           role: "user",
-          address: addresses,
+          address: const [],
           createdAt: Timestamp.now(),
         );
 
-        await _firestore.collection("users").doc(uid).set(user.toMap());
+        final userData = user.toMap();
+        userData.remove('address');
+        userData['defaultAddress'] = defaultAddress;
+        await _firestore.collection("users").doc(uid).set(userData);
         return user;
       }
 
@@ -57,13 +61,20 @@ class AuthService {
         lng: 0.0,
       );
 
-      await _firestore.collection("caregivers").doc(uid).set({
+        final caregiverData = {
         ...caregiver.toMap(),
         "email": email,
         "role": "caregiver",
-        "address": addresses,
+        "defaultAddress": defaultAddress,
         "created_at": FieldValue.serverTimestamp(),
-      });
+      };
+      caregiverData.remove('address');
+      caregiverData.remove('certifications');
+      caregiverData.remove('specialization');
+      caregiverData.remove('services');
+      caregiverData.remove('jobsCompleted');
+      caregiverData.remove('price');
+      await _firestore.collection("caregivers").doc(uid).set(caregiverData);
 
       return caregiver;
     } catch (_) {
@@ -83,20 +94,35 @@ class AuthService {
       );
 
       final uid = cred.user!.uid;
-
-      // Check USER
-      final userDoc = await _firestore.collection("users").doc(uid).get();
-      if (userDoc.exists) {
-        return UserModel.fromMap(userDoc.data()!);
-      }
+      debugPrint('loginUser: signed in uid=$uid');
 
       // Check CAREGIVER
       final cgDoc = await _firestore.collection("caregivers").doc(uid).get();
+      debugPrint('loginUser: caregiverDoc.exists=${cgDoc.exists} uid=$uid');
       if (cgDoc.exists) {
         return CaregiverModel.safeFromMap(uid, cgDoc.data());
       }
+
+      // Check USER
+      final userDoc = await _firestore.collection("users").doc(uid).get();
+      debugPrint('loginUser: userDoc.exists=${userDoc.exists} uid=$uid');
+      if (userDoc.exists) {
+        return UserModel.fromMap(userDoc.data()!);
+      }
+      debugPrint('loginUser: caregiverDoc.exists=${cgDoc.exists} uid=$uid');
+      if (cgDoc.exists) {
+        return CaregiverModel.safeFromMap(uid, cgDoc.data());
+      }
+
+      debugPrint('loginUser: no user or caregiver doc for uid=$uid');
       return null;
-    } catch (_) {
+    } on FirebaseAuthException catch (e, st) {
+      debugPrint('loginUser: FirebaseAuthException ${e.message}');
+      debugPrint(st.toString());
+      return null;
+    } catch (e, st) {
+      debugPrint('loginUser: unexpected error $e');
+      debugPrint(st.toString());
       return null;
     }
   }

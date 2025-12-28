@@ -1,19 +1,19 @@
 import 'package:flutter/material.dart';
 
-const Color _defaultServiceTagColor = Color(0xFF00A8A7);
-const Color _defaultServiceTagBorder = Color(0xFF1B1D29);
+const Color _defaultServiceTagColor = Colors.white;
+const Color _defaultServiceTagBorder = Color(0xFFCCCCCC);
 
 class ServiceTagChip extends StatelessWidget {
   const ServiceTagChip({
     super.key,
     required this.label,
     this.backgroundColor = _defaultServiceTagColor,
-    this.foregroundColor = Colors.white,
+    this.foregroundColor = const Color(0xFF1B1D29),
     this.borderColor = _defaultServiceTagBorder,
-    this.fontSize = 8.0,
+    this.fontSize = 8.5,
     this.fontWeight = FontWeight.w600,
-    this.padding = const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-    this.minHeight = 26,
+    this.padding = const EdgeInsets.symmetric(horizontal: 6, vertical: 2.5),
+    this.minHeight = 12,
   });
 
   final String label;
@@ -32,7 +32,7 @@ class ServiceTagChip extends StatelessWidget {
       constraints: BoxConstraints(minHeight: minHeight),
       decoration: BoxDecoration(
         color: backgroundColor,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(10),
         border: Border.all(color: borderColor.withOpacity(0.35)),
       ),
       child: Text(

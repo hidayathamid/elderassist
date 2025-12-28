@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../../../constants/service_options.dart';
+import '../../../widgets/service_chip.dart';
 
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _selectedServiceColor = Color(0xFF00A8A7);
@@ -49,16 +50,16 @@ class _ProfileServicesScreenState extends State<ProfileServicesScreen> {
     } else {
       updated.add(option);
     }
-    final ref = FirebaseFirestore.instance
-        .collection(isCaregiver ? 'caregivers' : 'users')
-        .doc(uid);
-    final field = isCaregiver ? 'services' : 'servicePreferences';
+    final ref = FirebaseFirestore.instance.collection(
+      isCaregiver ? 'caregivers' : 'users',
+    ).doc(uid);
+    const field = 'servicePreferences';
     await ref.set({field: updated}, SetOptions(merge: true));
   }
 
   List<String> _extractCaregiverServices(Map<String, dynamic>? data) {
     if (data == null) return [];
-    final raw = data['services'];
+    final raw = data['servicePreferences'] ?? data['services'];
     if (raw is Iterable) {
       return raw.whereType<String>().toList();
     }
@@ -275,7 +276,7 @@ class _ProfileServicesScreenState extends State<ProfileServicesScreen> {
                       alignment: WrapAlignment.spaceBetween,
                       children: visible.map((option) {
                         final selected = preferences.contains(option);
-                        return _ServiceChip(
+                        return ServiceChip(
                           label: option,
                           selected: selected,
                           onTap: () => _togglePreference(
@@ -294,46 +295,6 @@ class _ProfileServicesScreenState extends State<ProfileServicesScreen> {
             },
           );
         },
-      ),
-    );
-  }
-}
-
-class _ServiceChip extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _ServiceChip({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final background = selected ? _selectedServiceColor : Colors.white;
-    final foreground = selected ? Colors.white : _profileDarkText;
-    final borderColor = selected
-        ? const Color.fromARGB(32, 0, 0, 0)
-        : const Color.fromARGB(32, 0, 0, 0);
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: background,
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: borderColor),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            color: foreground,
-          ),
-        ),
       ),
     );
   }

@@ -1,29 +1,40 @@
+import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 
 import 'package:emergencies_disability_assistance_app/screens/caregiver/jobs/caregiver_job_details_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_booking_details_screen.dart';
 import 'package:emergencies_disability_assistance_app/models/caregiver_job.dart';
 import 'package:emergencies_disability_assistance_app/widgets/caregiver_job_card.dart';
-import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 
 import '../profile/profile_availability_schedule_screen.dart';
 import '../profile/profile_documents_screen.dart';
+import 'package:emergencies_disability_assistance_app/models/payment_document_target.dart';
+import '../../user/profile/profile_payments_screen.dart';
 import '../../user/profile/profile_services_screen.dart';
 
 const Color _primaryBlue = Color(0xFF00A8A7);
 const Color _primaryTeal = Color(0xFF26B4B1);
 const Color _profileDarkText = Color(0xFF1B1D29);
+const Color _accentGold = Color(0xFFF4B63D);
 const double _heroHeight = 320.0;
 const double _sheetInitialExtent = 0.83;
-const double _sheetMinExtent = 0.83;
 const double _sheetMaxExtent = 1.0;
 const double _appBarTriggerExtent = 0.96;
 const double _sectionSpacing = 18.0;
 const double _cardRadius = 18.0;
 const double _sectionCardHeight = 90.0;
+const double _headerTopPadding = 16.0;
+const double _headerHeightEstimate = 96.0;
+const double _sheetHeaderGap = 12.0;
+const double _sheetHeaderInset =
+    _headerTopPadding + _headerHeightEstimate + _sheetHeaderGap;
+const double _sheetSpacingBaseline = 310.0;
 
 double _homeJobCardWidth(BuildContext context) {
   final baseWidth = MediaQuery.of(context).size.width - 32;
@@ -38,7 +49,13 @@ class CaregiverHomeScreen extends StatefulWidget {
 }
 
 class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
+  final GlobalKey _headerKey = GlobalKey();
   double _currentSheetExtent = _sheetInitialExtent;
+  double _sheetMinExtent = _sheetInitialExtent;
+  double _sheetTopInset = _sheetHeaderInset;
+  bool _sheetMeasurementScheduled = false;
+  bool _todayJobsSectionHidden = false;
+  bool _scheduleSectionHidden = false;
 
   void _onSheetExtentChanged(double extent) {
     final normalized = extent.clamp(_sheetInitialExtent, _sheetMaxExtent);
@@ -47,10 +64,24 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     }
   }
 
+  double _calculateTopSpacing(bool showAppBar) {
+    final t =
+        ((_currentSheetExtent - _sheetInitialExtent) /
+                (1 - _sheetInitialExtent))
+            .clamp(0.0, 1.0);
+    final collapsedSpacing = math.max(
+      _sheetTopInset - _sheetSpacingBaseline,
+      0.0,
+    );
+    final interpolatedSpacing = lerpDouble(collapsedSpacing, 15.0, t) ?? 8.0;
+    return showAppBar ? kToolbarHeight + 8.0 : interpolatedSpacing;
+  }
+
   bool get _showFloatingAppBar => _currentSheetExtent >= _appBarTriggerExtent;
 
   @override
   Widget build(BuildContext context) {
+    _scheduleSheetExtentUpdate();
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       return const Scaffold(
@@ -103,7 +134,9 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
             final hasAssignedBooking = jobs.any(
               (job) => job.normalizedStatus == 'ASSIGNED',
             );
-            const sheetInitialSize = _sheetInitialExtent;
+            final sheetInitialSize = math
+                .max(_sheetInitialExtent, _sheetMinExtent)
+                .clamp(_sheetMinExtent, _sheetMaxExtent);
             final showAppBar = _showFloatingAppBar;
             final isAvailable =
                 (caregiverData['availability'] as bool?) ?? false;
@@ -128,18 +161,21 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
                         colors: [_primaryBlue, _primaryTeal],
                       ),
                     ),
-                  ),
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    top: 32,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: _buildHeader(
-                        context: context,
-                        name: name,
-                        photoUrl: photoUrl,
-                        greeting: greeting,
+                    child: SafeArea(
+                      bottom: false,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(
+                          16,
+                          _headerTopPadding,
+                          16,
+                          0,
+                        ),
+                        child: _buildHeader(
+                          context: context,
+                          name: name,
+                          photoUrl: photoUrl,
+                          greeting: greeting,
+                        ),
                       ),
                     ),
                   ),
@@ -175,7 +211,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
                             physics: const BouncingScrollPhysics(),
                             children: [
                               SizedBox(
-                                height: showAppBar ? kToolbarHeight + 12 : 5,
+                                height: _calculateTopSpacing(showAppBar),
                               ),
                               _buildQuickActionSection(
                                 context,
@@ -188,9 +224,36 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
                               _buildSectionTitle(
                                 title: "Today's Jobs",
                                 hint: 'Care bookings assigned to you today.',
+                                trailing: _sectionToggleButton(
+                                  hidden: _todayJobsSectionHidden,
+                                  canHide: todayJobs.isEmpty,
+                                  onHide: _collapseTodayJobsSection,
+                                  onShow: _unhideTodayJobsSection,
+                                ),
                               ),
-                              const SizedBox(height: 12),
-                              _buildTodayJobSection(context, todayJobs),
+                              if (!(todayJobs.isEmpty &&
+                                  _todayJobsSectionHidden))
+                                const SizedBox(height: 12),
+                              if (!(todayJobs.isEmpty &&
+                                  _todayJobsSectionHidden))
+                                _buildTodayJobSection(context, todayJobs),
+                              const SizedBox(height: _sectionSpacing),
+                              _buildSectionTitle(
+                                title: 'Schedule',
+                                hint: 'A quick glance at your upcoming visits.',
+                                trailing: _sectionToggleButton(
+                                  hidden: _scheduleSectionHidden,
+                                  canHide: scheduledJobs.isEmpty,
+                                  onHide: _collapseScheduleSection,
+                                  onShow: _unhideScheduleSection,
+                                ),
+                              ),
+                              if (!(scheduledJobs.isEmpty &&
+                                  _scheduleSectionHidden))
+                                const SizedBox(height: 12),
+                              if (!(scheduledJobs.isEmpty &&
+                                  _scheduleSectionHidden))
+                                _buildScheduleCategory(context, scheduledJobs),
                               const SizedBox(height: _sectionSpacing),
                               _buildScheduledJobsSection(
                                 context,
@@ -203,13 +266,15 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
                                     'Summary of jobs completed and lifetime earnings.',
                               ),
                               const SizedBox(height: 12),
-                              _buildEarningsStatsRow(
-                                jobsCompleted: completedJobs,
-                                thisWeekValue: earningsSummary.thisWeekEarnings,
-                                totalValue: earningsSummary.totalEarnings,
-                                rating: ratingValue,
-                              ),
-                              const SizedBox(height: 40),
+                          _buildEarningsStatsRow(
+                            context,
+                            caregiverData: caregiverData,
+                            jobsCompleted: completedJobs,
+                            thisWeekValue: earningsSummary.thisWeekEarnings,
+                            totalValue: earningsSummary.totalEarnings,
+                            rating: ratingValue,
+                          ),
+                              const SizedBox(height: 28),
                             ],
                           ),
                         ),
@@ -278,8 +343,14 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     required String greeting,
   }) {
     final avatarInitial = _deriveAvatarInitial(name);
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+    final theme = Theme.of(context);
+    return Container(
+      key: _headerKey,
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(16),
+      ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -291,48 +362,57 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
               shape: BoxShape.circle,
               border: Border.all(
                 color: Colors.white.withAlpha(220),
-                width: 1.4,
+                width: 1.6,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withAlpha(30),
+                  blurRadius: 6,
+                  offset: const Offset(0, 3),
+                ),
+              ],
+            ),
+            child: Center(
+              child: CircleAvatar(
+                radius: 24,
+                backgroundColor: const Color.fromARGB(
+                  255,
+                  181,
+                  212,
+                  212,
+                ).withAlpha(40),
+                backgroundImage: photoUrl != null && photoUrl.isNotEmpty
+                    ? NetworkImage(photoUrl)
+                    : null,
+                child: photoUrl == null || photoUrl.isEmpty
+                    ? Text(
+                        avatarInitial,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color: _primaryBlue,
+                        ),
+                      )
+                    : null,
               ),
             ),
-            child: CircleAvatar(
-              radius: 24,
-              backgroundColor: const Color.fromARGB(
-                255,
-                181,
-                212,
-                212,
-              ).withAlpha(40),
-              backgroundImage: photoUrl != null && photoUrl.isNotEmpty
-                  ? NetworkImage(photoUrl)
-                  : null,
-              child: photoUrl == null || photoUrl.isEmpty
-                  ? Text(
-                      avatarInitial,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w700,
-                        color: _primaryBlue,
-                      ),
-                    )
-                  : null,
-            ),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 4),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   greeting,
-                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                  style: theme.textTheme.headlineSmall?.copyWith(
                     color: Colors.white,
-                    fontSize: 20,
                     fontWeight: FontWeight.w600,
+                    fontSize: 20,
                   ),
                 ),
                 const SizedBox(height: 6),
                 Text(
                   '$name, ready to care today?',
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  style: theme.textTheme.bodyMedium?.copyWith(
                     color: Colors.white70,
                     fontSize: 14,
                   ),
@@ -435,34 +515,14 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     List<CaregiverJob> todayJobs,
   ) {
     if (todayJobs.isEmpty) {
-      return Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(_cardRadius),
-          border: Border.all(color: Colors.grey.withAlpha(80)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withAlpha(20),
-              blurRadius: 12,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: const [
-            Icon(Icons.flash_on, size: 32, color: _primaryBlue),
-            SizedBox(height: 8),
-            Text(
-              'No jobs scheduled today',
-              style: TextStyle(
-                fontSize: 13,
-                color: Colors.black54,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 24),
+        child: SizedBox(
+          height: _sectionCardHeight,
+          child: _buildEmptyStateMessage(
+            title: 'No jobs scheduled today',
+            explanation: 'Your bookings will appear once they are scheduled.',
+          ),
         ),
       );
     }
@@ -494,29 +554,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     List<CaregiverJob> scheduledJobs,
   ) {
     if (scheduledJobs.isEmpty) {
-      return Container(
-        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(_cardRadius),
-          border: Border.all(color: Colors.grey.shade200),
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.calendar_month, color: _primaryBlue),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'No scheduled bookings yet.',
-                style: TextStyle(
-                  color: Colors.black.withAlpha(180),
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
+      return const SizedBox.shrink();
     }
     final cardWidth = _homeJobCardWidth(context);
     return Column(
@@ -563,7 +601,9 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     );
   }
 
-  Widget _buildEarningsStatsRow({
+  Widget _buildEarningsStatsRow(
+    BuildContext context, {
+    required Map<String, dynamic> caregiverData,
     required int jobsCompleted,
     required double thisWeekValue,
     required double totalValue,
@@ -597,8 +637,20 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
         borderRadius: BorderRadius.circular(18),
         border: Border.all(color: Colors.grey.withAlpha(120)),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      child: _buildStatQuickActionRow(stats),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildStatQuickActionRow(stats),
+          const SizedBox(height: 12),
+          _buildWithdrawButtonWithPendingCheck(
+            context,
+            caregiverData: caregiverData,
+            enabled: totalValue > 0,
+          ),
+        ],
+      ),
     );
   }
 
@@ -617,7 +669,11 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     );
   }
 
-  Widget _buildSectionTitle({required String title, required String hint}) {
+  Widget _buildSectionTitle({
+    required String title,
+    required String hint,
+    Widget? trailing,
+  }) {
     return Row(
       children: [
         Text(
@@ -630,8 +686,318 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
         ),
         const SizedBox(width: 6),
         _SectionInfoIcon(message: hint),
+        const Spacer(),
+        if (trailing != null) trailing,
       ],
     );
+  }
+
+  Widget? _sectionToggleButton({
+    required bool hidden,
+    required bool canHide,
+    required VoidCallback onHide,
+    required VoidCallback onShow,
+  }) {
+    if (hidden) {
+      return TextButton(
+        onPressed: onShow,
+        style: TextButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          minimumSize: const Size(0, 0),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        child: const Text(
+          'Show section',
+          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+        ),
+      );
+    }
+    if (!canHide) return null;
+    return TextButton(
+      onPressed: onHide,
+      style: TextButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        minimumSize: const Size(0, 0),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+      child: const Text(
+        'Hide section',
+        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+
+  Widget _buildScheduleCategory(
+    BuildContext context,
+    List<CaregiverJob> scheduledJobs,
+  ) {
+    if (scheduledJobs.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 24),
+        child: _buildEmptyStateMessage(
+          title: 'No jobs scheduled yet',
+          explanation: 'Upcoming care plans appear here once they are booked.',
+        ),
+      );
+    }
+    final nextJob = scheduledJobs.first;
+    final dateLabel = nextJob.scheduledDateTime != null
+        ? DateFormat('EEE, d MMM • h:mm a').format(nextJob.scheduledDateTime!)
+        : (nextJob.time.isNotEmpty ? nextJob.time : 'Time TBD');
+    return SizedBox(
+      height: _sectionCardHeight,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: _primaryTeal.withOpacity(0.16),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(Icons.schedule, color: _primaryTeal),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  nextJob.personName,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  dateLabel,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: _profileDarkText.withOpacity(0.6),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  nextJob.service,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: _profileDarkText.withOpacity(0.6),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: () =>
+                _openCaregiverJobDetails(context, nextJob.bookingId),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+            ),
+            child: const Text(
+              'View details',
+              style: TextStyle(fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _collapseTodayJobsSection() {
+    setState(() => _todayJobsSectionHidden = true);
+  }
+
+  void _unhideTodayJobsSection() {
+    setState(() => _todayJobsSectionHidden = false);
+  }
+
+  void _collapseScheduleSection() {
+    setState(() => _scheduleSectionHidden = true);
+  }
+
+  void _unhideScheduleSection() {
+    setState(() => _scheduleSectionHidden = false);
+  }
+
+  void _scheduleSheetExtentUpdate() {
+    if (_sheetMeasurementScheduled) return;
+    _sheetMeasurementScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _sheetMeasurementScheduled = false;
+      _updateSheetExtent();
+    });
+  }
+
+  void _updateSheetExtent() {
+    if (!mounted) return;
+    final context = _headerKey.currentContext;
+    if (context == null) return;
+    final headerHeight = context.size?.height ?? 0;
+    if (headerHeight <= 0) return;
+    final screenHeight = MediaQuery.of(context).size.height;
+    if (screenHeight <= 0) return;
+    final rawMax = 1 - (headerHeight / screenHeight);
+    final targetExtent = rawMax.clamp(_sheetInitialExtent, _sheetMaxExtent);
+    final cappedExtent = math.min(targetExtent, _sheetInitialExtent);
+    final newInset = _headerTopPadding + headerHeight + _sheetHeaderGap;
+    final shouldUpdateExtent = (cappedExtent - _sheetMinExtent).abs() > 0.01;
+    final shouldUpdateInset = (newInset - _sheetTopInset).abs() > 0.5;
+    if (shouldUpdateExtent || shouldUpdateInset) {
+      setState(() {
+        if (shouldUpdateExtent) {
+          _sheetMinExtent = cappedExtent;
+        }
+        if (shouldUpdateInset) {
+          _sheetTopInset = newInset;
+        }
+      });
+    }
+  }
+
+  Widget _buildEmptyStateMessage({
+    required String title,
+    required String explanation,
+  }) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        const Icon(Icons.flash_on, size: 32, color: _primaryBlue),
+        const SizedBox(height: 8),
+        Text(
+          title,
+          style: const TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
+            color: Color(0xFF1B1D29),
+          ),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          explanation,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 12, color: Colors.black54),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildWithdrawButton(
+    BuildContext context, {
+    required Map<String, dynamic> caregiverData,
+    required bool enabled,
+    String? helperText,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton(
+            onPressed: enabled
+                ? () => _onWithdrawTap(
+                      context,
+                      caregiverData: caregiverData,
+                    )
+                : null,
+            style: ButtonStyle(
+              backgroundColor: WidgetStateProperty.resolveWith<Color?>(
+                (states) => enabled ? _accentGold : Colors.grey.shade300,
+              ),
+              foregroundColor: WidgetStateProperty.resolveWith<Color?>(
+                (states) => enabled ? Colors.black : Colors.grey.shade600,
+              ),
+              elevation: WidgetStateProperty.all(enabled ? 2.0 : 0.0),
+              padding: WidgetStateProperty.all(
+                const EdgeInsets.symmetric(vertical: 14),
+              ),
+              shape: WidgetStateProperty.all(
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              ),
+            ),
+            child: const Text(
+              'Withdraw',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+          ),
+        ),
+        if (helperText != null) ...[
+          const SizedBox(height: 6),
+          Text(
+            helperText,
+            style: const TextStyle(
+              fontSize: 12,
+              color: Colors.black54,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildWithdrawButtonWithPendingCheck(
+    BuildContext context, {
+    required Map<String, dynamic> caregiverData,
+    required bool enabled,
+  }) {
+    final caregiverId = (caregiverData['caregiverId'] as String?) ??
+        FirebaseAuth.instance.currentUser?.uid;
+    if (caregiverId == null) {
+      return _buildWithdrawButton(
+        context,
+        caregiverData: caregiverData,
+        enabled: enabled,
+      );
+    }
+    final withdrawStream = FirebaseFirestore.instance
+        .collection('withdrawRequests')
+        .where('caregiverId', isEqualTo: caregiverId)
+        .orderBy('requestedAt', descending: true)
+        .limit(1)
+        .snapshots();
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: withdrawStream,
+      builder: (context, snapshot) {
+        final latestDoc =
+            snapshot.data?.docs.isNotEmpty == true ? snapshot.data!.docs.first : null;
+        final hasActivePending = _isWithdrawDisabled(latestDoc);
+        final helperText = hasActivePending && latestDoc != null
+            ? _withdrawHelperText(latestDoc)
+            : null;
+        return _buildWithdrawButton(
+          context,
+          caregiverData: caregiverData,
+          enabled: enabled && !hasActivePending,
+          helperText: helperText,
+        );
+      },
+    );
+  }
+
+  bool _isWithdrawDisabled(
+    QueryDocumentSnapshot<Map<String, dynamic>>? doc,
+  ) {
+    if (doc == null) return false;
+    final data = doc.data();
+    final status = (data['status'] as String?)?.trim().toLowerCase() ?? 'pending';
+    if (status != 'pending') return false;
+    final requestedAt = (data['requestedAt'] as Timestamp?)?.toDate();
+    if (requestedAt == null) return true;
+    return DateTime.now().difference(requestedAt) < const Duration(hours: 24);
+  }
+
+  String _withdrawHelperText(
+    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data();
+    final requestedAt = (data['requestedAt'] as Timestamp?)?.toDate();
+    if (requestedAt == null) {
+      return 'A withdrawal request is already pending.';
+    }
+    final formatted = DateFormat('dd MMM yyyy, h:mm a').format(requestedAt);
+    return 'Withdraw request pending since $formatted.';
   }
 
   void _openBookingDetails(BuildContext context, String bookingId) {
@@ -667,6 +1033,177 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     } catch (_) {
       // Intentionally silent: no snackbars per request.
     }
+  }
+
+  Future<void> _onWithdrawTap(
+    BuildContext context, {
+    required Map<String, dynamic> caregiverData,
+  }) async {
+    bool hasPaymentDetails(Map<String, dynamic>? details) {
+      if (details == null) return false;
+      bool defined(String key) {
+        final value = details[key] as String?;
+        return value != null && value.trim().isNotEmpty;
+      }
+      return defined('bankName') &&
+          defined('accountName') &&
+          defined('accountNumber');
+    }
+
+    if (!hasPaymentDetails(
+      caregiverData['paymentDetails'] as Map<String, dynamic>?,
+    )) {
+      final shouldGo = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: Colors.white,
+          title: const Text(
+            'Complete payout account',
+            style: TextStyle(fontWeight: FontWeight.w700),
+          ),
+          content: const Text(
+            'Please complete the payout account information under Payout Account before requesting a withdrawal.',
+            style: TextStyle(color: Colors.black87),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actionsPadding: const EdgeInsets.only(bottom: 12),
+          actions: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                SizedBox(
+                  width: 120,
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.of(context).pop(false),
+                    style: OutlinedButton.styleFrom(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      side: BorderSide(color: Colors.grey.shade300),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    child: const Text(
+                      'Batal',
+                      style: TextStyle(
+                        color: Colors.black87,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                SizedBox(
+                  width: 120,
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.of(context).pop(true),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _accentGold,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      textStyle: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    child: const Text('OK'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      if (shouldGo == true && context.mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => const ProfilePaymentsScreen(
+              target: PaymentDocumentTarget.caregiver,
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    final shouldWait = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: Colors.white,
+        title: const Text(
+          'Withdraw request received',
+          style: TextStyle(fontWeight: FontWeight.w700),
+        ),
+        content: const Text(
+          'Please allow up to 24 hours for the withdrawal request to reach your payout account.',
+          style: TextStyle(color: Colors.black87),
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actionsPadding: const EdgeInsets.only(bottom: 12),
+        actions: [
+          SizedBox(
+            width: 120,
+            child: ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _accentGold,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                textStyle: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              child: const Text('OK'),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (shouldWait == true && context.mounted) {
+      final caregiverId = (caregiverData['caregiverId'] as String?) ??
+          FirebaseAuth.instance.currentUser?.uid;
+      var requestCreated = false;
+      if (caregiverId != null) {
+        try {
+          await _createWithdrawRequest(caregiverId);
+          requestCreated = true;
+        } catch (error, stack) {
+          debugPrint('withdraw request failed: $error\n$stack');
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Unable to send withdrawal request.'),
+              ),
+            );
+          }
+        }
+      }
+      final message = requestCreated
+          ? 'Withdrawal request sent. Funds typically arrive within 24 hours.'
+          : 'Withdrawal request failed. Please try again.';
+      if (!context.mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ProfilePaymentsScreen(
+            target: PaymentDocumentTarget.caregiver,
+            initialTabIndex: 1,
+            historyNotificationMessage: message,
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _createWithdrawRequest(String caregiverId) async {
+    final ref = FirebaseFirestore.instance.collection('withdrawRequests').doc();
+    await ref.set({
+      'caregiverId': caregiverId,
+      'status': 'pending',
+      'requestedAt': FieldValue.serverTimestamp(),
+      'requestedBy': caregiverId,
+    });
   }
 }
 
@@ -707,7 +1244,14 @@ class _QuickActionButton extends StatelessWidget {
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                border: Border.all(color: Colors.grey.withAlpha(60)),
+                color: action.disabled
+                    ? Colors.grey.shade100
+                    : _primaryBlue.withOpacity(0.12),
+                border: Border.all(
+                  color: action.disabled
+                      ? Colors.grey.withAlpha(60)
+                      : _primaryBlue.withOpacity(0.4),
+                ),
               ),
               child: Icon(
                 action.icon,

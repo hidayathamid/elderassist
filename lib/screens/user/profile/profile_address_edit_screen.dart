@@ -3,15 +3,18 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:intl_phone_field/countries.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:uuid/uuid.dart';
+import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
 const Color _accentGold = Color(0xFFF4B63D);
 const Color _profileDarkText = Color(0xFF1B1D29);
@@ -51,6 +54,8 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
   final TextEditingController _notesCtrl = TextEditingController();
   final TextEditingController _customLabelCtrl = TextEditingController();
   final TextEditingController _telegramLinkCtrl = TextEditingController();
+  final TextEditingController _labelFieldController = TextEditingController();
+  final ImagePicker _picker = ImagePicker();
 
   final Completer<GoogleMapController> _mapControllerCompleter =
       Completer<GoogleMapController>();
@@ -71,10 +76,15 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
   static final List<Country> _dialCodeCountries = [...countries]
     ..sort((a, b) => b.dialCode.length.compareTo(a.dialCode.length));
   final Uuid _uuid = const Uuid();
+  String? _photoUrl;
+  bool _uploadingPhoto = false;
   bool _isGeneratingTelegramLink = false;
   String? _pendingPairCode;
   String? _telegramLink;
   bool _shouldRefreshPairCodeTimestamp = false;
+  final LayerLink _labelFieldLink = LayerLink();
+  final GlobalKey _labelFieldKey = GlobalKey();
+  OverlayEntry? _labelOverlayEntry;
 
   @override
   void initState() {
@@ -84,10 +94,13 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
     _phoneCtrl.addListener(_markDirty);
     _notesCtrl.addListener(_markDirty);
     _customLabelCtrl.addListener(_markDirty);
+    _labelFieldController.text = _selectedLabel;
   }
 
   @override
   void dispose() {
+    _closeLabelMenu();
+    _labelFieldController.dispose();
     _mapCtrl?.dispose();
     _nameCtrl.dispose();
     _phoneCtrl.dispose();
@@ -249,18 +262,25 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
     if (_addressLabelOptions.contains(rawLabel) && rawLabel != 'Other') {
       _selectedLabel = rawLabel;
       _customLabelCtrl.clear();
+      _labelFieldController.text = rawLabel;
     } else if (rawLabel.trim().isNotEmpty) {
       _selectedLabel = 'Other';
       _customLabelCtrl.text = rawLabel;
+      _labelFieldController.text = rawLabel;
     } else {
       _selectedLabel = 'Home';
       _customLabelCtrl.clear();
+      _labelFieldController.text = 'Home';
     }
     final lat = entry['lat'] ?? entry['latitude'];
     final lng = entry['lng'] ?? entry['longitude'];
     if (lat is num && lng is num) {
       final coords = LatLng(lat.toDouble(), lng.toDouble());
       _placeMarker(coords, animate: false);
+    }
+    final entryPhoto = entry['photoUrl']?.toString();
+    if (entryPhoto != null && entryPhoto.isNotEmpty) {
+      setState(() => _photoUrl = entryPhoto);
     }
     final pairCode = entry['pairCode']?.toString();
     if (pairCode != null && pairCode.isNotEmpty) {
@@ -468,6 +488,7 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
           : _selectedLabel;
       final pairCode = _pendingPairCode;
       final entryId = widget.addressId ?? _uuid.v4();
+      final entryPhoto = _photoUrl?.isNotEmpty == true ? _photoUrl : null;
       final newEntry = {
         'id': entryId,
         'name': _nameCtrl.text.trim(),
@@ -482,6 +503,7 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
         if (pairCode != null) 'pairCode': pairCode,
         if (pairCode != null && _shouldRefreshPairCodeTimestamp)
           'pairCodeExpiresAt': FieldValue.serverTimestamp(),
+        if (entryPhoto != null) 'photoUrl': entryPhoto,
       };
       final int index = addresses.indexWhere(
         (entry) => entry['id'] == widget.addressId,
@@ -627,6 +649,43 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  String _profileAvatarLabel() {
+    final name = _nameCtrl.text.trim();
+    if (name.isNotEmpty) return name;
+    final address = _addressCtrl.text.trim();
+    if (address.isNotEmpty) return address.split(',').first;
+    return 'Contact';
+  }
+
+  Future<void> _pickPhoto() async {
+    final picked = await _picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 800,
+      imageQuality: 80,
+    );
+    if (picked == null) return;
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    setState(() => _uploadingPhoto = true);
+    try {
+      final bytes = await picked.readAsBytes();
+      final ref = FirebaseStorage.instance
+          .ref()
+          .child("address-photos/$uid/${_uuid.v4()}.jpg");
+      await ref.putData(bytes, SettableMetadata(contentType: "image/jpeg"));
+      final downloadUrl = await ref.getDownloadURL();
+      if (!mounted) return;
+      setState(() {
+        _photoUrl = downloadUrl;
+        _dirty = true;
+      });
+    } catch (e) {
+      _showSnack('Unable to upload photo: $e');
+    } finally {
+      if (mounted) setState(() => _uploadingPhoto = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final bool canSubmit = !_isSubmitting && _dirty && _hasRequiredValues;
@@ -698,6 +757,8 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          _buildAvatarPicker(),
+                          const SizedBox(height: 16),
                           _labeledField(
                             label: 'Name',
                             controller: _nameCtrl,
@@ -918,62 +979,39 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
           style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
         ),
         const SizedBox(height: 6),
-        DropdownButtonFormField<String>(
-          value: _addressLabelOptions.contains(_selectedLabel)
-              ? _selectedLabel
-              : 'Other',
-          decoration: InputDecoration(
-            filled: true,
-            fillColor: Colors.white,
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 14,
-              vertical: 10,
+        CompositedTransformTarget(
+          link: _labelFieldLink,
+          child: TextFormField(
+            key: _labelFieldKey,
+            controller: _labelFieldController,
+            readOnly: true,
+            showCursor: false,
+            style: _inputFieldTextStyle,
+            decoration: InputDecoration(
+              hintText: 'Select label',
+              hintStyle: _inputFieldHintStyle,
+              filled: true,
+              fillColor: Colors.white,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 14,
+                vertical: 10,
+              ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide(color: Colors.grey[300]!),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide(color: Colors.grey[300]!),
+              ),
+              focusedBorder: const OutlineInputBorder(
+                borderRadius: BorderRadius.all(Radius.circular(16)),
+                borderSide: BorderSide(color: _profileDarkText, width: 1.1),
+              ),
+              suffixIcon: const Icon(Icons.expand_more, size: 18),
             ),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(16),
-              borderSide: BorderSide(color: Colors.grey[300]!),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(16),
-              borderSide: BorderSide(color: Colors.grey[300]!),
-            ),
-            focusedBorder: const OutlineInputBorder(
-              borderRadius: BorderRadius.all(Radius.circular(16)),
-              borderSide: BorderSide(color: _profileDarkText, width: 1.1),
-            ),
+            onTap: _toggleLabelMenu,
           ),
-          style: _inputFieldTextStyle,
-          dropdownColor: Colors.white,
-          elevation: 0,
-          isDense: true,
-          menuMaxHeight: 220,
-          alignment: AlignmentDirectional.centerStart,
-          isExpanded: true,
-          icon: const Icon(Icons.expand_more, size: 18),
-          items: _addressLabelOptions
-              .map(
-                (label) => DropdownMenuItem(
-                  value: label,
-                  child: Text(
-                    label,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              )
-              .toList(),
-          onChanged: (value) {
-            if (value == null) return;
-            setState(() {
-              _selectedLabel = value;
-              if (_selectedLabel != 'Other') {
-                _customLabelCtrl.clear();
-              }
-            });
-            _markDirty();
-          },
         ),
         if (_selectedLabel == 'Other') ...[
           const SizedBox(height: 8),
@@ -1093,6 +1131,181 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  void _toggleLabelMenu() {
+    if (_labelOverlayEntry != null) {
+      _closeLabelMenu();
+      return;
+    }
+    _showLabelMenu();
+  }
+
+  void _showLabelMenu() {
+    final overlay = Overlay.of(context);
+    final renderBox =
+        _labelFieldKey.currentContext?.findRenderObject() as RenderBox?;
+    if (renderBox == null || overlay == null) return;
+    final size = renderBox.size;
+    final offset = renderBox.localToGlobal(Offset.zero);
+    _labelOverlayEntry = OverlayEntry(
+      builder: (context) {
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: _closeLabelMenu,
+                behavior: HitTestBehavior.translucent,
+                child: Container(color: Colors.transparent),
+              ),
+            ),
+            Positioned(
+              left: offset.dx,
+              top: offset.dy + size.height + 6,
+              width: size.width,
+              child: Material(
+                elevation: 10,
+                borderRadius: BorderRadius.circular(18),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: Colors.grey.shade300),
+                  ),
+                  constraints: const BoxConstraints(maxHeight: 220),
+                  child: ListView.separated(
+                    padding: EdgeInsets.zero,
+                    shrinkWrap: true,
+                    itemCount: _addressLabelOptions.length,
+                    separatorBuilder: (_, __) => Divider(
+                      height: 1,
+                      color: Colors.grey.shade200,
+                    ),
+                    itemBuilder: (context, index) {
+                      final label = _addressLabelOptions[index];
+                      final selected = label == _selectedLabel;
+                      return InkWell(
+                        onTap: () => _selectLabel(label),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 12,
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                label,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              if (selected)
+                                const Icon(
+                                  Icons.check,
+                                  size: 16,
+                                  color: Colors.black54,
+                                ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    overlay.insert(_labelOverlayEntry!);
+  }
+
+  void _selectLabel(String value) {
+    setState(() {
+      _selectedLabel = value;
+      _labelFieldController.text = value;
+      if (_selectedLabel != 'Other') {
+        _customLabelCtrl.clear();
+      }
+    });
+    _markDirty();
+    _closeLabelMenu();
+  }
+
+  void _closeLabelMenu() {
+    _labelOverlayEntry?.remove();
+    _labelOverlayEntry = null;
+  }
+
+  Widget _buildAvatarPicker() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Center(
+        child: Column(
+          children: [
+            Stack(
+              clipBehavior: Clip.none,
+              alignment: Alignment.bottomRight,
+              children: [
+                DefaultProfileAvatar(
+                  radius: 40,
+                  photoUrl: _photoUrl,
+                  label: _profileAvatarLabel(),
+                ),
+                Positioned(
+                  right: -4,
+                  bottom: -4,
+                  child: InkWell(
+                    onTap: _uploadingPhoto ? null : _pickPhoto,
+                    borderRadius: BorderRadius.circular(24),
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: _accentGold,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.12),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: _uploadingPhoto
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 1.8,
+                                color: Colors.black87,
+                              ),
+                            )
+                          : const Icon(
+                              Icons.photo_camera,
+                              size: 16,
+                              color: Colors.black87,
+                            ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Upload profile photo',
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+                color: _profileDarkText,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
