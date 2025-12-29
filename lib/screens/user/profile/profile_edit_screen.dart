@@ -12,6 +12,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:intl_phone_field/countries.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
+import 'package:emergencies_disability_assistance_app/services/geocoding_service.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
 const Color _accentGold = Color(0xFFF4B63D);
@@ -44,8 +45,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   final _picker = ImagePicker();
   final _bioController = TextEditingController();
   String _bioInitial = '';
-  String _addressInitial = '';
-  List<Map<String, dynamic>> _existingAddresses = [];
+    String _addressInitial = '';
   bool _isCaregiver = false;
 
   static final List<Country> _dialCodeCountries = [...countries]
@@ -315,20 +315,26 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     debugPrint(
       'ProfileEdit source: caregiver=$hasCaregiverData showCaregiver=$showCaregiverFields name=${sourceData["name"]} email=${sourceData["email"]}',
     );
-    _existingAddresses = _addressListFromSources(dataMap, caregiverData);
     final savedDefaultAddress =
         (caregiverData?['defaultAddress'] as String?)?.trim() ??
         (dataMap['defaultAddress'] as String?)?.trim() ??
         '';
-    final addressValue = _existingAddresses.isNotEmpty
-        ? _formatAddressEntry(_existingAddresses.first)
-        : savedDefaultAddress;
+    final addressValue = savedDefaultAddress;
     _addressController.text = addressValue;
     _addressInitial = addressValue;
     _bioController.text = bioValue;
     _bioInitial = bioValue;
-    if (_existingAddresses.isNotEmpty) {
-      await _applyLocationFromEntry(_existingAddresses.first);
+    final lat = _coordinateFromData(
+        caregiverData ?? dataMap, ['lat', 'latitude']);
+    final lng = _coordinateFromData(
+        caregiverData ?? dataMap, ['lng', 'longitude']);
+    if (lat != null && lng != null) {
+      await _placeMarker(
+        LatLng(lat, lng),
+        animate: false,
+        updateAddress: false,
+        markAddressAsInitial: true,
+      );
     } else if (savedDefaultAddress.isNotEmpty) {
       await _searchAddress(savedDefaultAddress, markInitial: true);
     } else if (_pickedLatLng == null) {
@@ -352,59 +358,21 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     }
   }
 
-  List<Map<String, dynamic>> _extractAddressListFromDocument(
-    Map<String, dynamic>? data,
+  double? _coordinateFromData(
+    Map<String, dynamic>? source,
+    List<String> keys,
   ) {
-    if (data == null) return [];
-    final raw = data["address"];
-    if (raw is List) {
-      return raw
-          .whereType<Map<String, dynamic>>()
-          .map((entry) => Map<String, dynamic>.from(entry))
-          .toList();
+    if (source == null) return null;
+    for (final key in keys) {
+      final value = source[key];
+      if (value is num) return value.toDouble();
+      if (value is String) {
+        final parsed = double.tryParse(value);
+        if (parsed != null) return parsed;
+      }
     }
-    return [];
+    return null;
   }
-
-  List<Map<String, dynamic>> _addressListFromSources(
-    Map<String, dynamic>? userData,
-    Map<String, dynamic>? caregiverData,
-  ) {
-    final caregiverAddresses = _extractAddressListFromDocument(caregiverData);
-    if (caregiverAddresses.isNotEmpty) return caregiverAddresses;
-    return _extractAddressListFromDocument(userData);
-  }
-
-  String _formatAddressEntry(Map<String, dynamic> entry) {
-    final candidates = <String?>[
-      entry["formattedAddress"] as String?,
-      entry["address"] as String?,
-      entry["description"] as String?,
-      entry["street"] as String?,
-      entry["line1"] as String?,
-      entry["city"] as String?,
-      entry["state"] as String?,
-      entry["postcode"] as String?,
-    ];
-    final filtered = candidates
-        .where((element) => element != null && element.trim().isNotEmpty)
-        .map((element) => element!.trim())
-        .toList();
-    if (filtered.isNotEmpty) {
-      return filtered.join(', ');
-    }
-    return '';
-  }
-
-  Future<void> _applyLocationFromEntry(Map<String, dynamic> entry) async {
-    final lat = entry['lat'];
-    final lng = entry['lng'];
-    if (lat is num && lng is num) {
-      final coords = LatLng(lat.toDouble(), lng.toDouble());
-      await _placeMarker(coords, animate: false, updateAddress: false);
-    }
-  }
-
   Future<void> _placeMarker(
     LatLng pos, {
     bool animate = true,
@@ -586,34 +554,42 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     }
 
     try {
-      final trimmedAddress = _addressController.text.trim();
-      final defaultAddressLabel = trimmedAddress.isNotEmpty
-          ? trimmedAddress
-          : null;
-      if (_isCaregiver) {
-        final caregiverUpdate = <String, dynamic>{
-          "name": firstName,
-          "email": email,
-          "phone": phoneToSave,
-          "bio": bioValue,
-          "photoUrl": _photoUrl ?? '',
-          if (defaultAddressLabel != null)
-            "defaultAddress": defaultAddressLabel,
-        };
-        await FirebaseFirestore.instance
-            .collection("caregivers")
-            .doc(uid)
-            .set(caregiverUpdate, SetOptions(merge: true));
-      } else {
-        final userUpdate = <String, dynamic>{
-          "name": firstName,
-          "email": email,
-          "phone": phoneToSave,
-          if (defaultAddressLabel != null)
-            "defaultAddress": defaultAddressLabel,
-        };
-        await FirebaseFirestore.instance
-            .collection("users")
+        final trimmedAddress = _addressController.text.trim();
+        final defaultAddressLabel =
+            trimmedAddress.isNotEmpty ? trimmedAddress : null;
+        final coords = await _resolveAddressCoordinates(trimmedAddress);
+        if (_isCaregiver) {
+          final caregiverUpdate = <String, dynamic>{
+            "name": firstName,
+            "email": email,
+            "phone": phoneToSave,
+            "bio": bioValue,
+            "photoUrl": _photoUrl ?? '',
+            if (defaultAddressLabel != null)
+              "defaultAddress": defaultAddressLabel,
+            if (coords != null) ...{
+              "lat": coords.latitude,
+              "lng": coords.longitude,
+            },
+          };
+          await FirebaseFirestore.instance
+              .collection("caregivers")
+              .doc(uid)
+              .set(caregiverUpdate, SetOptions(merge: true));
+        } else {
+          final userUpdate = <String, dynamic>{
+            "name": firstName,
+            "email": email,
+            "phone": phoneToSave,
+            if (defaultAddressLabel != null)
+              "defaultAddress": defaultAddressLabel,
+            if (coords != null) ...{
+              "lat": coords.latitude,
+              "lng": coords.longitude,
+            },
+          };
+          await FirebaseFirestore.instance
+              .collection("users")
             .doc(uid)
             .set(userUpdate, SetOptions(merge: true));
       }
@@ -724,13 +700,20 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     return result ?? false;
   }
 
-  Future<bool> _handleBackPress() async {
-    final shouldLeave = await _confirmDiscard();
-    if (shouldLeave && mounted) {
-      _returnToOverview();
+    Future<bool> _handleBackPress() async {
+      final shouldLeave = await _confirmDiscard();
+      if (shouldLeave && mounted) {
+        _returnToOverview();
+      }
+      return false;
     }
-    return false;
-  }
+
+    Future<LatLng?> _resolveAddressCoordinates(String address) async {
+      final trimmed = address.trim();
+      if (trimmed.isEmpty) return null;
+      if (_pickedLatLng != null) return _pickedLatLng;
+      return await geocodeAddress(trimmed);
+    }
 
   @override
   Widget build(BuildContext context) {

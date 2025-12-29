@@ -149,8 +149,10 @@ class _ProfileEmergencyEditScreenState
           _fullPhoneNumber,
           _selectedDialCode,
         );
-        final rawRelationship = (match['relationship'] as String?)?.trim() ?? '';
-        if (_relationshipOptions.contains(rawRelationship) && rawRelationship != 'Other') {
+        final rawRelationship =
+            (match['relationship'] as String?)?.trim() ?? '';
+        if (_relationshipOptions.contains(rawRelationship) &&
+            rawRelationship != 'Other') {
           _relationship = rawRelationship;
           _customRelationshipCtrl.clear();
           _relationshipFieldController.text = rawRelationship;
@@ -215,8 +217,8 @@ class _ProfileEmergencyEditScreenState
     final entryPhoto = _photoUrl?.isNotEmpty == true ? _photoUrl : null;
     final relationshipValue = _relationship == 'Other'
         ? (_customRelationshipCtrl.text.trim().isNotEmpty
-            ? _customRelationshipCtrl.text.trim()
-            : 'Other')
+              ? _customRelationshipCtrl.text.trim()
+              : 'Other')
         : _relationship;
     final data = {
       'id': entryId,
@@ -1077,9 +1079,9 @@ class _ProfileEmergencyEditScreenState
 
   void _showRelationshipMenu() {
     final overlay = Overlay.of(context);
-    final renderBox = _relationshipFieldKey.currentContext?.findRenderObject()
-        as RenderBox?;
-    if (renderBox == null || overlay == null) return;
+    final renderBox =
+        _relationshipFieldKey.currentContext?.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
     final size = renderBox.size;
     final offset = renderBox.localToGlobal(Offset.zero);
     _relationshipOverlayEntry = OverlayEntry(
@@ -1111,10 +1113,8 @@ class _ProfileEmergencyEditScreenState
                     padding: EdgeInsets.zero,
                     shrinkWrap: true,
                     itemCount: _relationshipOptions.length,
-                    separatorBuilder: (_, __) => Divider(
-                      height: 1,
-                      color: Colors.grey.shade200,
-                    ),
+                    separatorBuilder: (_, __) =>
+                        Divider(height: 1, color: Colors.grey.shade200),
                     itemBuilder: (context, index) {
                       final option = _relationshipOptions[index];
                       final selected = option == _relationship;
@@ -1162,7 +1162,9 @@ class _ProfileEmergencyEditScreenState
       _relationship = option;
       if (option == 'Other') {
         final custom = _customRelationshipCtrl.text.trim();
-        _relationshipFieldController.text = custom.isNotEmpty ? custom : 'Other';
+        _relationshipFieldController.text = custom.isNotEmpty
+            ? custom
+            : 'Other';
       } else {
         _customRelationshipCtrl.clear();
         _relationshipFieldController.text = option;

@@ -19,6 +19,8 @@ class AuthService {
     required String role, // user / caregiver
     required String phone,
     String? defaultAddress,
+    double? lat,
+    double? lng,
   }) async {
     try {
       final cred = await _auth.createUserWithEmailAndPassword(
@@ -42,6 +44,8 @@ class AuthService {
         final userData = user.toMap();
         userData.remove('address');
         userData['defaultAddress'] = defaultAddress;
+        if (lat != null) userData['lat'] = lat;
+        if (lng != null) userData['lng'] = lng;
         await _firestore.collection("users").doc(uid).set(userData);
         return user;
       }
@@ -61,11 +65,13 @@ class AuthService {
         lng: 0.0,
       );
 
-        final caregiverData = {
+      final caregiverData = {
         ...caregiver.toMap(),
         "email": email,
         "role": "caregiver",
         "defaultAddress": defaultAddress,
+        if (lat != null) "lat": lat,
+        if (lng != null) "lng": lng,
         "created_at": FieldValue.serverTimestamp(),
       };
       caregiverData.remove('address');

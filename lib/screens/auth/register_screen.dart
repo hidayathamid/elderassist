@@ -15,6 +15,7 @@ import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:emergencies_disability_assistance_app/constants/service_options.dart';
 import 'package:emergencies_disability_assistance_app/widgets/service_chip.dart';
+import 'package:emergencies_disability_assistance_app/services/geocoding_service.dart';
 import 'touchdown_screen.dart';
 
 import 'login_screen.dart';
@@ -636,14 +637,18 @@ class _RegisterScreenState extends State<RegisterScreen> {
         return;
       }
 
-        final res = await _authService.registerUser(
-          name: fullName,
-          email: email,
-          password: pwd,
-          role: _selectedRole ?? 'client',
-          phone: _fullPhoneNumber,
-          defaultAddress: _addressCtrl.text.trim(),
-        );
+          final trimmedAddress = _addressCtrl.text.trim();
+          final coords = await _resolveAddressCoordinates(trimmedAddress);
+          final res = await _authService.registerUser(
+            name: fullName,
+            email: email,
+            password: pwd,
+            role: _selectedRole ?? 'client',
+            phone: _fullPhoneNumber,
+            defaultAddress: trimmedAddress.isNotEmpty ? trimmedAddress : null,
+            lat: coords?.latitude,
+            lng: coords?.longitude,
+          );
 
       if (res == null) {
         _showSnack('Failed to register');
@@ -710,6 +715,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
     } finally {
       if (mounted) setState(() => _isRegistering = false);
     }
+  }
+
+  Future<LatLng?> _resolveAddressCoordinates(String address) async {
+    if (_pickedLatLng != null) return _pickedLatLng;
+    final trimmed = address.trim();
+    if (trimmed.isEmpty) return null;
+    return await geocodeAddress(trimmed);
   }
 
   Widget _buildStepContent() {

@@ -51,7 +51,6 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
   final TextEditingController _nameCtrl = TextEditingController();
   final TextEditingController _phoneCtrl = TextEditingController();
   final TextEditingController _addressCtrl = TextEditingController();
-  final TextEditingController _notesCtrl = TextEditingController();
   final TextEditingController _customLabelCtrl = TextEditingController();
   final TextEditingController _telegramLinkCtrl = TextEditingController();
   final TextEditingController _labelFieldController = TextEditingController();
@@ -92,7 +91,6 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _initialize());
     _nameCtrl.addListener(_markDirty);
     _phoneCtrl.addListener(_markDirty);
-    _notesCtrl.addListener(_markDirty);
     _customLabelCtrl.addListener(_markDirty);
     _labelFieldController.text = _selectedLabel;
   }
@@ -105,7 +103,6 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
     _nameCtrl.dispose();
     _phoneCtrl.dispose();
     _addressCtrl.dispose();
-    _notesCtrl.dispose();
     _customLabelCtrl.dispose();
     _telegramLinkCtrl.dispose();
     super.dispose();
@@ -255,7 +252,6 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
     final national = phone.isNotEmpty ? _stripDialCode(phone, matchedDial) : '';
     _phoneCtrl.text = national;
     _fullPhoneNumber = national.isNotEmpty ? '$matchedDial$national' : '';
-    _notesCtrl.text = entry['notes']?.toString() ?? '';
     _addressCtrl.text = entry['address']?.toString() ?? '';
     _isDefault = entry['isDefault'] == true;
     final rawLabel = entry['label']?.toString() ?? 'Home';
@@ -489,14 +485,13 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
       final pairCode = _pendingPairCode;
       final entryId = widget.addressId ?? _uuid.v4();
       final entryPhoto = _photoUrl?.isNotEmpty == true ? _photoUrl : null;
-      final newEntry = {
-        'id': entryId,
-        'name': _nameCtrl.text.trim(),
-        'phone': cleanPhone,
-        'label': labelValue.isNotEmpty ? labelValue : 'Home',
-        'address': _addressCtrl.text.trim(),
-        'notes': _notesCtrl.text.trim(),
-        'isDefault': _isDefault,
+        final newEntry = {
+          'id': entryId,
+          'name': _nameCtrl.text.trim(),
+          'phone': cleanPhone,
+          'label': labelValue.isNotEmpty ? labelValue : 'Home',
+          'address': _addressCtrl.text.trim(),
+          'isDefault': _isDefault,
         'lat': _pickedLatLng!.latitude,
         'lng': _pickedLatLng!.longitude,
         'updatedAt': DateTime.now(),
@@ -669,9 +664,9 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
     setState(() => _uploadingPhoto = true);
     try {
       final bytes = await picked.readAsBytes();
-      final ref = FirebaseStorage.instance
-          .ref()
-          .child("address-photos/$uid/${_uuid.v4()}.jpg");
+      final ref = FirebaseStorage.instance.ref().child(
+        "address-photos/$uid/${_uuid.v4()}.jpg",
+      );
       await ref.putData(bytes, SettableMetadata(contentType: "image/jpeg"));
       final downloadUrl = await ref.getDownloadURL();
       if (!mounted) return;
@@ -1146,7 +1141,7 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
     final overlay = Overlay.of(context);
     final renderBox =
         _labelFieldKey.currentContext?.findRenderObject() as RenderBox?;
-    if (renderBox == null || overlay == null) return;
+    if (renderBox == null) return;
     final size = renderBox.size;
     final offset = renderBox.localToGlobal(Offset.zero);
     _labelOverlayEntry = OverlayEntry(
@@ -1178,10 +1173,8 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
                     padding: EdgeInsets.zero,
                     shrinkWrap: true,
                     itemCount: _addressLabelOptions.length,
-                    separatorBuilder: (_, __) => Divider(
-                      height: 1,
-                      color: Colors.grey.shade200,
-                    ),
+                    separatorBuilder: (_, __) =>
+                        Divider(height: 1, color: Colors.grey.shade200),
                     itemBuilder: (context, index) {
                       final label = _addressLabelOptions[index];
                       final selected = label == _selectedLabel;

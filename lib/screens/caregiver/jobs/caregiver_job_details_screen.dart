@@ -1,13 +1,11 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-
 import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_screen.dart';
 import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/chat/user_chat_screen.dart';
-
-import '../../../services/chat_service.dart';
-import '../../../services/location_service.dart';
+import 'package:emergencies_disability_assistance_app/services/chat_service.dart';
+import 'package:emergencies_disability_assistance_app/services/location_service.dart';
 import '../../../widgets/live_location_map.dart';
 
 const BorderRadius _sectionBorderRadius = BorderRadius.all(Radius.circular(18));

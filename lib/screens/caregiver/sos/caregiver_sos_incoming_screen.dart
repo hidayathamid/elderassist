@@ -1,8 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-
-import '../../../services/location_service.dart';
+import 'package:emergencies_disability_assistance_app/services/location_service.dart';
 import 'caregiver_sos_active_screen.dart';
 
 class CaregiverSosIncomingScreen extends StatefulWidget {

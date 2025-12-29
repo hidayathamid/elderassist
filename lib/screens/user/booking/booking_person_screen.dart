@@ -147,6 +147,9 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   static const Color _primaryColor = Color(0xFFF4B63D);
   static const Color _accentBlue = Color(0xFF00B8C6);
   static const Color _disabledColor = Color(0xFFE5E5E5);
+  static const double _defaultCameraZoom = 18;
+  static const double _defaultCameraTilt = 60;
+  static const double _defaultCameraBearing = 180;
 
   GoogleMapController? _mapController;
   List<AddressItem> _addresses = [];
@@ -218,11 +221,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         _refreshDeviceLocation();
       } else if (item.lat != null && item.long != null) {
         _currentLatLng = LatLng(item.lat!, item.long!);
-        _mapController?.animateCamera(
-          CameraUpdate.newCameraPosition(
-            CameraPosition(target: _currentLatLng, zoom: 20),
-          ),
-        );
+        _mapController?.animateCamera(_cameraUpdate(_currentLatLng));
       }
       setState(() {});
       _updateSelectedPersonMarkerIcon();
@@ -329,6 +328,21 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     }
   }
 
+  CameraPosition _cameraPosition(
+    LatLng target, {
+    double zoom = _defaultCameraZoom,
+  }) => CameraPosition(
+    target: target,
+    zoom: zoom,
+    tilt: _defaultCameraTilt,
+    bearing: _defaultCameraBearing,
+  );
+
+  CameraUpdate _cameraUpdate(
+    LatLng target, {
+    double zoom = _defaultCameraZoom,
+  }) => CameraUpdate.newCameraPosition(_cameraPosition(target, zoom: zoom));
+
   void _onHandleDragUpdate(DragUpdateDetails details) {
     _lastDragDelta = details.primaryDelta ?? 0;
   }
@@ -386,11 +400,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         _selected ??= _currentAddressItem();
       });
       _updateSelectedPersonMarkerIcon();
-      _mapController?.animateCamera(
-        CameraUpdate.newCameraPosition(
-          CameraPosition(target: latLng, zoom: 20),
-        ),
-      );
+      _mapController?.animateCamera(_cameraUpdate(latLng));
       _updateDistances();
       _resolvePlaceName(latLng);
     } catch (_) {}
@@ -515,12 +525,13 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       }
       final existingLabel = merged['label']?.toString().trim();
       if (existingLabel == null || existingLabel.isEmpty) {
-        final docLabel = (docEntry['label'] ??
-                docEntry['title'] ??
-                docEntry['name'] ??
-                docEntry['forWho'])
-            ?.toString()
-            .trim();
+        final docLabel =
+            (docEntry['label'] ??
+                    docEntry['title'] ??
+                    docEntry['name'] ??
+                    docEntry['forWho'])
+                ?.toString()
+                .trim();
         if (docLabel?.isNotEmpty == true) {
           merged['label'] = docLabel!;
         }
@@ -685,11 +696,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     }
     if (item.lat != null && item.long != null) {
       _currentLatLng = LatLng(item.lat!, item.long!);
-      _mapController?.animateCamera(
-        CameraUpdate.newCameraPosition(
-          CameraPosition(target: _currentLatLng, zoom: 20),
-        ),
-      );
+      _mapController?.animateCamera(_cameraUpdate(_currentLatLng));
     }
   }
 
@@ -734,11 +741,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     _animatePanelTo(
       _panelDownValue,
     ).whenComplete(() => _scrollAfterPanelReady(0));
-    _mapController?.animateCamera(
-      CameraUpdate.newCameraPosition(
-        CameraPosition(target: _currentLatLng, zoom: 20),
-      ),
-    );
+    _mapController?.animateCamera(_cameraUpdate(_currentLatLng));
     setState(() {});
   }
 
@@ -1115,12 +1118,13 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         title: entry['label'] ?? entry['title'],
       );
       if (entryKeys.any(candidateKeys.contains)) {
-        final docLabel = (entry['label'] ??
-                entry['title'] ??
-                entry['name'] ??
-                entry['forWho'])
-            ?.toString()
-            .trim();
+        final docLabel =
+            (entry['label'] ??
+                    entry['title'] ??
+                    entry['name'] ??
+                    entry['forWho'])
+                ?.toString()
+                .trim();
         if (docLabel?.isNotEmpty == true) {
           return docLabel;
         }
@@ -1219,10 +1223,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                 right: 0,
                 bottom: _minSheetHeightPx(context),
                 child: GoogleMap(
-                  initialCameraPosition: CameraPosition(
-                    target: _currentLatLng,
-                    zoom: 20,
-                  ),
+                  initialCameraPosition: _cameraPosition(_currentLatLng),
                   zoomControlsEnabled: false,
                   myLocationButtonEnabled: false,
                   myLocationEnabled: false,
@@ -1496,9 +1497,12 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         ? item.forWho!
         : item.title;
     final bool isSelf = _isSelfAddress(item);
-    final String addressLine = (isSelf && _defaultAddressText?.isNotEmpty == true)
+    final String addressLine =
+        (isSelf && _defaultAddressText?.isNotEmpty == true)
         ? _defaultAddressText!
-        : (item.addressLine?.isNotEmpty == true ? item.addressLine! : item.subtitle);
+        : (item.addressLine?.isNotEmpty == true
+              ? item.addressLine!
+              : item.subtitle);
     final String distanceText = item.distanceKm != null
         ? '${item.distanceKm!.toStringAsFixed(1)}km'
         : '--';
@@ -1680,16 +1684,13 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       return;
     }
     final person = _personFromAddress(_selected!);
-    final label = person.name.trim().isNotEmpty
-        ? person.name.trim()[0].toUpperCase()
-        : 'P';
     final String? photoUrl = person.photoUrl.trim().isNotEmpty
         ? person.photoUrl.trim()
         : null;
     final descriptor = await _cachedAvatarMarker(
-      "selected_person:${photoUrl ?? 'default'}:$label",
+      "selected_person:${photoUrl ?? 'default'}",
       fillColor: _primaryColor,
-      label: label,
+      label: null,
       photoUrl: photoUrl,
     );
     if (!mounted) return;
@@ -1708,7 +1709,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     final descriptor = await _buildAvatarMarker(
       fillColor: fillColor,
       label: label,
-      size: 110,
+      size: 130,
       avatar: avatar,
     );
     _markerCache[key] = descriptor;
@@ -1742,33 +1743,63 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     final ui.PictureRecorder recorder = ui.PictureRecorder();
     final Canvas canvas = Canvas(recorder);
     final double radius = size / 2;
-    final double tailHeight = size * 0.25;
     final double circleRadius = size * 0.45;
-    final double circleCenterY = radius - tailHeight * 0.35;
-    final Paint paint = Paint()..color = fillColor;
-    final Path tailPath = Path()
-      ..moveTo(radius - circleRadius * 0.45, circleCenterY + circleRadius * 0.4)
-      ..quadraticBezierTo(
-        radius,
-        size - tailHeight * 0.08,
-        radius + circleRadius * 0.45,
-        circleCenterY + circleRadius * 0.4,
-      )
-      ..lineTo(radius, size)
-      ..close();
-    canvas.drawPath(tailPath, paint);
-    canvas.drawCircle(Offset(radius, circleCenterY), circleRadius, paint);
-    if (avatar != null) {
+    final double circleCenterY = radius;
+    final double outlineWidth = size * 0.035;
+    final double outlineRadius = circleRadius + outlineWidth / 2;
+    final double innerRadius = (circleRadius - outlineWidth / 2).clamp(
+      4.0,
+      circleRadius,
+    );
+    final Paint outlinePaint = Paint()
+      ..color = Colors.yellow.shade700
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = outlineWidth;
+    if (avatar == null) {
+      final Paint backgroundPaint = Paint()..color = fillColor;
+      canvas.drawCircle(
+        Offset(radius, circleCenterY),
+        circleRadius,
+        backgroundPaint,
+      );
+      canvas.drawCircle(
+        Offset(radius, circleCenterY),
+        outlineRadius,
+        outlinePaint,
+      );
+      final TextStyle iconStyle = TextStyle(
+        fontFamily: Icons.person.fontFamily,
+        package: Icons.person.fontPackage,
+        fontSize: 32,
+        color: Colors.white,
+      );
+      final TextPainter iconPainter = TextPainter(
+        text: TextSpan(
+          text: String.fromCharCode(Icons.person.codePoint),
+          style: iconStyle,
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final Offset iconOffset = Offset(
+        radius - iconPainter.width / 2,
+        circleCenterY - iconPainter.height / 2,
+      );
+      iconPainter.paint(canvas, iconOffset);
+    } else {
+      canvas.drawCircle(
+        Offset(radius, circleCenterY),
+        outlineRadius,
+        outlinePaint,
+      );
       final Rect src = Rect.fromLTWH(
         0,
         0,
         avatar.width.toDouble(),
         avatar.height.toDouble(),
       );
-      final double inset = size * 0.15;
       final Rect dst = Rect.fromCircle(
         center: Offset(radius, circleCenterY),
-        radius: circleRadius - inset,
+        radius: innerRadius,
       );
       final Path clip = Path()..addOval(dst);
       canvas.save();
@@ -1880,11 +1911,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       _hasLocation = true;
       await _resolvePlaceName(latLng);
       _updateDistances();
-      _mapController?.animateCamera(
-        CameraUpdate.newCameraPosition(
-          CameraPosition(target: latLng, zoom: 20),
-        ),
-      );
+      _mapController?.animateCamera(_cameraUpdate(latLng));
       if (mounted) setState(() {});
     } catch (_) {
       // ignore location failures

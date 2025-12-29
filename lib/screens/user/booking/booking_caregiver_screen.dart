@@ -33,6 +33,10 @@ const Color _serviceTagBlue = Color(0xFF00A8A7);
 const double _recommendationScoreThreshold = 2200.0;
 
 const Color _primaryColor = Color(0xFFF4B63D);
+const double _mapPadding = 32;
+const double _maxCenterZoom = 16.0;
+const double _minCenterZoom = 13.0;
+const double _mapMarkerSize = 92.0;
 
 const String _gentleMapStyle = '''
 [
@@ -156,7 +160,7 @@ class BookingCaregiverScreen extends StatefulWidget {
 
 class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     with TickerProviderStateMixin {
-  static const double _minSheetSize = 0.45;
+  static const double _minSheetSize = 0.40;
   static const double _maxSheetSize = 0.85;
   static const SpringDescription _panelSpring = SpringDescription(
     mass: 1,
@@ -183,7 +187,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   Set<Polyline> _route = {};
   Set<Marker> _markers = {};
   String? _errorMessage;
-  int _routeAnimToken = 0;
   bool _routingInProgress = false;
   final Map<String, List<LatLng>> _routeCache = {};
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _caregiverSub;
@@ -194,6 +197,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     'AIzaSyDADYhy-AAeikw72w9jq22FnMDCVXRJark',
     defaultValue: 'AIzaSyDADYhy-AAeikw72w9jq22FnMDCVXRJark',
   );
+  static const double _defaultCameraZoom = 18;
+  static const double _defaultCameraTilt = 0;
+  static const double _defaultCameraBearing = 0;
 
   final Map<CaregiverCategory, GlobalKey> _sectionKeys = {
     CaregiverCategory.forYou: GlobalKey(),
@@ -230,7 +236,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     );
     _markers = {_selectedMarker()};
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _refreshMarkers();
+      _updateSelectedMarkers();
     });
     _listController.addListener(_handleScrollCategoryDetection);
     _updatePanelVisuals();
@@ -357,8 +363,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     DocumentSnapshot<Map<String, dynamic>> doc,
   ) {
     final data = doc.data() ?? {};
-    final List<String> services =
-        _stringListFromField(data['servicePreferences'] ?? data['services']);
+    final List<String> services = _stringListFromField(
+      data['servicePreferences'] ?? data['services'],
+    );
     final List<Map<String, dynamic>> addresses = _extractAddressList(
       data['address'] ?? data['addresses'],
     );
@@ -412,22 +419,24 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   List<CaregiverOption> _applyCategories(List<CaregiverOption> source) {
     final ranked = List<CaregiverOption>.from(source)
       ..sort((a, b) {
-      // priority: matchCount desc, rating desc, price asc, distance asc
-      final matchCmp = b.matchCount.compareTo(a.matchCount);
-      if (matchCmp != 0) return matchCmp;
-      final ratingCmp = b.rating.compareTo(a.rating);
-      if (ratingCmp != 0) return ratingCmp;
-      final priceCmp = a.priceValue.compareTo(b.priceValue);
-      if (priceCmp != 0) return priceCmp;
-      return a.distanceKm.compareTo(b.distanceKm);
-    });
+        // priority: matchCount desc, rating desc, price asc, distance asc
+        final matchCmp = b.matchCount.compareTo(a.matchCount);
+        if (matchCmp != 0) return matchCmp;
+        final ratingCmp = b.rating.compareTo(a.rating);
+        if (ratingCmp != 0) return ratingCmp;
+        final priceCmp = a.priceValue.compareTo(b.priceValue);
+        if (priceCmp != 0) return priceCmp;
+        return a.distanceKm.compareTo(b.distanceKm);
+      });
     return ranked;
   }
 
   List<CaregiverOption> _buildRecommendationList(
     List<CaregiverOption> available,
   ) {
-    final qualified = available.where((c) => !_shouldExcludeCaregiver(c)).toList();
+    final qualified = available
+        .where((c) => !_shouldExcludeCaregiver(c))
+        .toList();
     final recommended = qualified
         .where((c) => c.score >= _recommendationScoreThreshold)
         .toList();
@@ -674,55 +683,22 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   }
 
   void _animateRoute(List<LatLng> points) {
-    _routeAnimToken++;
-    final int token = _routeAnimToken;
     if (points.length < 2) return;
-
     final simplified = _simplifyPoints(points);
-
-    // build gradual polyline
-    _route = {
-      Polyline(
-        polylineId: const PolylineId('route'),
-        color: _caregiverMatchAccent,
-        width: 7,
-        startCap: Cap.roundCap,
-        endCap: Cap.roundCap,
-        jointType: JointType.round,
-        geodesic: true,
-        points: [simplified.first],
-      ),
-    };
-    setState(() {});
-
-    final int total = simplified.length;
-    const int steps = 16; // fewer frames for smoother CPU use
-    final int stepSize = (total / steps).ceil().clamp(1, total);
-
-    Future<void> addChunk(int end) async {
-      if (!mounted || token != _routeAnimToken) return;
-      final chunk = simplified.take(end).toList();
-      setState(() {
-        _route = {
-          Polyline(
-            polylineId: const PolylineId('route'),
-            color: _caregiverMatchAccent,
-            width: 7,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            jointType: JointType.round,
-            geodesic: true,
-            points: chunk,
-          ),
-        };
-      });
-      if (end < total) {
-        await Future.delayed(const Duration(milliseconds: 28));
-        await addChunk((end + stepSize).clamp(2, total));
-      }
-    }
-
-    addChunk(stepSize);
+    setState(() {
+      _route = {
+        Polyline(
+          polylineId: const PolylineId('route'),
+          color: _primaryColor,
+          width: 4,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+          geodesic: true,
+          points: simplified,
+        ),
+      };
+    });
   }
 
   void _openScheduleSheet() {
@@ -768,7 +744,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
                 child: Text(
-                  'By booking, you agree to our Advance Booking terms.',
+                  'Use this sheet to set the date and time for your scheduled booking.',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: Colors.black54, fontSize: 12),
                 ),
@@ -830,6 +806,14 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                     ? widget.person.address
                     : 'Care location'));
     final double panelHeight = _currentSheetHeight(context);
+    final double minSheetHeightPx = _minSheetHeightPx(context);
+    final double mapHeight = max(
+      0.1,
+      MediaQuery.of(context).size.height - minSheetHeightPx,
+    );
+    _lastMapHeight = mapHeight;
+    _lastPanelHeight = panelHeight;
+    _lastMinSheetHeight = minSheetHeightPx;
     final double bottomInset = MediaQuery.of(context).padding.bottom;
     final double frontBottom = _hideFrontPanel
         ? -110
@@ -888,10 +872,10 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                 right: 0,
                 bottom: _minSheetHeightPx(context),
                 child: GoogleMap(
-                  initialCameraPosition: CameraPosition(
-                    target: _currentLatLng,
-                    zoom: 14.5,
+                  padding: EdgeInsets.only(
+                    bottom: max(_currentSheetHeight(context) - 32, 24),
                   ),
+                  initialCameraPosition: _cameraPosition(_currentLatLng),
                   myLocationEnabled: false,
                   zoomControlsEnabled: false,
                   markers: _markers.isNotEmpty ? _markers : {_selectedMarker()},
@@ -1618,9 +1602,13 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     }
 
     final LatLng caregiverLoc = caregiver.latLng!;
-    final BitmapDescriptor personIcon = await _personAvatarIcon(size: 110);
-    final BitmapDescriptor caregiverIcon =
-        await _caregiverAvatarIcon(caregiver, size: 110);
+    final BitmapDescriptor personIcon = await _personAvatarIcon(
+      size: _mapMarkerSize,
+    );
+    final BitmapDescriptor caregiverIcon = await _caregiverAvatarIcon(
+      caregiver,
+      size: _mapMarkerSize,
+    );
     final Marker personMarker = Marker(
       markerId: const MarkerId('person'),
       position: _currentLatLng,
@@ -1651,30 +1639,114 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     });
     _animateRoute(points);
 
-    _fitMapToPins(_currentLatLng, caregiverLoc);
+    await _updateSelectedMarkers();
+    await _fitMapToPins(_currentLatLng, caregiverLoc);
     if (_panelController.value > 0.01) {
       _animatePanelTo(0);
     }
-    _refreshMarkers();
+    await _updateSelectedMarkers();
   }
 
-  void _fitMapToPins(LatLng a, LatLng b) {
+  static const double _maxCenterZoom = 16.0;
+  static const double _minCenterZoom = 13.0;
+  double _lastMapHeight = 0;
+  double _lastPanelHeight = 0;
+  double _lastMinSheetHeight = 0;
+
+  Future<void> _fitMapToPins(LatLng a, LatLng b) async {
     if (_mapController == null) return;
-    if (a.latitude == b.latitude && a.longitude == b.longitude) {
-      _mapController!.animateCamera(CameraUpdate.newLatLngZoom(a, 16));
+    final LatLngBounds bounds = _boundsFromPoints(a, b);
+    try {
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLngBounds(bounds, _mapPadding),
+      );
+    } catch (_) {
+      await _mapController!.animateCamera(_cameraUpdate(_midpoint(a, b)));
       return;
     }
-    final southWest = LatLng(
-      min(a.latitude, b.latitude),
-      min(a.longitude, b.longitude),
+    if (!mounted) return;
+    final double distanceKm = _distanceKm(a, b);
+    final double zoom = _zoomForDistance(
+      distanceKm,
+    ).clamp(_minCenterZoom, _maxCenterZoom);
+    final LatLng center = _boundsCenter(bounds);
+    final double latSpan =
+        (bounds.northeast.latitude - bounds.southwest.latitude).abs();
+    final double verticalShift = _panelHeightShift(latSpan);
+    final LatLng shiftedCenter = LatLng(
+      _clampLatitude(center.latitude + verticalShift),
+      center.longitude,
     );
-    final northEast = LatLng(
-      max(a.latitude, b.latitude),
-      max(a.longitude, b.longitude),
-    );
-    final bounds = LatLngBounds(southwest: southWest, northeast: northEast);
-    _mapController!.animateCamera(CameraUpdate.newLatLngBounds(bounds, 70));
+    await _centerCameraOn(shiftedCenter, zoom);
   }
+
+  LatLngBounds _boundsFromPoints(LatLng a, LatLng b) {
+    final double latMin = min(a.latitude, b.latitude);
+    final double latMax = max(a.latitude, b.latitude);
+    final double lngMin = min(a.longitude, b.longitude);
+    final double lngMax = max(a.longitude, b.longitude);
+    final double latDelta = max(0.0005, latMax - latMin);
+    final double lngDelta = max(0.0005, lngMax - lngMin);
+    return LatLngBounds(
+      southwest: LatLng(latMin - latDelta, lngMin - lngDelta),
+      northeast: LatLng(latMax + latDelta, lngMax + lngDelta),
+    );
+  }
+
+  LatLng _midpoint(LatLng a, LatLng b) {
+    return LatLng(
+      (a.latitude + b.latitude) / 2,
+      (a.longitude + b.longitude) / 2,
+    );
+  }
+
+  double _clampLatitude(double value) {
+    return value.clamp(-85.0, 85.0);
+  }
+
+  double _panelHeightShift(double latSpan) {
+    if (_lastMapHeight <= 0) return 0;
+    final double overlay = max(0, _lastPanelHeight - _lastMinSheetHeight);
+    final double ratio = (overlay / _lastMapHeight).clamp(0.0, 0.5);
+    return latSpan * ratio;
+  }
+
+  double _zoomForDistance(double distanceKm) {
+    if (distanceKm <= 0.2) return 17.0;
+    if (distanceKm <= 0.5) return 16.5;
+    if (distanceKm <= 1.2) return 16.0;
+    if (distanceKm <= 3) return 15.2;
+    if (distanceKm <= 5) return 14.5;
+    if (distanceKm <= 10) return 13.4;
+    return 12.2;
+  }
+
+  LatLng _boundsCenter(LatLngBounds bounds) {
+    return LatLng(
+      (bounds.northeast.latitude + bounds.southwest.latitude) / 2,
+      (bounds.northeast.longitude + bounds.southwest.longitude) / 2,
+    );
+  }
+
+  Future<void> _centerCameraOn(LatLng center, double zoom) async {
+    if (_mapController == null) return;
+    await _mapController!.animateCamera(_cameraUpdate(center, zoom: zoom));
+  }
+
+  CameraPosition _cameraPosition(
+    LatLng target, {
+    double zoom = _defaultCameraZoom,
+  }) => CameraPosition(
+    target: target,
+    zoom: zoom,
+    tilt: _defaultCameraTilt,
+    bearing: _defaultCameraBearing,
+  );
+
+  CameraUpdate _cameraUpdate(
+    LatLng target, {
+    double zoom = _defaultCameraZoom,
+  }) => CameraUpdate.newCameraPosition(_cameraPosition(target, zoom: zoom));
 
   Future<List<LatLng>> _buildRoadRoutePoints(LatLng start, LatLng end) async {
     if (_mapsApiKey.isNotEmpty) {
@@ -1723,13 +1795,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     return [start, control1, control2, end];
   }
 
-  // ignore: unused_element
-  List<CaregiverOption> _caregiversWithinRadius(double radiusKm) {
-    return _caregivers
-        .where((caregiver) => caregiver.distanceKm <= radiusKm)
-        .toList();
-  }
-
   final Map<String, BitmapDescriptor> _markerCache = {};
   final Map<String, ui.Image> _avatarImageCache = {};
 
@@ -1775,36 +1840,36 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     }
   }
 
-  Future<void> _refreshMarkers() async {
+  Future<void> _updateSelectedMarkers() async {
     if (!mounted) return;
-    final nearby = _caregiversWithinRadius(15);
-    final List<Marker> markers = [];
-    final BitmapDescriptor personIcon = await _personAvatarIcon(size: 68);
-    markers.add(
+    final BitmapDescriptor personIcon = await _personAvatarIcon(
+      size: _mapMarkerSize,
+    );
+    final Set<Marker> markers = {
       Marker(
         markerId: const MarkerId('person'),
         position: _currentLatLng,
         icon: personIcon,
       ),
-    );
-    for (final caregiver in nearby) {
-      if (caregiver.latLng == null) continue;
-      final label = caregiver.name.trim().isNotEmpty
-          ? caregiver.name.trim()[0].toUpperCase()
-          : 'C';
-      final BitmapDescriptor caregiverIcon =
-          await _caregiverAvatarIcon(caregiver, size: 68);
+    };
+    final caregiver = _selectedCaregiver;
+    if (caregiver?.latLng != null) {
+      final selectedCaregiver = caregiver!;
+      final caregiverIcon = await _caregiverAvatarIcon(
+        selectedCaregiver,
+        size: _mapMarkerSize,
+      );
       markers.add(
         Marker(
-          markerId: MarkerId('caregiver_${caregiver.id}'),
-          position: caregiver.latLng!,
+          markerId: MarkerId('caregiver_${selectedCaregiver.id}'),
+          position: selectedCaregiver.latLng!,
           icon: caregiverIcon,
         ),
       );
     }
     if (!mounted) return;
     setState(() {
-      _markers = markers.toSet();
+      _markers = markers;
     });
   }
 
@@ -1816,7 +1881,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     return fallback;
   }
 
-  Future<BitmapDescriptor> _personAvatarIcon({double size = 110}) {
+  Future<BitmapDescriptor> _personAvatarIcon({double size = _mapMarkerSize}) {
     final label = _avatarLabel(widget.person.name, fallback: 'P');
     return _cachedAvatarMarker(
       'person_${size.toInt()}',
@@ -1829,7 +1894,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
 
   Future<BitmapDescriptor> _caregiverAvatarIcon(
     CaregiverOption caregiver, {
-    double size = 110,
+    double size = _mapMarkerSize,
   }) {
     final label = _avatarLabel(caregiver.name, fallback: 'C');
     return _cachedAvatarMarker(
@@ -1852,40 +1917,64 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     final ui.PictureRecorder recorder = ui.PictureRecorder();
     final Canvas canvas = Canvas(recorder);
     final double radius = size / 2;
-    final double tailHeight = size * 0.25;
     final double circleRadius = size * 0.45;
-    final double circleCenterY = radius - tailHeight * 0.35;
-    final Paint paint = Paint()..color = fillColor;
-    final Path tailPath = Path()
-      ..moveTo(radius - circleRadius * 0.45, circleCenterY + circleRadius * 0.4)
-      ..quadraticBezierTo(
-        radius,
-        size - tailHeight * 0.08,
-        radius + circleRadius * 0.45,
-        circleCenterY + circleRadius * 0.4,
-      )
-      ..lineTo(radius, size)
-      ..close();
-    canvas.drawPath(tailPath, paint);
-    final Path headPath = Path()
-      ..addOval(
-        Rect.fromCircle(
-          center: Offset(radius, circleCenterY),
-          radius: circleRadius,
-        ),
+    final double circleCenterY = radius;
+    final double outlineWidth = size * 0.035;
+    final double outlineRadius = circleRadius + outlineWidth / 2;
+    final double innerRadius = (circleRadius - outlineWidth / 2).clamp(
+      4.0,
+      circleRadius,
+    );
+    final Paint outlinePaint = Paint()
+      ..color = Colors.yellow.shade700
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = outlineWidth;
+    if (avatar == null) {
+      final Paint backgroundPaint = Paint()..color = fillColor;
+      canvas.drawCircle(
+        Offset(radius, circleCenterY),
+        circleRadius,
+        backgroundPaint,
       );
-    canvas.drawPath(headPath, paint);
-    if (avatar != null) {
+      canvas.drawCircle(
+        Offset(radius, circleCenterY),
+        outlineRadius,
+        outlinePaint,
+      );
+      final double iconSize = (size * 0.34).clamp(18.0, 40.0);
+      final TextStyle iconStyle = TextStyle(
+        fontFamily: Icons.person.fontFamily,
+        package: Icons.person.fontPackage,
+        fontSize: iconSize,
+        color: Colors.white,
+      );
+      final TextPainter iconPainter = TextPainter(
+        text: TextSpan(
+          text: String.fromCharCode(Icons.person.codePoint),
+          style: iconStyle,
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final Offset iconOffset = Offset(
+        radius - iconPainter.width / 2,
+        circleCenterY - iconPainter.height / 2,
+      );
+      iconPainter.paint(canvas, iconOffset);
+    } else {
+      canvas.drawCircle(
+        Offset(radius, circleCenterY),
+        outlineRadius,
+        outlinePaint,
+      );
       final Rect src = Rect.fromLTWH(
         0,
         0,
         avatar.width.toDouble(),
         avatar.height.toDouble(),
       );
-      final double inset = size * 0.15;
       final Rect dst = Rect.fromCircle(
         center: Offset(radius, circleCenterY),
-        radius: circleRadius - inset,
+        radius: innerRadius,
       );
       final Path clip = Path()..addOval(dst);
       canvas.save();

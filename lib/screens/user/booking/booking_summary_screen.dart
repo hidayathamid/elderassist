@@ -1,4 +1,5 @@
-﻿import 'package:cloud_functions/cloud_functions.dart';
+import 'dart:math';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -19,6 +20,8 @@ const TextStyle _sectionLabelTextStyle = TextStyle(
   fontWeight: FontWeight.w600,
   color: Color(0xFF1B1D29),
 );
+final _weekdayFormatter = intl.DateFormat('EEE');
+final _dayFormatter = intl.DateFormat('d');
 
 class BookingSummaryScreen extends StatefulWidget {
   const BookingSummaryScreen({
@@ -65,9 +68,17 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   late int _selectedTimeIndex;
   late bool _isBookInAdvance;
   bool _showPaymentMethods = false;
+  bool _showServicePreferences = false;
   String? _selectedPaymentMethod;
   late PersonProfile _currentPerson;
   late AddressItem _activeAddress;
+  static const double _scheduleChipWidth = 52;
+  static const double _scheduleChipSpacing = 58;
+  final ScrollController _scheduleScrollController = ScrollController();
+  double _scheduleViewportWidth = 0;
+  double _scheduleSidePadding = 0;
+  bool _scheduleScrollAnimating = false;
+  bool _scheduleAutoCentered = false;
 
   @override
   void initState() {
@@ -102,22 +113,138 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     _selectedPaymentMethod = widget.lockedPaymentMethod;
   }
 
-  Widget _buildLabeledBlock({required String label, required Widget child}) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(
-            fontSize: 10,
-            fontWeight: FontWeight.w600,
-            color: Colors.black54,
-          ),
-        ),
-        const SizedBox(height: 4),
-        child,
-      ],
+  void _setSelectedDate(
+    DateTime date, {
+    required List<DateTimeRange> ranges,
+    required Set<int> disabledWeekdays,
+    required List<DateTime> layoutDays,
+    bool animate = true,
+  }) {
+    final normalized = _clampToFuture(date);
+    final index = layoutDays.indexWhere((d) => _isSameDay(d, normalized));
+    if (index < 0) return;
+    if (_isSameDay(_selectedDate, normalized)) {
+      _scrollToDateIndex(index, animate: animate);
+      return;
+    }
+    setState(() => _selectedDate = normalized);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollToDateIndex(index, animate: animate);
+    });
+  }
+
+  void _handleScheduleScrollEnd(
+    List<DateTimeRange> ranges,
+    Set<int> disabledWeekdays,
+    List<DateTime> layoutDays,
+  ) {
+    if (_scheduleScrollAnimating ||
+        !_scheduleScrollController.hasClients ||
+        _scheduleViewportWidth <= 0) {
+      return;
+    }
+    final center =
+        _scheduleScrollController.offset + (_scheduleViewportWidth / 2);
+    final rawIndex = (center / _scheduleChipSpacing).round();
+    final candidateIndex = rawIndex.clamp(0, layoutDays.length - 1) as int;
+    final candidateDate = layoutDays[candidateIndex];
+    final disabled = _isDateDisabled(candidateDate, ranges, disabledWeekdays);
+    if (!disabled) {
+      if (!_isSameDay(_selectedDate, candidateDate)) {
+        _setSelectedDate(
+          candidateDate,
+          ranges: ranges,
+          disabledWeekdays: disabledWeekdays,
+          layoutDays: layoutDays,
+        );
+      } else {
+        _scrollToDateIndex(candidateIndex);
+      }
+      return;
+    }
+    final fallbackIndex = _nextAvailableIndex(
+      candidateIndex,
+      ranges,
+      disabledWeekdays,
+      layoutDays,
     );
+    if (fallbackIndex != null) {
+      final fallbackDate = layoutDays[fallbackIndex];
+      _setSelectedDate(
+        fallbackDate,
+        ranges: ranges,
+        disabledWeekdays: disabledWeekdays,
+        layoutDays: layoutDays,
+      );
+    } else {
+      _scrollToDateIndex(candidateIndex);
+    }
+  }
+
+  void _scrollToSelectedDateIndex({
+    required List<DateTime> layoutDays,
+    bool animate = false,
+  }) {
+    final index = layoutDays.indexWhere((d) => _isSameDay(d, _selectedDate));
+    if (index >= 0) {
+      _scrollToDateIndex(index, animate: animate);
+    }
+  }
+
+  void _scrollToDateIndex(int index, {bool animate = true}) {
+    if (!_scheduleScrollController.hasClients || _scheduleViewportWidth <= 0)
+      return;
+    final targetCenter =
+        index * _scheduleChipSpacing +
+        _scheduleSidePadding +
+        (_scheduleChipWidth / 2);
+    final desired = targetCenter - (_scheduleViewportWidth / 2);
+    final maxExtent = _scheduleScrollController.position.maxScrollExtent;
+    final target = desired.clamp(0.0, maxExtent);
+    _scheduleScrollAnimating = true;
+    if (animate) {
+      _scheduleScrollController
+          .animateTo(
+            target,
+            duration: const Duration(milliseconds: 280),
+            curve: Curves.easeOut,
+          )
+          .whenComplete(() => _scheduleScrollAnimating = false);
+    } else {
+      _scheduleScrollController.jumpTo(target);
+      _scheduleScrollAnimating = false;
+    }
+  }
+
+  bool _isDateDisabled(
+    DateTime date,
+    List<DateTimeRange> ranges,
+    Set<int> disabledWeekdays,
+  ) {
+    return _isPastDate(date) ||
+        _isDateBlocked(date, ranges) ||
+        disabledWeekdays.contains(date.weekday);
+  }
+
+  int? _nextAvailableIndex(
+    int fromIndex,
+    List<DateTimeRange> ranges,
+    Set<int> disabledWeekdays,
+    List<DateTime> layoutDays,
+  ) {
+    for (int i = fromIndex + 1; i < layoutDays.length; i++) {
+      if (!_isDateDisabled(layoutDays[i], ranges, disabledWeekdays)) return i;
+    }
+    for (int i = fromIndex - 1; i >= 0; i--) {
+      if (!_isDateDisabled(layoutDays[i], ranges, disabledWeekdays)) return i;
+    }
+    return null;
+  }
+
+  @override
+  void dispose() {
+    _scheduleScrollController.dispose();
+    super.dispose();
   }
 
   bool get _isEditingBooking => widget.editingBookingId != null;
@@ -161,8 +288,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       final startTimeValue = _timeOptions[_selectedTimeIndex];
       final personAddress =
           (_activeAddress.addressLine ?? _activeAddress.subtitle).trim();
-      final billingAmount =
-          _forceToyyibTestAmount ? 1.0 : widget.price;
+      final billingAmount = _forceToyyibTestAmount ? 1.0 : widget.price;
       final formattedDate = _formatDate(_selectedDate);
       final formattedTime = _formatTimeOfDay(startTimeValue);
       final billName = 'Booking: $serviceLabel';
@@ -246,11 +372,15 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     return '$year-$month-$day';
   }
 
+  static const int _scheduleDaysBefore = 15;
+  static const int _scheduleDaysAfter = 90;
+
   List<DateTime> get _scheduleDays {
     final anchor = _normalizeDate(_selectedDate);
-    return List.generate(7, (index) {
-      return anchor.add(Duration(days: index - 3));
-    });
+    return List.generate(
+      _scheduleDaysBefore + _scheduleDaysAfter + 1,
+      (index) => anchor.add(Duration(days: index - _scheduleDaysBefore)),
+    );
   }
 
   @override
@@ -299,67 +429,83 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         builder: (context, snapshot) {
           final data = snapshot.data?.data() ?? {};
           final location = _buildLocation(data);
+          final defaultAddress =
+              (data['defaultAddress'] as String?)?.trim() ?? '';
           final serviceOptions = _safeStringList(
-            data['services'],
+            data['servicePreferences'],
           ).where((s) => s.trim().isNotEmpty).toList();
           final services = serviceOptions.isNotEmpty
               ? serviceOptions
               : widget.caregiver.services;
-          if (_selectedService.isEmpty && services.isNotEmpty) {
-            _selectedService = services.first;
-          }
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 90),
-            child: ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: Text(
-                    'Selected Caregiver & Client',
-                    style: _sectionLabelTextStyle,
-                  ),
+          return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+            stream: FirebaseFirestore.instance
+                .collection('availability')
+                .doc(widget.caregiver.id)
+                .snapshots(),
+            builder: (context, availabilitySnapshot) {
+              final availabilityData = availabilitySnapshot.data?.data() ?? {};
+              final blockedRanges = _parseBlockedDateRanges(
+                availabilityData['blockedDates'],
+              );
+              final disabledWeekdays = _parseUnavailableWeekdays(
+                availabilityData['weeklySchedule'],
+              );
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 90),
+                child: ListView(
+                  padding: const EdgeInsets.all(16),
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(
+                        'Selected Caregiver & Client',
+                        style: _sectionLabelTextStyle,
+                      ),
+                    ),
+                    _buildProfileHeader(
+                      location: location,
+                      defaultAddress: defaultAddress,
+                    ),
+                    const SizedBox(height: 6),
+                    _buildPersonCard(),
+                    const SizedBox(height: 16),
+                    if (_isBookInAdvance) ...[
+                      _buildSectionTitle('Schedule'),
+                      _buildScheduleChips(
+                        blockedDateRanges: blockedRanges,
+                        disabledWeekdays: disabledWeekdays,
+                      ),
+                      const SizedBox(height: 12),
+                      _buildSectionTitle('Choose Time'),
+                      _buildTimeChips(),
+                      const SizedBox(height: 16),
+                    ],
+                    _buildSectionTitle('Service Preferences'),
+                    const SizedBox(height: 6),
+                    _buildAddServiceCard(),
+                    if (_showServicePreferences && !_lockServiceAndPayment) ...[
+                      const SizedBox(height: 6),
+                      ...services.map(
+                        (service) => _buildServiceRow(service: service),
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    _buildSectionTitle('Booking Summary'),
+                    const SizedBox(height: 8),
+                    _buildBookingSummaryDetails(),
+                    const SizedBox(height: 12),
+                    const Text('Payment Method', style: _sectionLabelTextStyle),
+                    const SizedBox(height: 6),
+                    if (!_lockServiceAndPayment) ...[const SizedBox(height: 6)],
+                    _buildAddPaymentCard(),
+                    if (_showPaymentMethods && !_lockServiceAndPayment) ...[
+                      const SizedBox(height: 8),
+                      _buildPaymentMethodList(),
+                    ],
+                  ],
                 ),
-                _buildLabeledBlock(
-                  label: 'Caregiver',
-                  child: _buildProfileHeader(location: location),
-                ),
-                const SizedBox(height: 6),
-                _buildLabeledBlock(label: 'Client', child: _buildPersonCard()),
-                const SizedBox(height: 16),
-                if (_isBookInAdvance) ...[
-                  _buildSectionTitle('Schedule'),
-                  _buildScheduleChips(),
-                  const SizedBox(height: 12),
-                  _buildSectionTitle('Choose Time'),
-                  _buildTimeChips(),
-                  const SizedBox(height: 16),
-                ],
-                _buildSectionTitle('Select Service'),
-                ...services.map(
-                  (service) => _buildServiceRow(service: service),
-                ),
-                const SizedBox(height: 16),
-                _buildSectionTitle('Booking Summary'),
-                const SizedBox(height: 8),
-                _buildBookingSummaryDetails(),
-                const SizedBox(height: 12),
-                const Text('Payment Method', style: _sectionLabelTextStyle),
-                const SizedBox(height: 6),
-                if (!_lockServiceAndPayment) ...[
-                  const Text(
-                    'Select ToyyibPay or PayPal to continue.',
-                    style: TextStyle(fontSize: 10, color: Colors.black54),
-                  ),
-                  const SizedBox(height: 6),
-                ],
-                _buildAddPaymentCard(),
-                if (_showPaymentMethods && !_lockServiceAndPayment) ...[
-                  const SizedBox(height: 8),
-                  _buildPaymentMethodList(),
-                ],
-              ],
-            ),
+              );
+            },
           );
         },
       ),
@@ -414,7 +560,10 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     );
   }
 
-  Widget _buildProfileHeader({required String location}) {
+  Widget _buildProfileHeader({
+    required String location,
+    String? defaultAddress,
+  }) {
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
       decoration: BoxDecoration(
@@ -463,33 +612,47 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  widget.caregiver.name,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 13,
-                  ),
-                ),
-                const SizedBox(height: 1),
                 Row(
                   children: [
-                    for (int i = 0; i < 5; i++)
-                      Icon(
-                        Icons.star,
-                        size: 10,
-                        color: (widget.caregiver.rating >= i + 1)
-                            ? Colors.amber
-                            : Colors.grey[300],
-                      ),
-                    const SizedBox(width: 3),
-                    Text(
-                      widget.caregiver.rating.toStringAsFixed(1),
-                      style: const TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w600,
+                    Expanded(
+                      child: Text(
+                        widget.caregiver.name,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
+                    const SizedBox(width: 6),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.star,
+                          size: 12,
+                          color: Color(0xFFF4B63D),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          widget.caregiver.rating.toStringAsFixed(1),
+                          style: const TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.black87,
+                          ),
+                        ),
+                      ],
+                    ),
                   ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Caregiver',
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.black54,
+                  ),
                 ),
                 if (location.isNotEmpty) ...[
                   const SizedBox(height: 4),
@@ -501,6 +664,25 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                       Expanded(
                         child: Text(
                           location,
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: Colors.black54,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                if (defaultAddress?.isNotEmpty == true) ...[
+                  const SizedBox(height: 4),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.place, size: 12, color: Colors.black45),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          defaultAddress!,
                           style: const TextStyle(
                             fontSize: 10,
                             color: Colors.black54,
@@ -531,95 +713,150 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   Widget _buildPersonCard() {
     final person = _currentPerson;
     final selectedAddress = _activeAddress;
-    final labelText = selectedAddress.label?.trim().isNotEmpty == true
-        ? selectedAddress.label!.trim()
-        : (person.label?.trim() ?? '');
     final addressText = selectedAddress.addressLine?.isNotEmpty == true
         ? selectedAddress.addressLine!
         : selectedAddress.subtitle;
-    final card = Container(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey[200]!),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance
+          .collection('users')
+          .doc(person.id)
+          .snapshots(),
+      builder: (context, userSnapshot) {
+        final userData = userSnapshot.data?.data() ?? {};
+        final userLabel = (userData['label'] as String?)?.trim() ?? '';
+        String labelText = userLabel;
+        if (labelText.isEmpty) {
+          labelText = selectedAddress.label?.trim() ?? '';
+        }
+        if (labelText.isEmpty) {
+          labelText = person.label?.trim() ?? '';
+        }
+        final card = Container(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.grey[200]!),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.04),
+                blurRadius: 10,
+                offset: const Offset(0, 4),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          DefaultProfileAvatar(
-            radius: 32,
-            photoUrl: person.photoUrl,
-            label: person.name,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  person.name,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 13,
-                  ),
-                ),
-                if (labelText.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    labelText,
-                    style: const TextStyle(fontSize: 10, color: Colors.black54),
-                  ),
-                ],
-                if (addressText.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Icon(Icons.place, size: 12, color: Colors.black45),
-                      const SizedBox(width: 3),
-                      Expanded(
-                        child: Text(
-                          addressText,
-                          style: const TextStyle(
-                            fontSize: 10,
-                            color: Colors.black54,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              DefaultProfileAvatar(
+                radius: 32,
+                photoUrl: person.photoUrl,
+                label: person.name,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            person.name,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13,
+                            ),
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
+                        if (labelText.isNotEmpty) ...[
+                          const SizedBox(width: 6),
+                          Flexible(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.grey[100],
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: Colors.grey[300]!,
+                                  width: 0.5,
+                                ),
+                              ),
+                              child: Text(
+                                labelText,
+                                style: const TextStyle(
+                                  fontSize: 9,
+                                  color: Colors.black54,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    const Text(
+                      'Client',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black54,
+                      ),
+                    ),
+                    if (addressText.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(
+                            Icons.place,
+                            size: 12,
+                            color: Colors.black45,
+                          ),
+                          const SizedBox(width: 3),
+                          Expanded(
+                            child: Text(
+                              addressText,
+                              style: const TextStyle(
+                                fontSize: 10,
+                                color: Colors.black54,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ],
-                  ),
-                ],
-              ],
-            ),
-          ),
-          if (_canUseAddressPicker)
-            const Padding(
-              padding: EdgeInsets.only(left: 10),
-              child: Center(
-                child: Icon(
-                  Icons.chevron_right,
-                  size: 18,
-                  color: Colors.black26,
+                  ],
                 ),
               ),
-            ),
-        ],
-      ),
-    );
+              if (_canUseAddressPicker)
+                const Padding(
+                  padding: EdgeInsets.only(left: 10),
+                  child: Center(
+                    child: Icon(
+                      Icons.chevron_right,
+                      size: 18,
+                      color: Colors.black26,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
 
-    if (!_canUseAddressPicker) return card;
-    return InkWell(
-      onTap: _openAddressSelector,
-      borderRadius: BorderRadius.circular(16),
-      child: card,
+        if (!_canUseAddressPicker) return card;
+        return InkWell(
+          onTap: _openAddressSelector,
+          borderRadius: BorderRadius.circular(16),
+          child: card,
+        );
+      },
     );
   }
 
@@ -672,91 +909,129 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     return Text(text, style: _sectionLabelTextStyle);
   }
 
-  Widget _buildScheduleChips() {
+  Widget _buildScheduleChips({
+    List<DateTimeRange>? blockedDateRanges,
+    Set<int>? disabledWeekdays,
+  }) {
     final days = _scheduleDays;
+    final ranges = blockedDateRanges ?? const <DateTimeRange>[];
+    final disabledDays = disabledWeekdays ?? const <int>{};
     return SizedBox(
       height: 56,
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        physics: const BouncingScrollPhysics(),
-        padding: const EdgeInsets.symmetric(horizontal: 4),
-        child: Row(
-          children: List.generate(days.length, (index) {
-            final date = days[index];
-            final bool selected = _isSameDay(date, _selectedDate);
-            final bool pastDate = _isPastDate(date);
-            final chipOpacity = pastDate ? 0.55 : 1.0;
-            return Padding(
-              padding: const EdgeInsets.only(right: 6),
-              child: Opacity(
-                opacity: chipOpacity,
-                child: GestureDetector(
-                  onTap: pastDate
-                      ? null
-                      : () => setState(
-                          () => _selectedDate = _clampToFuture(date),
-                        ),
-                  child: Container(
-                    width: 52,
-                    decoration: BoxDecoration(
-                      color: selected
-                          ? _tealAccent
-                          : pastDate
-                          ? Colors.grey[100]
-                          : Colors.white,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: selected
-                            ? Colors.transparent
-                            : pastDate
-                            ? Colors.grey[200]!
-                            : Colors.grey[300]!,
-                      ),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x08000000),
-                          blurRadius: 4,
-                          offset: Offset(0, 1),
-                        ),
-                      ],
-                    ),
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          intl.DateFormat('EEE').format(date),
-                          style: TextStyle(
-                            color: selected
-                                ? Colors.white
-                                : Colors.black54.withValues(
-                                    alpha: pastDate ? 0.4 : 1,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final horizontalPadding = max(
+            0.0,
+            (constraints.maxWidth - _scheduleChipWidth) / 2,
+          );
+          if (_scheduleViewportWidth != constraints.maxWidth) {
+            _scheduleViewportWidth = constraints.maxWidth;
+            _scheduleAutoCentered = false;
+          }
+          _scheduleSidePadding = horizontalPadding;
+          final layoutDays = days;
+          if (!_scheduleAutoCentered && constraints.maxWidth > 0) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _scheduleAutoCentered = true;
+              _scrollToSelectedDateIndex(
+                layoutDays: layoutDays,
+                animate: false,
+              );
+            });
+          }
+          return Stack(
+            alignment: Alignment.center,
+            children: [
+              NotificationListener<ScrollNotification>(
+                onNotification: (notification) {
+                  if (notification is ScrollEndNotification) {
+                    _handleScheduleScrollEnd(ranges, disabledDays, layoutDays);
+                  }
+                  return false;
+                },
+                child: SingleChildScrollView(
+                  controller: _scheduleScrollController,
+                  scrollDirection: Axis.horizontal,
+                  physics: const BouncingScrollPhysics(),
+                  padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
+                  child: Row(
+                    children: List.generate(layoutDays.length, (index) {
+                      final date = layoutDays[index];
+                      final bool disabled = _isDateDisabled(
+                        date,
+                        ranges,
+                        disabledDays,
+                      );
+                      final chipOpacity = disabled ? 0.55 : 1.0;
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 6),
+                        child: Opacity(
+                          opacity: chipOpacity,
+                          child: Container(
+                            width: _scheduleChipWidth,
+                            decoration: BoxDecoration(
+                              color: disabled ? Colors.grey[100] : Colors.white,
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(
+                                color: Colors.grey[300]!,
+                                width: 1,
+                              ),
+                              boxShadow: const [
+                                BoxShadow(
+                                  color: Color(0x08000000),
+                                  blurRadius: 4,
+                                  offset: Offset(0, 1),
+                                ),
+                              ],
+                            ),
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(
+                                  _weekdayFormatter.format(date),
+                                  style: TextStyle(
+                                    color: Colors.black54.withValues(
+                                      alpha: disabled ? 0.4 : 1,
+                                    ),
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 10,
                                   ),
-                            fontWeight: FontWeight.w600,
-                            fontSize: 10,
+                                ),
+                                const SizedBox(height: 3),
+                                Text(
+                                  _dayFormatter.format(date).padLeft(2, '0'),
+                                  style: TextStyle(
+                                    color: Colors.black54.withValues(
+                                      alpha: disabled ? 0.4 : 1,
+                                    ),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
-                        const SizedBox(height: 3),
-                        Text(
-                          intl.DateFormat('d').format(date).padLeft(2, '0'),
-                          style: TextStyle(
-                            color: selected
-                                ? Colors.white
-                                : Colors.black.withValues(
-                                    alpha: pastDate ? 0.4 : 1,
-                                  ),
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
+                      );
+                    }),
                   ),
                 ),
               ),
-            );
-          }),
-        ),
+              IgnorePointer(
+                child: Container(
+                  width: _scheduleChipWidth,
+                  height: 52,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: _tealAccent, width: 1.5),
+                    color: Colors.transparent,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -845,6 +1120,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     final selected = _selectedService == service;
     final bool canSelect = !_lockServiceAndPayment;
     final description = kServiceDescriptions[service] ?? 'Book now with doctor';
+    const Color accent = Color(0xFF00A8A7);
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: GestureDetector(
@@ -852,37 +1128,35 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
             ? () => setState(() => _selectedService = service)
             : null,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          constraints: const BoxConstraints(minHeight: 48),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(14),
             border: Border.all(
-              color: selected ? const Color(0xFF00A8A7) : Colors.grey[300]!,
+              color: selected ? accent : Colors.grey[300]!,
+              width: selected ? 1.5 : 1,
             ),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withValues(alpha: 0.05),
-                blurRadius: 10,
+                color: Colors.black.withValues(alpha: selected ? 0.08 : 0.03),
+                blurRadius: selected ? 12 : 4,
                 offset: const Offset(0, 4),
               ),
             ],
           ),
           child: Row(
             children: [
-              Container(
-                width: 30,
-                height: 30,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFE0F7FA),
-                  borderRadius: BorderRadius.circular(10),
-                ),
+              CircleAvatar(
+                radius: 16,
+                backgroundColor: accent.withValues(alpha: 0.1),
                 child: const Icon(
-                  Icons.video_call_rounded,
-                  color: Color(0xFF00A8A7),
+                  Icons.room_service_outlined,
+                  color: accent,
                   size: 18,
                 ),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -890,8 +1164,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                     Text(
                       service,
                       style: const TextStyle(
-                        fontWeight: FontWeight.w600,
                         fontSize: 12,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                     Text(
@@ -905,20 +1179,17 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                 ),
               ),
               Container(
-                width: 20,
-                height: 20,
+                width: 22,
+                height: 22,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: selected ? const Color(0xFF00A8A7) : Colors.grey,
+                    color: selected ? accent : Colors.grey,
+                    width: 1.5,
                   ),
                 ),
                 child: selected
-                    ? const Icon(
-                        Icons.check,
-                        size: 16,
-                        color: Color(0xFF00A8A7),
-                      )
+                    ? const Icon(Icons.check, size: 16, color: accent)
                     : null,
               ),
               if (!canSelect)
@@ -1090,7 +1361,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
 
   Widget _buildAddPaymentCard() {
     final locked = _lockServiceAndPayment;
-    final displayLabel = _selectedPaymentMethod ?? 'Add payment method';
+    final displayLabel = _selectedPaymentMethod ?? 'Payment methods available';
     final cardContent = Row(
       children: [
         Icon(
@@ -1125,6 +1396,59 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
 
     return GestureDetector(
       onTap: () => setState(() => _showPaymentMethods = !_showPaymentMethods),
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.grey[300]!),
+        ),
+        child: cardContent,
+      ),
+    );
+  }
+
+  Widget _buildAddServiceCard() {
+    final locked = _lockServiceAndPayment;
+    final displayLabel = _selectedService.isNotEmpty
+        ? _selectedService
+        : 'Add services';
+    final cardContent = Row(
+      children: [
+        Icon(
+          Icons.room_service_outlined,
+          color: locked ? Colors.grey : _tealAccent,
+          size: 20,
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            locked ? '$displayLabel (locked)' : displayLabel,
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+          ),
+        ),
+        if (locked)
+          const Icon(Icons.lock_outline, size: 16, color: Colors.black26),
+      ],
+    );
+
+    if (locked) {
+      return Container(
+        constraints: const BoxConstraints(minHeight: 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.grey[300]!),
+        ),
+        child: cardContent,
+      );
+    }
+
+    return GestureDetector(
+      onTap: () =>
+          setState(() => _showServicePreferences = !_showServicePreferences),
       child: Container(
         constraints: const BoxConstraints(minHeight: 48),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -1202,7 +1526,90 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       return value.whereType<String>().toList();
     }
     if (value is String && value.isNotEmpty) return [value];
-    return const [];
+    return const <String>[];
+  }
+
+  List<DateTimeRange> _parseBlockedDateRanges(dynamic raw) {
+    if (raw is Iterable) {
+      final ranges = <DateTimeRange>[];
+      for (final entry in raw) {
+        if (entry is Map<String, dynamic>) {
+          final start = _parseAvailabilityDate(entry['start']);
+          final end = _parseAvailabilityDate(entry['end']);
+          if (start != null && end != null) {
+            ranges.add(
+              DateTimeRange(
+                start: _normalizeDate(start),
+                end: _normalizeDate(end),
+              ),
+            );
+          }
+        }
+      }
+      return ranges;
+    }
+    return const <DateTimeRange>[];
+  }
+
+  DateTime? _parseAvailabilityDate(dynamic value) {
+    if (value == null) return null;
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    if (value is String) return DateTime.tryParse(value);
+    if (value is num) {
+      return DateTime.fromMillisecondsSinceEpoch(value.toInt());
+    }
+    return null;
+  }
+
+  Set<int> _parseUnavailableWeekdays(dynamic raw) {
+    final result = <int>{};
+    if (raw is Iterable) {
+      for (final entry in raw) {
+        if (entry is Map<String, dynamic>) {
+          final available = entry['available'];
+          final dayName = (entry['day'] as String?)?.trim();
+          if (dayName != null) {
+            final weekday = _weekdayFromName(dayName);
+            if (weekday != null && available == false) {
+              result.add(weekday);
+            }
+          }
+        }
+      }
+    }
+    return result;
+  }
+
+  int? _weekdayFromName(String name) {
+    final lookup = {
+      'monday': DateTime.monday,
+      'mon': DateTime.monday,
+      'tuesday': DateTime.tuesday,
+      'tue': DateTime.tuesday,
+      'wednesday': DateTime.wednesday,
+      'wed': DateTime.wednesday,
+      'thursday': DateTime.thursday,
+      'thu': DateTime.thursday,
+      'friday': DateTime.friday,
+      'fri': DateTime.friday,
+      'saturday': DateTime.saturday,
+      'sat': DateTime.saturday,
+      'sunday': DateTime.sunday,
+      'sun': DateTime.sunday,
+    };
+    return lookup[name.toLowerCase()];
+  }
+
+  bool _isDateBlocked(DateTime date, List<DateTimeRange> ranges) {
+    for (final range in ranges) {
+      final start = _normalizeDate(range.start);
+      final end = _normalizeDate(range.end);
+      if (!date.isBefore(start) && !date.isAfter(end)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   List<Map<String, dynamic>> _extractAddressList(dynamic raw) {
@@ -1233,7 +1640,6 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   }
 
   bool _isPastDate(DateTime date) {
-    if (_isBookInAdvance) return false;
     final today = _normalizeDate(DateTime.now());
     return _normalizeDate(date).isBefore(today);
   }
@@ -1263,9 +1669,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       final authUser = FirebaseAuth.instance.currentUser;
       final userSnapshot = authUser != null
           ? await FirebaseFirestore.instance
-              .collection('users')
-              .doc(authUser.uid)
-              .get()
+                .collection('users')
+                .doc(authUser.uid)
+                .get()
           : null;
       final userData = userSnapshot?.data();
       final payerName =
