@@ -3,15 +3,18 @@ import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter/services.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 import 'package:emergencies_disability_assistance_app/widgets/service_tag_chip.dart';
+import 'package:emergencies_disability_assistance_app/utils/map_styles.dart';
 
 import '../../../models/caregiver_model.dart';
 import 'booking_person_screen.dart';
@@ -21,6 +24,7 @@ enum CaregiverCategory { forYou, recommendation, nearby }
 
 const double _maxRuleDistance = 12.0;
 const double _preferredDistance = 6.0;
+const double _maxSearchDistanceKm = 15.0;
 const double _ratingPenaltyThreshold = 3.5;
 const double _minAcceptableRating = 3.0;
 
@@ -31,60 +35,12 @@ const Color _categoryIndicatorColor = Color(0xFFF4F5F7);
 const double _categorySegmentRadius = 26.0;
 const Color _serviceTagBlue = Color(0xFF00A8A7);
 const double _recommendationScoreThreshold = 2200.0;
+const Color _pageBackground = Color(0xFFF7F8FA);
 
 const Color _primaryColor = Color(0xFFF4B63D);
-const double _mapPadding = 32;
-const double _maxCenterZoom = 16.0;
-const double _minCenterZoom = 13.0;
+const double _mapPadding = 56;
 const double _mapMarkerSize = 92.0;
-
-const String _gentleMapStyle = '''
-[
-  {
-    "elementType": "geometry",
-    "stylers": [
-      {
-        "color": "#f7f8fb"
-      }
-    ]
-  },
-  {
-    "elementType": "labels.text.fill",
-    "stylers": [
-      {
-        "color": "#3c415b"
-      }
-    ]
-  },
-  {
-    "featureType": "poi",
-    "elementType": "labels.text.fill",
-    "stylers": [
-      {
-        "color": "#8f92a1"
-      }
-    ]
-  },
-  {
-    "featureType": "road",
-    "elementType": "geometry",
-    "stylers": [
-      {
-        "color": "#dfe1e6"
-      }
-    ]
-  },
-  {
-    "featureType": "transit",
-    "elementType": "geometry",
-    "stylers": [
-      {
-        "color": "#cfd4dc"
-      }
-    ]
-  }
-]
-''';
+const double _boundsExtraFactor = 0.35;
 
 class CaregiverOption {
   CaregiverOption({
@@ -160,7 +116,7 @@ class BookingCaregiverScreen extends StatefulWidget {
 
 class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     with TickerProviderStateMixin {
-  static const double _minSheetSize = 0.40;
+  static const double _minSheetSize = 0.32;
   static const double _maxSheetSize = 0.85;
   static const SpringDescription _panelSpring = SpringDescription(
     mass: 1,
@@ -177,6 +133,10 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   final ScrollController _listController = ScrollController();
   final GlobalKey _listKey = GlobalKey();
   bool _isProgrammaticScroll = false;
+  final Map<String, GlobalKey> _tileKeys = {};
+  Timer? _snapDebounce;
+  Timer? _mapSnapDebounce;
+  bool _isSnapping = false;
   CaregiverCategory _activeCategory = CaregiverCategory.forYou;
 
   List<CaregiverOption> _caregivers = [];
@@ -186,10 +146,15 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   CaregiverOption? _selectedCaregiver;
   Set<Polyline> _route = {};
   Set<Marker> _markers = {};
+  String? _mapCaregiverId;
+  int _markerRequestSeq = 0;
   String? _errorMessage;
-  bool _routingInProgress = false;
   final Map<String, List<LatLng>> _routeCache = {};
+  int _routeRequestSeq = 0;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _caregiverSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _assignedBookingSub;
+  final Set<String> _assignedCaregiverIds = <String>{};
+  List<CaregiverOption> _candidateCaregivers = <CaregiverOption>[];
   DateTime? _lastTap;
   late final AnimationController _shineController;
   late final TabController _categoryTabController;
@@ -198,8 +163,12 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     defaultValue: 'AIzaSyDADYhy-AAeikw72w9jq22FnMDCVXRJark',
   );
   static const double _defaultCameraZoom = 18;
-  static const double _defaultCameraTilt = 0;
-  static const double _defaultCameraBearing = 0;
+  static const double _defaultCameraTilt = 60;
+  static const double _defaultCameraBearing = 180;
+
+  AnimationController? _entryController;
+  Animation<double>? _entryFade;
+  Animation<Offset>? _entrySlide;
 
   final Map<CaregiverCategory, GlobalKey> _sectionKeys = {
     CaregiverCategory.forYou: GlobalKey(),
@@ -211,6 +180,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   late LatLng _currentLatLng;
   List<String> _clientServicePrefs = [];
   CaregiverCategory _selectedCategory = CaregiverCategory.forYou;
+  bool _didInitialHeaderHide = false;
 
   CaregiverModel? get _selectedCaregiverModel {
     final selected = _selectedCaregiver;
@@ -221,6 +191,19 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   @override
   void initState() {
     super.initState();
+    final entryController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+    _entryController = entryController;
+    _entryFade = CurvedAnimation(
+      parent: entryController,
+      curve: Curves.easeOutCubic,
+    );
+    _entrySlide = Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero)
+        .animate(
+          CurvedAnimation(parent: entryController, curve: Curves.easeOutCubic),
+        );
     _panelController = AnimationController(
       vsync: this,
 
@@ -240,6 +223,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     });
     _listController.addListener(_handleScrollCategoryDetection);
     _updatePanelVisuals();
+    _listenAssignedCaregivers();
     _loadClientPreferences();
     _shineController = AnimationController(
       vsync: this,
@@ -250,10 +234,17 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       vsync: this,
       initialIndex: _activeCategory.index,
     );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _entryController?.forward(from: 0);
+    });
   }
 
   @override
   void dispose() {
+    _snapDebounce?.cancel();
+    _mapSnapDebounce?.cancel();
+    _entryController?.dispose();
     _shineController.dispose();
     _categoryTabController.dispose();
     _panelController.dispose();
@@ -262,7 +253,125 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       ..dispose();
     _mapController?.dispose();
     _caregiverSub?.cancel();
+    _assignedBookingSub?.cancel();
     super.dispose();
+  }
+
+  void _listenAssignedCaregivers() {
+    _assignedBookingSub?.cancel();
+    _assignedBookingSub = FirebaseFirestore.instance
+        .collection('bookings')
+        .where('status', isEqualTo: 'ASSIGNED')
+        .snapshots()
+        .listen((snapshot) {
+      final next = <String>{};
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final caregiverId = (data['caregiverId'] as String?)?.trim() ?? '';
+        if (caregiverId.isNotEmpty) next.add(caregiverId);
+      }
+      if (setEquals(next, _assignedCaregiverIds)) return;
+      setState(() {
+        _assignedCaregiverIds
+          ..clear()
+          ..addAll(next);
+      });
+      _rebuildFromCandidates();
+    }, onError: (_) {});
+  }
+
+  GlobalKey _tileKeyFor(String caregiverId, CaregiverCategory category) {
+    final k = '${category.index}:$caregiverId';
+    return _tileKeys.putIfAbsent(k, () => GlobalKey());
+  }
+
+  List<CaregiverOption> _itemsForCategory(CaregiverCategory category) {
+    if (category == CaregiverCategory.forYou) return _caregivers;
+    if (category == CaregiverCategory.recommendation) return _recommendations;
+    if (category == CaregiverCategory.nearby) return _nearbyCaregivers;
+    return <CaregiverOption>[];
+  }
+
+  void _scheduleSnapToNearestTile() {
+    if (_isProgrammaticScroll || _isSnapping) return;
+    if (_panelController.value > 0.05) return;
+    _snapDebounce?.cancel();
+    _snapDebounce = Timer(
+      const Duration(milliseconds: 120),
+      _snapToNearestTile,
+    );
+  }
+
+  void _snapToNearestTile() {
+    try {
+      if (!mounted) return;
+      if (_isProgrammaticScroll || _isSnapping) return;
+      if (!_listController.hasClients) return;
+      if (_loadingCaregivers) return;
+
+      final listBox = _listKey.currentContext?.findRenderObject() as RenderBox?;
+      if (listBox == null) return;
+
+      final double anchorY = listBox.localToGlobal(Offset.zero).dy + 20;
+      final category = _activeCategory;
+      final List<CaregiverOption> caregiversInCategory = _itemsForCategory(
+        category,
+      );
+      if (caregiversInCategory.isEmpty) return;
+
+      CaregiverOption? best;
+      double bestDist = double.infinity;
+      for (final c in caregiversInCategory) {
+        final ctx = _tileKeyFor(c.id, category).currentContext;
+        if (ctx == null) continue;
+        final box = ctx.findRenderObject() as RenderBox?;
+        if (box == null || !box.hasSize) continue;
+        final y = box.localToGlobal(Offset.zero).dy;
+        final dist = (y - anchorY).abs();
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = c;
+        }
+      }
+
+      if (best == null) return;
+      if (bestDist < 2.0 &&
+          _selectedCaregiver?.id == best.id &&
+          _mapCaregiverId == best.id) {
+        return;
+      }
+
+      _isSnapping = true;
+      if (_selectedCaregiver?.id != best.id || _selectedCategory != category) {
+        _updateRouteAndMap(best, sourceCategory: category, fromSnap: true);
+      }
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          _isSnapping = false;
+          return;
+        }
+        final ctx = _tileKeyFor(best!.id, category).currentContext;
+        if (ctx == null || !ctx.mounted) {
+          _isSnapping = false;
+          return;
+        }
+        _isProgrammaticScroll = true;
+        Scrollable.ensureVisible(
+          ctx,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+          alignment: 0.08,
+        ).whenComplete(() {
+          _isProgrammaticScroll = false;
+          _isSnapping = false;
+        });
+      });
+    } catch (e, st) {
+      debugPrint('Snap error: $e');
+      debugPrint('$st');
+      _isSnapping = false;
+    }
   }
 
   Future<void> _loadClientPreferences() async {
@@ -293,6 +402,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       _caregivers = [];
       _selectedCaregiver = null;
       _markers = {_selectedMarker()};
+      _mapCaregiverId = null;
       _route = {};
     });
     _caregiverSub = FirebaseFirestore.instance
@@ -302,7 +412,22 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   }
 
   void _handleCaregiverSnapshot(QuerySnapshot<Map<String, dynamic>> snapshot) {
-    final list = snapshot.docs.map(_mapDocToCaregiverOption).toList();
+    if (!mounted) return;
+    final list = snapshot.docs
+        .map(_mapDocToCaregiverOption)
+        .where((c) => c.distanceKm <= _maxSearchDistanceKm)
+        .toList();
+    _candidateCaregivers = list;
+    _rebuildFromCandidates();
+  }
+
+  void _rebuildFromCandidates() {
+    if (!mounted) return;
+    if (_candidateCaregivers.isEmpty) return;
+    final list = _candidateCaregivers
+        .where((c) => c.distanceKm <= _maxSearchDistanceKm)
+        .where((c) => !_assignedCaregiverIds.contains(c.id))
+        .toList();
     if (list.isEmpty) {
       setState(() {
         _caregivers = [];
@@ -312,7 +437,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         _selectedCaregiver = null;
         _markers = {_selectedMarker()};
         _route = {};
-        _errorMessage = 'No caregiver found nearby.';
+        _errorMessage =
+            'Tiada caregiver dalam ${_maxSearchDistanceKm.toStringAsFixed(0)}km.';
       });
       return;
     }
@@ -327,7 +453,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         _selectedCaregiver = null;
         _markers = {_selectedMarker()};
         _route = {};
-        _errorMessage = 'No caregiver found nearby.';
+        _errorMessage =
+            'Tiada caregiver dalam ${_maxSearchDistanceKm.toStringAsFixed(0)}km.';
       });
       return;
     }
@@ -343,10 +470,23 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       _selectedCategory = CaregiverCategory.forYou;
       _errorMessage = null;
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_didInitialHeaderHide) return;
+      if (!_listController.hasClients) return;
+      _didInitialHeaderHide = true;
+      final maxExtent = _listController.position.maxScrollExtent;
+      final offset = min(maxExtent, 34.0);
+      if (offset > 0) {
+        _listController.jumpTo(offset);
+      }
+      _scheduleSnapToNearestTile();
+    });
     _updateRouteAndMap(selected, sourceCategory: CaregiverCategory.forYou);
   }
 
   void _handleCaregiverError(Object error) {
+    if (!mounted) return;
     setState(() {
       _caregivers = [];
       _recommendations = [];
@@ -376,7 +516,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         _latLngFromMap(primaryAddress) ?? _latLngFromDocument(data);
     final double distanceKm = loc != null
         ? _distanceKm(_currentLatLng, loc)
-        : 0.0;
+        : double.infinity;
     final double rating = (data['rating'] as num?)?.toDouble() ?? 4.5;
     final String addressLine = _buildAddressLine(primaryAddress);
 
@@ -590,6 +730,20 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         _selectedCaregiver = first;
       });
       _categoryTabController.animateTo(current.index);
+      if (first != null) {
+        _updateRouteAndMap(
+          first,
+          sourceCategory: current,
+          fromSnap: true,
+          ignoreThrottle: true,
+        );
+      } else {
+        setState(() {
+          _markers = {_selectedMarker()};
+          _mapCaregiverId = null;
+          _route = {};
+        });
+      }
     }
   }
 
@@ -620,6 +774,23 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         _isProgrammaticScroll = false;
       });
     });
+
+    // Pastikan map ikut caregiver category baru (terutamanya Recommendation),
+    // walaupun snap tak trigger (contoh best tile == first).
+    if (first != null) {
+      _updateRouteAndMap(
+        first,
+        sourceCategory: category,
+        fromSnap: true,
+        ignoreThrottle: true,
+      );
+    } else {
+      setState(() {
+        _markers = {_selectedMarker()};
+        _mapCaregiverId = null;
+        _route = {};
+      });
+    }
   }
 
   CaregiverOption? _firstInCategory(CaregiverCategory category) {
@@ -702,6 +873,14 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   }
 
   void _openScheduleSheet() {
+    final caregiver = _selectedCaregiverModel;
+    if (caregiver == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select a caregiver first')),
+      );
+      return;
+    }
+
     DateTime selected = DateTime.now().add(const Duration(minutes: 30));
     showModalBottomSheet<void>(
       context: context,
@@ -711,87 +890,598 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
       builder: (ctx) {
-        return Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.of(ctx).viewInsets.bottom,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(height: 12),
-              Container(
-                width: 38,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.grey[400],
-                  borderRadius: BorderRadius.circular(24),
+        final availabilityFuture = FirebaseFirestore.instance
+            .collection('availability')
+            .doc(caregiver.id)
+            .get();
+
+        return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          future: availabilityFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return Padding(
+                padding: EdgeInsets.only(
+                  bottom: MediaQuery.of(ctx).viewInsets.bottom,
                 ),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'Choose date and time',
-                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17),
-              ),
-              SizedBox(
-                height: 220,
-                child: CupertinoDatePicker(
-                  minimumDate: DateTime.now(),
-                  initialDateTime: selected,
-                  mode: CupertinoDatePickerMode.dateAndTime,
-                  onDateTimeChanged: (v) => selected = v,
-                ),
-              ),
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                child: Text(
-                  'Use this sheet to set the date and time for your scheduled booking.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.black54, fontSize: 12),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: () {
-                      Navigator.of(ctx).pop();
-                      final startTime = TimeOfDay.fromDateTime(selected);
-                      _goToSummary(
-                        scheduleDate: selected,
-                        startTime: startTime,
-                        endTime: _endTimeFromStart(startTime),
-                        showSchedule: true,
-                      );
-                    },
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      backgroundColor: const Color(0xFFF4B63D),
-                      foregroundColor: Colors.black,
-                      textStyle: const TextStyle(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const SizedBox(height: 12),
+                    Container(
+                      width: 38,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[400],
+                        borderRadius: BorderRadius.circular(24),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Schedule booking',
+                      style: TextStyle(
                         fontWeight: FontWeight.w800,
-                        fontSize: 15,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(18),
+                        fontSize: 16,
                       ),
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: const [
-                        Icon(Icons.calendar_today, color: Colors.black),
-                        SizedBox(width: 8),
-                        Text('Book in advance'),
-                      ],
+                    const SizedBox(height: 18),
+                    const SizedBox(
+                      height: 220,
+                      child: Center(child: CircularProgressIndicator()),
                     ),
-                  ),
+                    const SizedBox(height: 20),
+                  ],
                 ),
-              ),
-            ],
-          ),
+              );
+            }
+
+            final data = snapshot.data?.data() ?? const <String, dynamic>{};
+            final blockedRanges = _parseBlockedDateRanges(data['blockedDates']);
+            final disabledWeekdays = _parseUnavailableWeekdays(
+              data['weeklySchedule'],
+            );
+            final weeklyRanges = _parseWeeklyTimeRanges(data['weeklySchedule']);
+
+            DateTime normalize(DateTime d) => DateTime(d.year, d.month, d.day);
+            bool isBlocked(DateTime day) {
+              final date = normalize(day);
+              for (final range in blockedRanges) {
+                final start = normalize(range.start);
+                final end = normalize(range.end);
+                if (!date.isBefore(start) && !date.isAfter(end)) return true;
+              }
+              return false;
+            }
+
+            bool isAvailableDay(DateTime day) {
+              final date = normalize(day);
+              final today = normalize(DateTime.now());
+              if (date.isBefore(today)) return false;
+              if (disabledWeekdays.contains(date.weekday)) return false;
+              if (isBlocked(date)) return false;
+              if (!weeklyRanges.containsKey(date.weekday)) return false;
+              return true;
+            }
+
+            final today = normalize(DateTime.now());
+            final availableDays = <DateTime>[];
+            for (int i = 0; i < 180; i++) {
+              final day = today.add(Duration(days: i));
+              if (isAvailableDay(day)) availableDays.add(day);
+              if (availableDays.length >= 120) break;
+            }
+
+            DateTime selectedDay = availableDays.isNotEmpty
+                ? availableDays.first
+                : today;
+            TimeOfDay selectedTime = TimeOfDay.fromDateTime(selected);
+            selectedTime = _alignTimeToInterval(selectedTime, 15);
+            return StatefulBuilder(
+              builder: (context, setModalState) {
+                final weeklyRanges = _parseWeeklyTimeRanges(
+                  data['weeklySchedule'],
+                );
+                final dayRange = weeklyRanges[selectedDay.weekday];
+                final slots = dayRange == null
+                    ? const <TimeOfDay>[]
+                    : _generateTimeSlots(
+                        start: dayRange.start,
+                        end: dayRange.end,
+                        minuteInterval: 15,
+                      );
+                if (slots.isNotEmpty) {
+                  final currentIndex = slots.indexWhere(
+                    (t) =>
+                        t.hour == selectedTime.hour &&
+                        t.minute == selectedTime.minute,
+                  );
+                  if (currentIndex < 0) {
+                    selectedTime = slots.first;
+                  }
+                }
+                String weekdayLabel(DateTime day) => const [
+                  'Mon',
+                  'Tue',
+                  'Wed',
+                  'Thu',
+                  'Fri',
+                  'Sat',
+                  'Sun',
+                ][day.weekday - 1];
+
+                String monthLabel(int month) => const [
+                  'Jan',
+                  'Feb',
+                  'Mar',
+                  'Apr',
+                  'May',
+                  'Jun',
+                  'Jul',
+                  'Aug',
+                  'Sep',
+                  'Oct',
+                  'Nov',
+                  'Dec',
+                ][month - 1];
+
+                String selectedDateLabel(DateTime day) {
+                  return '${weekdayLabel(day)}, ${day.day} ${monthLabel(day.month)} ${day.year}';
+                }
+
+                String timeLabel(TimeOfDay t) {
+                  final h = t.hour.toString().padLeft(2, '0');
+                  final m = t.minute.toString().padLeft(2, '0');
+                  return '$h:$m';
+                }
+
+                return Padding(
+                  padding: EdgeInsets.only(
+                    bottom: MediaQuery.of(ctx).viewInsets.bottom,
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(height: 12),
+                      Container(
+                        width: 38,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: Colors.grey[400],
+                          borderRadius: BorderRadius.circular(24),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'Choose date & time',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 17,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.event_available_rounded,
+                              size: 18,
+                              color: Colors.black87,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                availableDays.isEmpty
+                                    ? 'No available dates'
+                                    : '${selectedDateLabel(selectedDay)} • ${timeLabel(selectedTime)}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.black54,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (availableDays.isEmpty) ...[
+                        const SizedBox(height: 18),
+                        const SizedBox(
+                          height: 120,
+                          child: Center(
+                            child: Text(
+                              'No available dates found.',
+                              style: TextStyle(
+                                color: Colors.black54,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ] else ...[
+                        const SizedBox(height: 14),
+                        const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 16),
+                          child: Text(
+                            'Date',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w800,
+                              fontSize: 13,
+                              color: Colors.black87,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          height: 74,
+                          child: ListView.separated(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            scrollDirection: Axis.horizontal,
+                            itemCount: availableDays.length,
+                            separatorBuilder: (_, __) =>
+                                const SizedBox(width: 8),
+                            itemBuilder: (context, index) {
+                              final day = availableDays[index];
+                              final isSelected =
+                                  day.year == selectedDay.year &&
+                                  day.month == selectedDay.month &&
+                                  day.day == selectedDay.day;
+                              return GestureDetector(
+                                onTap: () => setModalState(() {
+                                  selectedDay = day;
+                                  final range = weeklyRanges[day.weekday];
+                                  final daySlots = range == null
+                                      ? const <TimeOfDay>[]
+                                      : _generateTimeSlots(
+                                          start: range.start,
+                                          end: range.end,
+                                          minuteInterval: 15,
+                                        );
+                                  if (daySlots.isNotEmpty) {
+                                    selectedTime = daySlots.first;
+                                  }
+                                }),
+                                child: Container(
+                                  width: 58,
+                                  decoration: BoxDecoration(
+                                    color: isSelected
+                                        ? _caregiverMatchAccent.withValues(
+                                            alpha: 0.10,
+                                          )
+                                        : Colors.white,
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(
+                                      color: isSelected
+                                          ? _caregiverMatchAccent
+                                          : Colors.grey.shade300,
+                                      width: isSelected ? 1.6 : 1,
+                                    ),
+                                    boxShadow: const [
+                                      BoxShadow(
+                                        color: Color(0x08000000),
+                                        blurRadius: 4,
+                                        offset: Offset(0, 1),
+                                      ),
+                                    ],
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 8,
+                                  ),
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Text(
+                                        weekdayLabel(day),
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w700,
+                                          color: Colors.black54,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        day.day.toString().padLeft(2, '0'),
+                                        style: TextStyle(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w800,
+                                          color: isSelected
+                                              ? _caregiverMatchAccent
+                                              : Colors.black87,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 16),
+                          child: Text(
+                            'Start time',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w800,
+                              fontSize: 13,
+                              color: Colors.black87,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          height: 180,
+                          child: slots.isEmpty
+                              ? const Center(
+                                  child: Text(
+                                    'No available times for this day.',
+                                    style: TextStyle(
+                                      color: Colors.black54,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                )
+                              : CupertinoPicker(
+                                  scrollController: FixedExtentScrollController(
+                                    initialItem: slots
+                                        .indexWhere(
+                                          (t) =>
+                                              t.hour == selectedTime.hour &&
+                                              t.minute == selectedTime.minute,
+                                        )
+                                        .clamp(0, slots.length - 1),
+                                  ),
+                                  itemExtent: 40,
+                                  magnification: 1.06,
+                                  useMagnifier: true,
+                                  onSelectedItemChanged: (index) =>
+                                      setModalState(() {
+                                        selectedTime = slots[index];
+                                      }),
+                                  children: [
+                                    for (final slot in slots)
+                                      Center(
+                                        child: Text(
+                                          _formatTime24(slot),
+                                          style: const TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                        ),
+                      ],
+                      const Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 8,
+                        ),
+                        child: Text(
+                          'Select a date and start time.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.black54, fontSize: 11),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            onPressed: availableDays.isEmpty || slots.isEmpty
+                                ? null
+                                : () {
+                                    Navigator.of(ctx).pop();
+                                    final scheduled = DateTime(
+                                      selectedDay.year,
+                                      selectedDay.month,
+                                      selectedDay.day,
+                                      selectedTime.hour,
+                                      selectedTime.minute,
+                                    );
+                                    final startTime = TimeOfDay.fromDateTime(
+                                      scheduled,
+                                    );
+                                    _goToSummary(
+                                      scheduleDate: scheduled,
+                                      startTime: startTime,
+                                      endTime: _endTimeFromStart(startTime),
+                                      showSchedule: true,
+                                    );
+                                  },
+                            style: ElevatedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              backgroundColor: const Color(0xFFF4B63D),
+                              foregroundColor: Colors.black,
+                              textStyle: const TextStyle(
+                                fontWeight: FontWeight.w800,
+                                fontSize: 15,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: const [Text('Book in advance')],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
         );
       },
     );
+  }
+
+  List<DateTimeRange> _parseBlockedDateRanges(dynamic raw) {
+    final ranges = <DateTimeRange>[];
+    if (raw is Iterable) {
+      for (final entry in raw) {
+        if (entry is! Map) continue;
+        final map = Map<String, dynamic>.from(entry);
+        final start = _parseAvailabilityDate(map['start']);
+        final end = _parseAvailabilityDate(map['end']);
+        if (start == null || end == null) continue;
+        ranges.add(DateTimeRange(start: start, end: end));
+      }
+    }
+    return ranges;
+  }
+
+  DateTime? _parseAvailabilityDate(dynamic value) {
+    if (value == null) return null;
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    if (value is String) return DateTime.tryParse(value);
+    if (value is num) {
+      return DateTime.fromMillisecondsSinceEpoch(value.toInt());
+    }
+    return null;
+  }
+
+  Set<int> _parseUnavailableWeekdays(dynamic raw) {
+    final result = <int>{};
+    if (raw is Iterable) {
+      for (final entry in raw) {
+        if (entry is! Map) continue;
+        final map = Map<String, dynamic>.from(entry);
+        final dynamic availableRaw = map['available'];
+        final bool? isAvailable = switch (availableRaw) {
+          final bool v => v,
+          final String v =>
+            v.toLowerCase() == 'true'
+                ? true
+                : v.toLowerCase() == 'false'
+                ? false
+                : null,
+          final num v => v != 0,
+          _ => null,
+        };
+        final dayName = (map['day'] as String?)?.trim();
+        if (dayName == null || dayName.isEmpty) continue;
+        final weekday = _weekdayFromName(dayName);
+        if (weekday != null && isAvailable == false) {
+          result.add(weekday);
+        }
+      }
+    }
+    return result;
+  }
+
+  int? _weekdayFromName(String name) {
+    final lookup = {
+      'monday': DateTime.monday,
+      'mon': DateTime.monday,
+      'tuesday': DateTime.tuesday,
+      'tue': DateTime.tuesday,
+      'wednesday': DateTime.wednesday,
+      'wed': DateTime.wednesday,
+      'thursday': DateTime.thursday,
+      'thu': DateTime.thursday,
+      'friday': DateTime.friday,
+      'fri': DateTime.friday,
+      'saturday': DateTime.saturday,
+      'sat': DateTime.saturday,
+      'sunday': DateTime.sunday,
+      'sun': DateTime.sunday,
+    };
+    return lookup[name.toLowerCase()];
+  }
+
+  TimeOfDay _alignTimeToInterval(TimeOfDay time, int minuteInterval) {
+    if (minuteInterval <= 1) return time;
+    final totalMinutes = (time.hour * 60) + time.minute;
+    final alignedTotal = (totalMinutes ~/ minuteInterval) * minuteInterval;
+    final hour = (alignedTotal ~/ 60) % 24;
+    final minute = alignedTotal % 60;
+    return TimeOfDay(hour: hour, minute: minute);
+  }
+
+  String _formatTime24(TimeOfDay time) {
+    final h = time.hour.toString().padLeft(2, '0');
+    final m = time.minute.toString().padLeft(2, '0');
+    return '$h:$m';
+  }
+
+  Map<int, _WeeklyTimeRange> _parseWeeklyTimeRanges(dynamic raw) {
+    final result = <int, _WeeklyTimeRange>{};
+    if (raw is Iterable) {
+      for (final entry in raw) {
+        if (entry is! Map) continue;
+        final map = Map<String, dynamic>.from(entry);
+        final dayName = (map['day'] as String?)?.trim();
+        if (dayName == null || dayName.isEmpty) continue;
+        final weekday = _weekdayFromName(dayName);
+        if (weekday == null) continue;
+
+        final dynamic availableRaw = map['available'];
+        final bool? isAvailable = switch (availableRaw) {
+          final bool v => v,
+          final String v =>
+            v.toLowerCase() == 'true'
+                ? true
+                : v.toLowerCase() == 'false'
+                ? false
+                : null,
+          final num v => v != 0,
+          _ => null,
+        };
+        if (isAvailable != true) continue;
+
+        final startRaw = (map['start'] as String?)?.trim();
+        final endRaw = (map['end'] as String?)?.trim();
+        final start = _parseTimeOfDay(startRaw);
+        final end = _parseTimeOfDay(endRaw);
+        if (start == null || end == null) continue;
+
+        result[weekday] = _WeeklyTimeRange(start: start, end: end);
+      }
+    }
+    return result;
+  }
+
+  TimeOfDay? _parseTimeOfDay(String? value) {
+    if (value == null || value.isEmpty) return null;
+    final parts = value.split(':');
+    if (parts.length != 2) return null;
+    final h = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (h == null || m == null) return null;
+    if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+    return TimeOfDay(hour: h, minute: m);
+  }
+
+  List<TimeOfDay> _generateTimeSlots({
+    required TimeOfDay start,
+    required TimeOfDay end,
+    required int minuteInterval,
+  }) {
+    final startMinutes = start.hour * 60 + start.minute;
+    final endMinutes = end.hour * 60 + end.minute;
+    if (minuteInterval <= 0 || endMinutes <= startMinutes) return const [];
+
+    int first = startMinutes;
+    if (first % minuteInterval != 0) {
+      first = ((first ~/ minuteInterval) + 1) * minuteInterval;
+    }
+    int last = endMinutes;
+    last = (last ~/ minuteInterval) * minuteInterval;
+
+    final slots = <TimeOfDay>[];
+    for (int m = first; m < last; m += minuteInterval) {
+      slots.add(TimeOfDay(hour: (m ~/ 60) % 24, minute: m % 60));
+    }
+    return slots;
   }
 
   @override
@@ -806,23 +1496,18 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                     ? widget.person.address
                     : 'Care location'));
     final double panelHeight = _currentSheetHeight(context);
-    final double minSheetHeightPx = _minSheetHeightPx(context);
-    final double mapHeight = max(
-      0.1,
-      MediaQuery.of(context).size.height - minSheetHeightPx,
-    );
-    _lastMapHeight = mapHeight;
-    _lastPanelHeight = panelHeight;
-    _lastMinSheetHeight = minSheetHeightPx;
     final double bottomInset = MediaQuery.of(context).padding.bottom;
     final double frontBottom = _hideFrontPanel
         ? -110
         : (bottomInset + 2).clamp(4.0, double.infinity);
+    final entryFade = _entryFade ?? const AlwaysStoppedAnimation<double>(1);
+    final entrySlide =
+        _entrySlide ?? const AlwaysStoppedAnimation<Offset>(Offset.zero);
     const BorderRadius panelBorderRadius = BorderRadius.vertical(
       top: Radius.circular(18),
     );
     return Scaffold(
-      backgroundColor: Colors.grey[50],
+      backgroundColor: _pageBackground,
       appBar: AppBar(
         backgroundColor: Colors.white,
         elevation: 0,
@@ -857,155 +1542,182 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
           ),
         ),
       ),
-      body: SafeArea(
-        child: Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: Colors.grey.withOpacity(0.25)),
-            borderRadius: BorderRadius.circular(18),
-          ),
-          clipBehavior: Clip.hardEdge,
-          child: Stack(
-            children: [
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: _minSheetHeightPx(context),
-                child: GoogleMap(
-                  padding: EdgeInsets.only(
-                    bottom: max(_currentSheetHeight(context) - 32, 24),
+      body: FadeTransition(
+        opacity: entryFade,
+        child: SlideTransition(
+          position: entrySlide,
+          child: SafeArea(
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                border: Border.all(
+                  color: Colors.black12.withValues(alpha: 0.08),
+                ),
+                borderRadius: BorderRadius.circular(18),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.10),
+                    blurRadius: 18,
+                    offset: const Offset(0, 8),
                   ),
-                  initialCameraPosition: _cameraPosition(_currentLatLng),
-                  myLocationEnabled: false,
-                  zoomControlsEnabled: false,
-                  markers: _markers.isNotEmpty ? _markers : {_selectedMarker()},
-                  polylines: _route,
-                  onMapCreated: (c) {
-                    _mapController = c;
-                  },
-                ),
+                ],
               ),
-              IgnorePointer(
-                ignoring: true,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  color: Colors.black.withValues(alpha: _backdropOpacity),
-                ),
-              ),
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                height: panelHeight,
-                child: ClipRRect(
-                  borderRadius: panelBorderRadius,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: panelBorderRadius,
-                      border: Border.all(color: Colors.grey[200]!),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x1F000000),
-                          blurRadius: 14,
-                          offset: Offset(0, -3),
-                        ),
-                      ],
+              clipBehavior: Clip.hardEdge,
+              child: Stack(
+                children: [
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: _minSheetHeightPx(context),
+                    child: GoogleMap(
+                      initialCameraPosition: _cameraPosition(_currentLatLng),
+                      style: boldMapStyle,
+                      myLocationEnabled: false,
+                      zoomControlsEnabled: false,
+                      markers: _markers.isNotEmpty
+                          ? _markers
+                          : {_selectedMarker()},
+                      polylines: _route,
+                      onMapCreated: (c) {
+                        _mapController = c;
+                      },
                     ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.max,
-                      children: [
-                        GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onVerticalDragStart: _onHandleDragStart,
-                          onVerticalDragUpdate: _onHandleDragUpdate,
-                          onVerticalDragEnd: _onHandleDragEnd,
-                          child: SizedBox(
-                            height: 42,
-                            width: double.infinity,
-                            child: Center(
-                              child: Container(
-                                width: 38,
-                                height: 4,
-                                decoration: BoxDecoration(
-                                  color: Colors.grey[400],
-                                  borderRadius: BorderRadius.circular(24),
+                  ),
+                  IgnorePointer(
+                    ignoring: true,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      color: Colors.black.withValues(alpha: _backdropOpacity),
+                    ),
+                  ),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    height: panelHeight,
+                    child: ClipRRect(
+                      borderRadius: panelBorderRadius,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: panelBorderRadius,
+                          border: Border.all(
+                            color: Colors.black12.withValues(alpha: 0.08),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.10),
+                              blurRadius: 18,
+                              offset: const Offset(0, -6),
+                            ),
+                          ],
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onVerticalDragStart: _onHandleDragStart,
+                              onVerticalDragUpdate: _onHandleDragUpdate,
+                              onVerticalDragEnd: _onHandleDragEnd,
+                              child: SizedBox(
+                                height: 42,
+                                width: double.infinity,
+                                child: Center(
+                                  child: Container(
+                                    width: 38,
+                                    height: 4,
+                                    decoration: BoxDecoration(
+                                      color: Colors.black.withValues(
+                                        alpha: 0.16,
+                                      ),
+                                      borderRadius: BorderRadius.circular(24),
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
-                        ),
-                        _categoryTabs(show: _panelController.value > 0.05),
-                        const Divider(height: 1),
-                        Expanded(
-                          child: NotificationListener<ScrollNotification>(
-                            onNotification: (notification) {
-                              if (notification is ScrollUpdateNotification ||
-                                  notification is ScrollEndNotification) {
-                                _handleScrollCategoryDetection();
-                              }
-                              return false;
-                            },
-                            child: ListView(
-                              key: _listKey,
-                              controller: _listController,
-                              padding: EdgeInsets.only(
-                                left: 12,
-                                right: 12,
-                                top: 8,
-                                bottom:
-                                    MediaQuery.of(context).padding.bottom + 160,
-                              ),
-                              children: [
-                                if (_loadingCaregivers)
-                                  const Padding(
-                                    padding: EdgeInsets.all(24),
-                                    child: Center(
-                                      child: CircularProgressIndicator(),
-                                    ),
-                                  )
-                                else if (_caregivers.isEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.all(24),
-                                    child: Center(
-                                      child: _buildNoCaregiversHint(
-                                        message:
-                                            _errorMessage ??
-                                            'No caregivers nearby',
-                                      ),
-                                    ),
-                                  )
-                                else
-                                  ...CaregiverCategory.values.map(
-                                    _categorySection,
+                            _categoryTabs(show: _panelController.value > 0.05),
+                            const Divider(height: 1),
+                            Expanded(
+                              child: NotificationListener<ScrollNotification>(
+                                onNotification: (notification) {
+                                  if (notification
+                                      is ScrollUpdateNotification) {
+                                    _handleScrollCategoryDetection();
+                                  } else if (notification
+                                          is ScrollEndNotification ||
+                                      (notification is UserScrollNotification &&
+                                          notification.direction ==
+                                              ScrollDirection.idle)) {
+                                    _handleScrollCategoryDetection();
+                                    _scheduleSnapToNearestTile();
+                                  }
+                                  return false;
+                                },
+                                child: ListView(
+                                  key: _listKey,
+                                  controller: _listController,
+                                  padding: EdgeInsets.only(
+                                    left: 12,
+                                    right: 12,
+                                    top: 8,
+                                    bottom:
+                                        MediaQuery.of(context).padding.bottom +
+                                        160,
                                   ),
-                              ],
+                                  children: [
+                                    if (_loadingCaregivers)
+                                      const Padding(
+                                        padding: EdgeInsets.all(24),
+                                        child: Center(
+                                          child: CircularProgressIndicator(),
+                                        ),
+                                      )
+                                    else if (_caregivers.isEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.all(24),
+                                        child: Center(
+                                          child: _buildNoCaregiversHint(
+                                            message:
+                                                _errorMessage ??
+                                                'No caregivers nearby',
+                                          ),
+                                        ),
+                                      )
+                                    else
+                                      ...CaregiverCategory.values.map(
+                                        _categorySection,
+                                      ),
+                                  ],
+                                ),
+                              ),
                             ),
-                          ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
-                ),
-              ),
-              AnimatedPositioned(
-                duration: const Duration(milliseconds: 240),
-                curve: Curves.easeOut,
-                left: 8,
-                right: 8,
-                bottom: frontBottom,
-                child: Container(
-                  decoration: BoxDecoration(
-                    border: Border.all(
-                      color: Colors.grey.withOpacity(0.32),
-                      width: 1,
+                  AnimatedPositioned(
+                    duration: const Duration(milliseconds: 240),
+                    curve: Curves.easeOut,
+                    left: 8,
+                    right: 8,
+                    bottom: frontBottom,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        border: Border.all(
+                          color: Colors.black12.withValues(alpha: 0.08),
+                        ),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: _frontSheet(subtitle),
                     ),
-                    borderRadius: BorderRadius.circular(16),
                   ),
-                  child: _frontSheet(subtitle),
-                ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -1272,7 +1984,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
             _labelFor(category),
             style: const TextStyle(
               fontWeight: FontWeight.w800,
-              fontSize: 12,
+              fontSize: 13,
               color: Colors.black87,
             ),
           ),
@@ -1344,227 +2056,225 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     final prefsLower = _clientServicePrefs
         .map((e) => e.toLowerCase().trim())
         .toSet();
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 5),
-      constraints: const BoxConstraints(minHeight: 84, maxHeight: 110),
-      decoration: BoxDecoration(
-        color: isSelected ? const Color(0xFFE3F2FF) : Colors.white,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: isSelected ? const Color(0xFF00B8C6) : Colors.grey[200]!,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.03),
-            blurRadius: 4,
-            offset: const Offset(0, 1),
+    return KeyedSubtree(
+      key: _tileKeyFor(caregiver.id, tileCategory),
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 5),
+        constraints: const BoxConstraints(minHeight: 92, maxHeight: 124),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFFE8F4FF) : Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: isSelected
+                ? const Color(0xFF00B8C6)
+                : Colors.black12.withValues(alpha: 0.08),
           ),
-        ],
-      ),
-      child: InkWell(
-        onTap: () =>
-            _updateRouteAndMap(caregiver, sourceCategory: tileCategory),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              CircleAvatar(
-                radius: 24,
-                backgroundColor: accent.withValues(alpha: 0.18),
-                backgroundImage: hasAvatar
-                    ? NetworkImage(caregiver.avatarUrl!.trim())
-                    : null,
-                child: hasAvatar
-                    ? null
-                    : Text(
-                        initials,
-                        style: const TextStyle(
-                          color: Colors.black54,
-                          fontWeight: FontWeight.w700,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.10),
+              blurRadius: 14,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: InkWell(
+          onTap: () =>
+              _updateRouteAndMap(caregiver, sourceCategory: tileCategory),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                DefaultProfileAvatar(
+                  radius: 26,
+                  photoUrl: caregiver.avatarUrl?.trim(),
+                  label: caregiver.name,
+                  backgroundColor: accent,
+                  accentColor: Colors.black54,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.center,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          caregiver.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 13,
+                          ),
                         ),
-                      ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Align(
-                  alignment: Alignment.center,
+                        const SizedBox(height: 3),
+                        Row(
+                          mainAxisAlignment:
+                              tileCategory == CaregiverCategory.recommendation
+                              ? MainAxisAlignment.start
+                              : MainAxisAlignment.center,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.star,
+                              size: 14,
+                              color: Color(0xFFF4B63D),
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              caregiver.rating.toStringAsFixed(1),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 11,
+                                color: Colors.black87,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Icon(
+                              Icons.timer,
+                              size: 14,
+                              color: Color(0xFFF4B63D),
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              'Est. ${(max(caregiver.distanceKm, 0.6) / 0.6).ceil()} mins',
+                              style: const TextStyle(
+                                color: Colors.black87,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Icon(
+                              Icons.place,
+                              size: 14,
+                              color: Color(0xFFF4B63D),
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              '${caregiver.distanceKm.toStringAsFixed(1)} km',
+                              style: const TextStyle(
+                                color: Colors.black87,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        SizedBox(
+                          height: 20,
+                          child: ListView(
+                            scrollDirection: Axis.horizontal,
+                            children: _serviceChips(
+                              servicesDisplay,
+                              prefsLower: prefsLower,
+                              isRecommendation: isRecommendation,
+                              matchCount: caregiver.matchCount,
+                            ),
+                          ),
+                        ),
+                        if (isRecommendation && reasons.isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          Center(
+                            child: SizedBox(
+                              height: 26,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.center,
+                                children: [
+                                  Expanded(
+                                    child: SingleChildScrollView(
+                                      scrollDirection: Axis.horizontal,
+                                      physics: const BouncingScrollPhysics(),
+                                      child: Row(
+                                        mainAxisAlignment:
+                                            tileCategory ==
+                                                CaregiverCategory.recommendation
+                                            ? MainAxisAlignment.start
+                                            : MainAxisAlignment.center,
+                                        children: reasons
+                                            .map(
+                                              (reason) => Padding(
+                                                padding: const EdgeInsets.only(
+                                                  right: 4,
+                                                ),
+                                                child: ServiceTagChip(
+                                                  label: reason,
+                                                  backgroundColor:
+                                                      _serviceTagBlue.withAlpha(
+                                                        46,
+                                                      ),
+                                                  foregroundColor:
+                                                      _serviceTagBlue,
+                                                  borderColor: _serviceTagBlue,
+                                                  fontSize: 8,
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 6,
+                                                        vertical: 2,
+                                                      ),
+                                                  minHeight: 18,
+                                                ),
+                                              ),
+                                            )
+                                            .toList(),
+                                      ),
+                                    ),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(
+                                      Icons.info_outline,
+                                      size: 18,
+                                      color: Color(0xFFF4B63D),
+                                    ),
+                                    padding: const EdgeInsets.all(4),
+                                    constraints: const BoxConstraints(),
+                                    onPressed: () =>
+                                        _showRecommendationDialog(reasons),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+                SizedBox(
+                  width: 64,
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      Text(
-                        caregiver.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 11,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
                       Row(
-                        mainAxisAlignment:
-                            tileCategory == CaregiverCategory.recommendation
-                            ? MainAxisAlignment.start
-                            : MainAxisAlignment.center,
                         mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
-                          const Icon(
-                            Icons.star,
-                            size: 12,
-                            color: Color(0xFFF4B63D),
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            caregiver.rating.toStringAsFixed(1),
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w600,
-                              fontSize: 10,
-                              color: Colors.black87,
-                            ),
+                          Container(
+                            height: 32,
+                            width: 1,
+                            color: Colors.grey.withValues(alpha: 0.25),
                           ),
                           const SizedBox(width: 8),
-                          const Icon(
-                            Icons.timer,
-                            size: 12,
-                            color: Color(0xFFF4B63D),
-                          ),
-                          const SizedBox(width: 4),
                           Text(
-                            'Est. ${(max(caregiver.distanceKm, 0.6) / 0.6).ceil()} mins',
+                            caregiver.price,
+                            textAlign: TextAlign.center,
                             style: const TextStyle(
-                              color: Colors.black87,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          const Icon(
-                            Icons.place,
-                            size: 12,
-                            color: Color(0xFFF4B63D),
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            '${caregiver.distanceKm.toStringAsFixed(1)} km',
-                            style: const TextStyle(
-                              color: Colors.black87,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w600,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 11,
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 4),
-                      SizedBox(
-                        height: 20,
-                        child: ListView(
-                          scrollDirection: Axis.horizontal,
-                          children: _serviceChips(
-                            servicesDisplay,
-                            prefsLower: prefsLower,
-                            isRecommendation: isRecommendation,
-                            matchCount: caregiver.matchCount,
-                          ),
-                        ),
-                      ),
-                      if (isRecommendation && reasons.isNotEmpty) ...[
-                        const SizedBox(height: 6),
-                        Center(
-                          child: SizedBox(
-                            height: 26,
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.center,
-                              children: [
-                                Expanded(
-                                  child: SingleChildScrollView(
-                                    scrollDirection: Axis.horizontal,
-                                    physics: const BouncingScrollPhysics(),
-                                    child: Row(
-                                      mainAxisAlignment:
-                                          tileCategory ==
-                                              CaregiverCategory.recommendation
-                                          ? MainAxisAlignment.start
-                                          : MainAxisAlignment.center,
-                                      children: reasons
-                                          .map(
-                                            (reason) => Padding(
-                                              padding: const EdgeInsets.only(
-                                                right: 4,
-                                              ),
-                                              child: ServiceTagChip(
-                                                label: reason,
-                                                backgroundColor: _serviceTagBlue
-                                                    .withAlpha(46),
-                                                foregroundColor:
-                                                    _serviceTagBlue,
-                                                borderColor: _serviceTagBlue,
-                                                fontSize: 8,
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                      horizontal: 6,
-                                                      vertical: 2,
-                                                    ),
-                                                minHeight: 18,
-                                              ),
-                                            ),
-                                          )
-                                          .toList(),
-                                    ),
-                                  ),
-                                ),
-                                IconButton(
-                                  icon: const Icon(
-                                    Icons.info_outline,
-                                    size: 18,
-                                    color: Color(0xFFF4B63D),
-                                  ),
-                                  padding: const EdgeInsets.all(4),
-                                  constraints: const BoxConstraints(),
-                                  onPressed: () =>
-                                      _showRecommendationDialog(reasons),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
                     ],
                   ),
                 ),
-              ),
-              SizedBox(
-                width: 64,
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        Container(
-                          height: 32,
-                          width: 1,
-                          color: Colors.grey.withValues(alpha: 0.25),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          caregiver.price,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w800,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -1572,15 +2282,31 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   }
 
   Future<void> _updateRouteAndMap(
-    CaregiverOption? caregiver, {
+    Object? caregiver, {
     CaregiverCategory? sourceCategory,
+    bool fromSnap = false,
+    bool ignoreThrottle = false,
   }) async {
-    if (caregiver == null) return;
+    if (caregiver is! CaregiverOption) {
+      if (caregiver != null) {
+        debugPrint(
+          'Ignoring invalid caregiver selection type=${caregiver.runtimeType}',
+        );
+      }
+      return;
+    }
+    if (!mounted) return;
+    final int requestSeq = ++_routeRequestSeq;
     final now = DateTime.now();
     final bool sameCaregiver = _selectedCaregiver?.id == caregiver.id;
+    final bool shouldThrottle = !(fromSnap || ignoreThrottle);
     final bool tappedTooFast =
-        _lastTap != null && now.difference(_lastTap!).inMilliseconds < 220;
-    _lastTap = now;
+        shouldThrottle &&
+        _lastTap != null &&
+        now.difference(_lastTap!).inMilliseconds < 220;
+    if (shouldThrottle) {
+      _lastTap = now;
+    }
     setState(() {
       _selectedCaregiver = caregiver;
       final cat = sourceCategory ?? CaregiverCategory.forYou;
@@ -1588,12 +2314,57 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       _selectedCategory = cat;
     });
 
+    // Smooth snapping: update markers immediately, then debounce the heavy
+    // route + camera fitting so the map can "catch up" even if snapping fast.
+    if (fromSnap && caregiver.latLng != null) {
+      final LatLng caregiverLoc = caregiver.latLng!;
+      BitmapDescriptor personIcon = BitmapDescriptor.defaultMarkerWithHue(
+        BitmapDescriptor.hueOrange,
+      );
+      for (final m in _markers) {
+        if (m.markerId == const MarkerId('person')) {
+          personIcon = m.icon;
+        }
+      }
+      setState(() {
+        _markers = {
+          Marker(
+            markerId: const MarkerId('person'),
+            position: _currentLatLng,
+            icon: personIcon,
+          ),
+          Marker(
+            markerId: const MarkerId('caregiver'),
+            position: caregiverLoc,
+            // Elak tunjuk avatar caregiver lama bila snap laju.
+            icon: BitmapDescriptor.defaultMarkerWithHue(
+              BitmapDescriptor.hueAzure,
+            ),
+          ),
+        };
+        _mapCaregiverId = caregiver.id;
+        _route = {};
+      });
+      _mapSnapDebounce?.cancel();
+      _mapSnapDebounce = Timer(const Duration(milliseconds: 180), () {
+        if (!mounted) return;
+        final current = _selectedCaregiver;
+        if (current == null) return;
+        _updateRouteAndMap(
+          current,
+          sourceCategory: _selectedCategory,
+          ignoreThrottle: true,
+        );
+      });
+      return;
+    }
+
     if (sameCaregiver && _route.isNotEmpty) {
       // only update scroll highlight
       return;
     }
 
-    if (caregiver.latLng == null || _routingInProgress) {
+    if (caregiver.latLng == null) {
       setState(() {
         _markers = {_selectedMarker()};
         _route = {};
@@ -1602,13 +2373,16 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     }
 
     final LatLng caregiverLoc = caregiver.latLng!;
+    if (!mounted || requestSeq != _routeRequestSeq) return;
     final BitmapDescriptor personIcon = await _personAvatarIcon(
       size: _mapMarkerSize,
     );
+    if (!mounted || requestSeq != _routeRequestSeq) return;
     final BitmapDescriptor caregiverIcon = await _caregiverAvatarIcon(
       caregiver,
       size: _mapMarkerSize,
     );
+    if (!mounted || requestSeq != _routeRequestSeq) return;
     final Marker personMarker = Marker(
       markerId: const MarkerId('person'),
       position: _currentLatLng,
@@ -1628,35 +2402,44 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       return;
     }
 
-    _routingInProgress = true;
     final List<LatLng> points =
         cached ?? await _buildRoadRoutePoints(_currentLatLng, caregiverLoc);
-    _routingInProgress = false;
+    if (!mounted || requestSeq != _routeRequestSeq) return;
     _routeCache[cacheKey] = points;
 
     setState(() {
       _markers = {personMarker, caregiverMarker};
+      _mapCaregiverId = caregiver.id;
     });
     _animateRoute(points);
 
     await _updateSelectedMarkers();
-    await _fitMapToPins(_currentLatLng, caregiverLoc);
+    if (!mounted || requestSeq != _routeRequestSeq) return;
+    await _fitMapToPins(_currentLatLng, caregiverLoc, routePoints: points);
     if (_panelController.value > 0.01) {
       _animatePanelTo(0);
     }
     await _updateSelectedMarkers();
   }
 
-  static const double _maxCenterZoom = 16.0;
-  static const double _minCenterZoom = 13.0;
-  double _lastMapHeight = 0;
-  double _lastPanelHeight = 0;
-  double _lastMinSheetHeight = 0;
-
-  Future<void> _fitMapToPins(LatLng a, LatLng b) async {
+  Future<void> _fitMapToPins(
+    LatLng a,
+    LatLng b, {
+    List<LatLng>? routePoints,
+  }) async {
     if (_mapController == null) return;
-    final LatLngBounds bounds = _boundsFromPoints(a, b);
+    final LatLngBounds bounds = _boundsFromPoints(
+      a,
+      b,
+      extraPoints: routePoints,
+    );
     try {
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLngBounds(bounds, _mapPadding),
+      );
+      // Run twice to reduce Android/iOS inconsistencies (tilt + long distance).
+      await Future.delayed(const Duration(milliseconds: 200));
+      if (!mounted || _mapController == null) return;
       await _mapController!.animateCamera(
         CameraUpdate.newLatLngBounds(bounds, _mapPadding),
       );
@@ -1664,29 +2447,31 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       await _mapController!.animateCamera(_cameraUpdate(_midpoint(a, b)));
       return;
     }
-    if (!mounted) return;
-    final double distanceKm = _distanceKm(a, b);
-    final double zoom = _zoomForDistance(
-      distanceKm,
-    ).clamp(_minCenterZoom, _maxCenterZoom);
-    final LatLng center = _boundsCenter(bounds);
-    final double latSpan =
-        (bounds.northeast.latitude - bounds.southwest.latitude).abs();
-    final double verticalShift = _panelHeightShift(latSpan);
-    final LatLng shiftedCenter = LatLng(
-      _clampLatitude(center.latitude + verticalShift),
-      center.longitude,
-    );
-    await _centerCameraOn(shiftedCenter, zoom);
   }
 
-  LatLngBounds _boundsFromPoints(LatLng a, LatLng b) {
-    final double latMin = min(a.latitude, b.latitude);
-    final double latMax = max(a.latitude, b.latitude);
-    final double lngMin = min(a.longitude, b.longitude);
-    final double lngMax = max(a.longitude, b.longitude);
-    final double latDelta = max(0.0005, latMax - latMin);
-    final double lngDelta = max(0.0005, lngMax - lngMin);
+  LatLngBounds _boundsFromPoints(
+    LatLng a,
+    LatLng b, {
+    List<LatLng>? extraPoints,
+  }) {
+    double latMin = min(a.latitude, b.latitude);
+    double latMax = max(a.latitude, b.latitude);
+    double lngMin = min(a.longitude, b.longitude);
+    double lngMax = max(a.longitude, b.longitude);
+    final points = extraPoints;
+    if (points != null && points.isNotEmpty) {
+      // Sample points to avoid heavy loops on long polylines.
+      final int stride = max(1, (points.length / 120).floor());
+      for (int i = 0; i < points.length; i += stride) {
+        final p = points[i];
+        latMin = min(latMin, p.latitude);
+        latMax = max(latMax, p.latitude);
+        lngMin = min(lngMin, p.longitude);
+        lngMax = max(lngMax, p.longitude);
+      }
+    }
+    final double latDelta = max(0.0005, (latMax - latMin) * _boundsExtraFactor);
+    final double lngDelta = max(0.0005, (lngMax - lngMin) * _boundsExtraFactor);
     return LatLngBounds(
       southwest: LatLng(latMin - latDelta, lngMin - lngDelta),
       northeast: LatLng(latMax + latDelta, lngMax + lngDelta),
@@ -1698,39 +2483,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       (a.latitude + b.latitude) / 2,
       (a.longitude + b.longitude) / 2,
     );
-  }
-
-  double _clampLatitude(double value) {
-    return value.clamp(-85.0, 85.0);
-  }
-
-  double _panelHeightShift(double latSpan) {
-    if (_lastMapHeight <= 0) return 0;
-    final double overlay = max(0, _lastPanelHeight - _lastMinSheetHeight);
-    final double ratio = (overlay / _lastMapHeight).clamp(0.0, 0.5);
-    return latSpan * ratio;
-  }
-
-  double _zoomForDistance(double distanceKm) {
-    if (distanceKm <= 0.2) return 17.0;
-    if (distanceKm <= 0.5) return 16.5;
-    if (distanceKm <= 1.2) return 16.0;
-    if (distanceKm <= 3) return 15.2;
-    if (distanceKm <= 5) return 14.5;
-    if (distanceKm <= 10) return 13.4;
-    return 12.2;
-  }
-
-  LatLng _boundsCenter(LatLngBounds bounds) {
-    return LatLng(
-      (bounds.northeast.latitude + bounds.southwest.latitude) / 2,
-      (bounds.northeast.longitude + bounds.southwest.longitude) / 2,
-    );
-  }
-
-  Future<void> _centerCameraOn(LatLng center, double zoom) async {
-    if (_mapController == null) return;
-    await _mapController!.animateCamera(_cameraUpdate(center, zoom: zoom));
   }
 
   CameraPosition _cameraPosition(
@@ -1842,9 +2594,13 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
 
   Future<void> _updateSelectedMarkers() async {
     if (!mounted) return;
+    final int requestSeq = ++_markerRequestSeq;
+    final caregiverSnapshot = _selectedCaregiver;
+    final caregiverIdSnapshot = caregiverSnapshot?.id;
     final BitmapDescriptor personIcon = await _personAvatarIcon(
       size: _mapMarkerSize,
     );
+    if (!mounted || requestSeq != _markerRequestSeq) return;
     final Set<Marker> markers = {
       Marker(
         markerId: const MarkerId('person'),
@@ -1852,16 +2608,21 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         icon: personIcon,
       ),
     };
-    final caregiver = _selectedCaregiver;
+    final caregiver = caregiverSnapshot;
     if (caregiver?.latLng != null) {
       final selectedCaregiver = caregiver!;
       final caregiverIcon = await _caregiverAvatarIcon(
         selectedCaregiver,
         size: _mapMarkerSize,
       );
+      if (!mounted ||
+          requestSeq != _markerRequestSeq ||
+          _selectedCaregiver?.id != caregiverIdSnapshot) {
+        return;
+      }
       markers.add(
         Marker(
-          markerId: MarkerId('caregiver_${selectedCaregiver.id}'),
+          markerId: const MarkerId('caregiver'),
           position: selectedCaregiver.latLng!,
           icon: caregiverIcon,
         ),
@@ -1870,6 +2631,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     if (!mounted) return;
     setState(() {
       _markers = markers;
+      _mapCaregiverId = caregiver?.latLng != null ? caregiver!.id : null;
     });
   }
 
@@ -2270,4 +3032,11 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
     );
   }
+}
+
+class _WeeklyTimeRange {
+  const _WeeklyTimeRange({required this.start, required this.end});
+
+  final TimeOfDay start;
+  final TimeOfDay end;
 }

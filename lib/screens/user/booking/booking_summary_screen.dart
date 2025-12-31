@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:math';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:intl/intl.dart' as intl;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
@@ -15,6 +17,7 @@ import '../../../models/caregiver_model.dart';
 const Color _tealAccent = Color(0xFF00A8A7);
 const Color _actionGold = Color(0xFFF4B63D);
 const Color _bookingAppBarText = Color(0xFF1B1D29);
+const Color _pageBackground = Color(0xFFF7F8FA);
 const TextStyle _sectionLabelTextStyle = TextStyle(
   fontSize: 14,
   fontWeight: FontWeight.w600,
@@ -22,6 +25,33 @@ const TextStyle _sectionLabelTextStyle = TextStyle(
 );
 final _weekdayFormatter = intl.DateFormat('EEE');
 final _dayFormatter = intl.DateFormat('d');
+
+class _SlowScrollPhysics extends BouncingScrollPhysics {
+  const _SlowScrollPhysics({super.parent, required this.speedFactor})
+    : assert(speedFactor > 0);
+
+  final double speedFactor;
+
+  @override
+  _SlowScrollPhysics applyTo(ScrollPhysics? ancestor) {
+    return _SlowScrollPhysics(
+      parent: buildParent(ancestor),
+      speedFactor: speedFactor,
+    );
+  }
+
+  @override
+  double applyPhysicsToUserOffset(ScrollMetrics position, double offset) {
+    return super.applyPhysicsToUserOffset(position, offset) * speedFactor;
+  }
+}
+
+class _WeeklyTimeRange {
+  const _WeeklyTimeRange({required this.start, required this.end});
+
+  final TimeOfDay start;
+  final TimeOfDay end;
+}
 
 class BookingSummaryScreen extends StatefulWidget {
   const BookingSummaryScreen({
@@ -59,17 +89,23 @@ class BookingSummaryScreen extends StatefulWidget {
   State<BookingSummaryScreen> createState() => _BookingSummaryScreenState();
 }
 
-class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
+class _BookingSummaryScreenState extends State<BookingSummaryScreen>
+    with WidgetsBindingObserver {
   bool _isLoading = false;
   String _selectedService = '';
   static const bool _forceToyyibTestAmount = true;
   late DateTime _selectedDate;
+  late DateTime _scheduleAnchorDate;
   late List<TimeOfDay> _timeOptions;
   late int _selectedTimeIndex;
   late bool _isBookInAdvance;
   bool _showPaymentMethods = false;
   bool _showServicePreferences = false;
   String? _selectedPaymentMethod;
+  String? _pendingPaymentBillCode;
+  bool _awaitingPaymentResult = false;
+  bool _paymentFailureDialogShown = false;
+  bool _paymentSuccessDialogShown = false;
   late PersonProfile _currentPerson;
   late AddressItem _activeAddress;
   static const double _scheduleChipWidth = 52;
@@ -77,18 +113,42 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   final ScrollController _scheduleScrollController = ScrollController();
   double _scheduleViewportWidth = 0;
   double _scheduleSidePadding = 0;
+  double _scheduleMinOffset = 0;
   bool _scheduleScrollAnimating = false;
   bool _scheduleAutoCentered = false;
+  String? _scheduleCenterKey;
+  Timer? _scheduleSnapDebounce;
+  List<DateTime> _scheduleLayoutDaysSnapshot = const <DateTime>[];
+  List<DateTimeRange> _scheduleRangesSnapshot = const <DateTimeRange>[];
+  Set<int> _scheduleDisabledWeekdaysSnapshot = const <int>{};
+  int? _scheduleLastSnappedIndex;
+  static const _SlowScrollPhysics _scheduleScrollPhysics = _SlowScrollPhysics(
+    speedFactor: 0.7,
+  );
+
+  static const double _timeChipWidth = 60;
+  static const double _timeChipSpacing = 68;
+  final ScrollController _timeScrollController = ScrollController();
+  double _timeViewportWidth = 0;
+  double _timeSidePadding = 0;
+  double _timeMinOffset = 0;
+  bool _timeScrollAnimating = false;
+  bool _timeAutoCentered = false;
+  String? _timeCenterKey;
+  Timer? _timeSnapDebounce;
+  Map<int, _WeeklyTimeRange> _weeklyTimeRanges = const {};
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _currentPerson = widget.person;
     _activeAddress = widget.selectedAddress;
     final now = DateTime.now();
     _selectedDate = widget.showScheduleSection
         ? _clampToFuture(widget.scheduleDate)
         : now;
+    _scheduleAnchorDate = _normalizeDate(_selectedDate);
     final baseOptions = List.generate(11, (index) {
       final hour = 8 + index;
       return TimeOfDay(hour: hour, minute: 0);
@@ -107,29 +167,211 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       _selectedTimeIndex = _timeOptions.length - 1;
     }
     _isBookInAdvance = widget.showScheduleSection;
+    if (_isBookInAdvance) {
+      _timeOptions = const <TimeOfDay>[];
+      _selectedTimeIndex = 0;
+    }
     if (widget.lockedService?.isNotEmpty == true) {
       _selectedService = widget.lockedService!;
     }
     _selectedPaymentMethod = widget.lockedPaymentMethod;
   }
 
-  void _setSelectedDate(
-    DateTime date, {
-    required List<DateTimeRange> ranges,
-    required Set<int> disabledWeekdays,
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkPendingPaymentStatus();
+    }
+  }
+
+  Future<void> _checkPendingPaymentStatus() async {
+    if (!_awaitingPaymentResult) return;
+    final billCode = _pendingPaymentBillCode;
+    if (billCode == null || billCode.isEmpty) return;
+
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('payments')
+          .doc(billCode)
+          .get();
+      final data = snap.data();
+      final rawStatus = data?['status'];
+      final paymentStatus = (data?['paymentStatus'] as String?)
+          ?.trim()
+          .toUpperCase();
+      final int? statusValue = rawStatus is num ? rawStatus.toInt() : null;
+
+      final bool isPaid = statusValue == 1 || paymentStatus == 'PAID';
+      final bool isFailed = statusValue == 3 || paymentStatus == 'FAILED';
+
+      if (isPaid) {
+        if (!mounted) return;
+        setState(() {
+          _awaitingPaymentResult = false;
+          _pendingPaymentBillCode = null;
+          _paymentFailureDialogShown = false;
+          _paymentSuccessDialogShown = true;
+        });
+        await _showPaymentResultDialog(
+          title: 'Payment successful',
+          message: 'Your booking has been placed successfully.',
+        );
+        return;
+      }
+
+      if (isFailed && !_paymentFailureDialogShown) {
+        if (!mounted) return;
+        setState(() {
+          _paymentFailureDialogShown = true;
+          _awaitingPaymentResult = false;
+          _pendingPaymentBillCode = null;
+        });
+        await _showPaymentErrorDialog('Payment failed. Please try again.');
+      }
+    } catch (_) {
+      // ignore payment status polling errors on resume
+    }
+  }
+
+  int _nearestScheduleIndex({
     required List<DateTime> layoutDays,
-    bool animate = true,
+    required double center,
   }) {
-    final normalized = _clampToFuture(date);
-    final index = layoutDays.indexWhere((d) => _isSameDay(d, normalized));
-    if (index < 0) return;
-    if (_isSameDay(_selectedDate, normalized)) {
-      _scrollToDateIndex(index, animate: animate);
+    final exactIndex =
+        (center - _scheduleSidePadding - (_scheduleChipWidth / 2)) /
+        _scheduleChipSpacing;
+    final baseIndex = exactIndex.floor();
+    int nearestIndex = baseIndex.clamp(0, layoutDays.length - 1);
+    double bestDistance = double.infinity;
+    for (int i = baseIndex - 8; i <= baseIndex + 8; i++) {
+      if (i < 0 || i >= layoutDays.length) continue;
+      final itemCenter =
+          _scheduleSidePadding +
+          (i * _scheduleChipSpacing) +
+          (_scheduleChipWidth / 2);
+      final distance = (itemCenter - center).abs();
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        nearestIndex = i;
+      }
+    }
+    return nearestIndex;
+  }
+
+  int _nearestTimeIndex({required int itemCount, required double center}) {
+    final exactIndex =
+        (center - _timeSidePadding - (_timeChipWidth / 2)) / _timeChipSpacing;
+    final baseIndex = exactIndex.floor();
+    int nearestIndex = baseIndex.clamp(0, itemCount - 1);
+    double bestDistance = double.infinity;
+    for (int i = baseIndex - 8; i <= baseIndex + 8; i++) {
+      if (i < 0 || i >= itemCount) continue;
+      final itemCenter =
+          _timeSidePadding + (i * _timeChipSpacing) + (_timeChipWidth / 2);
+      final distance = (itemCenter - center).abs();
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        nearestIndex = i;
+      }
+    }
+    return nearestIndex;
+  }
+
+  TimeOfDay get _selectedStartTimeValue {
+    if (_timeOptions.isNotEmpty &&
+        _selectedTimeIndex >= 0 &&
+        _selectedTimeIndex < _timeOptions.length) {
+      return _timeOptions[_selectedTimeIndex];
+    }
+    return widget.startTime;
+  }
+
+  void _syncTimeOptionsForDate(DateTime date) {
+    if (!_isBookInAdvance) return;
+    final next = _buildTimeOptionsForDate(date, _weeklyTimeRanges);
+    if (next.isEmpty) {
+      if (_timeOptions.isNotEmpty) {
+        setState(() {
+          _timeOptions = const <TimeOfDay>[];
+          _selectedTimeIndex = 0;
+          _timeAutoCentered = false;
+        });
+      }
       return;
     }
-    setState(() => _selectedDate = normalized);
+
+    final currentSelected = _timeOptions.isNotEmpty
+        ? _selectedStartTimeValue
+        : null;
+    int newIndex = currentSelected == null
+        ? -1
+        : next.indexWhere(
+            (t) =>
+                t.hour == currentSelected.hour &&
+                t.minute == currentSelected.minute,
+          );
+    if (newIndex < 0) {
+      final wantedStart = widget.startTime;
+      newIndex = next.indexWhere(
+        (t) => t.hour == wantedStart.hour && t.minute == wantedStart.minute,
+      );
+    }
+    if (newIndex < 0) newIndex = 0;
+
+    final firstAllowedIndex = next.indexWhere((t) => !_isTimeDisabled(t));
+    if (firstAllowedIndex >= 0 && newIndex < firstAllowedIndex) {
+      newIndex = firstAllowedIndex;
+    }
+
+    final sameList =
+        _timeOptions.length == next.length &&
+        _timeOptions.asMap().entries.every((e) {
+          final t = next[e.key];
+          return t.hour == e.value.hour && t.minute == e.value.minute;
+        });
+    if (sameList && _selectedTimeIndex == newIndex) return;
+
+    setState(() {
+      _timeOptions = next;
+      _selectedTimeIndex = newIndex.clamp(0, _timeOptions.length - 1);
+      _timeAutoCentered = false;
+    });
+  }
+
+  List<TimeOfDay> _buildTimeOptionsForDate(
+    DateTime date,
+    Map<int, _WeeklyTimeRange> ranges,
+  ) {
+    final range = ranges[date.weekday];
+    if (range == null) return const <TimeOfDay>[];
+    return _generateTimeSlots(
+      start: range.start,
+      end: range.end,
+      minuteInterval: 15,
+    );
+  }
+
+  void _updateWeeklyTimeRanges(Map<int, _WeeklyTimeRange> next) {
+    bool equals(Map<int, _WeeklyTimeRange> a, Map<int, _WeeklyTimeRange> b) {
+      if (a.length != b.length) return false;
+      for (final entry in a.entries) {
+        final other = b[entry.key];
+        if (other == null) return false;
+        if (other.start.hour != entry.value.start.hour ||
+            other.start.minute != entry.value.start.minute ||
+            other.end.hour != entry.value.end.hour ||
+            other.end.minute != entry.value.end.minute) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    if (equals(_weeklyTimeRanges, next)) return;
+    setState(() => _weeklyTimeRanges = Map<int, _WeeklyTimeRange>.from(next));
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _scrollToDateIndex(index, animate: animate);
+      if (!mounted) return;
+      _syncTimeOptionsForDate(_selectedDate);
     });
   }
 
@@ -140,65 +382,107 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   ) {
     if (_scheduleScrollAnimating ||
         !_scheduleScrollController.hasClients ||
-        _scheduleViewportWidth <= 0) {
+        layoutDays.isEmpty) {
       return;
     }
-    final center =
-        _scheduleScrollController.offset + (_scheduleViewportWidth / 2);
-    final rawIndex = (center / _scheduleChipSpacing).round();
-    final candidateIndex = rawIndex.clamp(0, layoutDays.length - 1) as int;
-    final candidateDate = layoutDays[candidateIndex];
-    final disabled = _isDateDisabled(candidateDate, ranges, disabledWeekdays);
-    if (!disabled) {
-      if (!_isSameDay(_selectedDate, candidateDate)) {
-        _setSelectedDate(
-          candidateDate,
-          ranges: ranges,
-          disabledWeekdays: disabledWeekdays,
-          layoutDays: layoutDays,
-        );
-      } else {
-        _scrollToDateIndex(candidateIndex);
-      }
-      return;
-    }
-    final fallbackIndex = _nextAvailableIndex(
-      candidateIndex,
-      ranges,
-      disabledWeekdays,
-      layoutDays,
+    final viewport = _scheduleScrollController.position.viewportDimension;
+    if (viewport <= 0) return;
+    final center = _scheduleScrollController.offset + (viewport / 2);
+    int candidateIndex = _nearestScheduleIndex(
+      layoutDays: layoutDays,
+      center: center,
     );
-    if (fallbackIndex != null) {
-      final fallbackDate = layoutDays[fallbackIndex];
-      _setSelectedDate(
-        fallbackDate,
-        ranges: ranges,
-        disabledWeekdays: disabledWeekdays,
-        layoutDays: layoutDays,
-      );
-    } else {
-      _scrollToDateIndex(candidateIndex);
+    final firstAllowedIndex = layoutDays.indexWhere((d) => !_isPastDate(d));
+    if (firstAllowedIndex >= 0 && candidateIndex < firstAllowedIndex) {
+      candidateIndex = firstAllowedIndex;
     }
+    final candidateDate = layoutDays[candidateIndex];
+    if (!_isSameDay(candidateDate, _selectedDate)) {
+      setState(() => _selectedDate = candidateDate);
+      _syncTimeOptionsForDate(candidateDate);
+    }
+    _scheduleLastSnappedIndex = candidateIndex;
+    _scrollToDateIndex(candidateIndex);
+  }
+
+  void _handleTimeScrollEnd() {
+    if (_timeScrollAnimating ||
+        !_timeScrollController.hasClients ||
+        _timeOptions.isEmpty) {
+      return;
+    }
+    final viewport = _timeScrollController.position.viewportDimension;
+    if (viewport <= 0) return;
+
+    final center = _timeScrollController.offset + (viewport / 2);
+    int candidateIndex = _nearestTimeIndex(
+      itemCount: _timeOptions.length,
+      center: center,
+    );
+
+    final firstAllowedIndex = _timeOptions.indexWhere(
+      (t) => !_isTimeDisabled(t),
+    );
+    if (firstAllowedIndex >= 0 && candidateIndex < firstAllowedIndex) {
+      candidateIndex = firstAllowedIndex;
+    }
+
+    if (candidateIndex != _selectedTimeIndex) {
+      setState(() => _selectedTimeIndex = candidateIndex);
+    }
+    _scrollToTimeIndex(candidateIndex);
   }
 
   void _scrollToSelectedDateIndex({
     required List<DateTime> layoutDays,
+    required List<DateTimeRange> ranges,
+    required Set<int> disabledWeekdays,
     bool animate = false,
   }) {
     final index = layoutDays.indexWhere((d) => _isSameDay(d, _selectedDate));
-    if (index >= 0) {
-      _scrollToDateIndex(index, animate: animate);
+    if (index >= 0) return _scrollToDateIndex(index, animate: animate);
+
+    int? fallbackIndex;
+    int bestDelta = 1 << 30;
+    for (int i = 0; i < layoutDays.length; i++) {
+      final day = layoutDays[i];
+      if (_isDateDisabled(day, ranges, disabledWeekdays)) continue;
+      final delta = (day.difference(_selectedDate).inDays).abs();
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        fallbackIndex = i;
+      }
     }
+    if (fallbackIndex == null) return;
+    final fallbackDate = layoutDays[fallbackIndex];
+    if (_isSameDay(fallbackDate, _selectedDate)) {
+      return _scrollToDateIndex(fallbackIndex, animate: animate);
+    }
+    setState(() => _selectedDate = fallbackDate);
+    _syncTimeOptionsForDate(fallbackDate);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollToDateIndex(fallbackIndex!, animate: animate);
+    });
+  }
+
+  void _scrollToSelectedTimeIndex({bool animate = false}) {
+    if (_selectedTimeIndex < 0 || _selectedTimeIndex >= _timeOptions.length) {
+      return;
+    }
+    _scrollToTimeIndex(_selectedTimeIndex, animate: animate);
   }
 
   void _scrollToDateIndex(int index, {bool animate = true}) {
-    if (!_scheduleScrollController.hasClients || _scheduleViewportWidth <= 0)
+    if (!_scheduleScrollController.hasClients) {
       return;
+    }
+    final viewport = _scheduleScrollController.position.viewportDimension;
+    if (viewport <= 0) return;
     final targetCenter =
         index * _scheduleChipSpacing +
         _scheduleSidePadding +
         (_scheduleChipWidth / 2);
-    final desired = targetCenter - (_scheduleViewportWidth / 2);
+    final desired = targetCenter - (viewport / 2);
     final maxExtent = _scheduleScrollController.position.maxScrollExtent;
     final target = desired.clamp(0.0, maxExtent);
     _scheduleScrollAnimating = true;
@@ -216,6 +500,30 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     }
   }
 
+  void _scrollToTimeIndex(int index, {bool animate = true}) {
+    if (!_timeScrollController.hasClients) return;
+    final viewport = _timeScrollController.position.viewportDimension;
+    if (viewport <= 0) return;
+    final targetCenter =
+        index * _timeChipSpacing + _timeSidePadding + (_timeChipWidth / 2);
+    final desired = targetCenter - (viewport / 2);
+    final maxExtent = _timeScrollController.position.maxScrollExtent;
+    final target = desired.clamp(_timeMinOffset, maxExtent);
+    _timeScrollAnimating = true;
+    if (animate) {
+      _timeScrollController
+          .animateTo(
+            target,
+            duration: const Duration(milliseconds: 240),
+            curve: Curves.easeOut,
+          )
+          .whenComplete(() => _timeScrollAnimating = false);
+    } else {
+      _timeScrollController.jumpTo(target);
+      _timeScrollAnimating = false;
+    }
+  }
+
   bool _isDateDisabled(
     DateTime date,
     List<DateTimeRange> ranges,
@@ -226,24 +534,13 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         disabledWeekdays.contains(date.weekday);
   }
 
-  int? _nextAvailableIndex(
-    int fromIndex,
-    List<DateTimeRange> ranges,
-    Set<int> disabledWeekdays,
-    List<DateTime> layoutDays,
-  ) {
-    for (int i = fromIndex + 1; i < layoutDays.length; i++) {
-      if (!_isDateDisabled(layoutDays[i], ranges, disabledWeekdays)) return i;
-    }
-    for (int i = fromIndex - 1; i >= 0; i--) {
-      if (!_isDateDisabled(layoutDays[i], ranges, disabledWeekdays)) return i;
-    }
-    return null;
-  }
-
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _scheduleSnapDebounce?.cancel();
+    _timeSnapDebounce?.cancel();
     _scheduleScrollController.dispose();
+    _timeScrollController.dispose();
     super.dispose();
   }
 
@@ -253,9 +550,17 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
 
   bool get _canUseAddressPicker => widget.enableClientAddressSelection;
 
+  bool get _hasSelectedService {
+    final lockedValue = widget.lockedService?.trim() ?? '';
+    if (_lockServiceAndPayment && lockedValue.isNotEmpty) return true;
+    return _selectedService.trim().isNotEmpty;
+  }
+
+  bool get _hasSelectedPaymentMethod => _selectedPaymentMethod != null;
+
   bool get _canConfirmBooking {
     if (_isEditingBooking) return !_isLoading;
-    return !_isLoading && _selectedPaymentMethod != null;
+    return !_isLoading && _hasSelectedService && _hasSelectedPaymentMethod;
   }
 
   Future<void> _confirmBooking() async {
@@ -264,6 +569,16 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     if (user == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('You must be logged in to place booking')),
+      );
+      return;
+    }
+
+    if (!_hasSelectedService) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please select a service'),
+          behavior: SnackBarBehavior.floating,
+        ),
       );
       return;
     }
@@ -281,26 +596,27 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     setState(() => _isLoading = true);
 
     try {
-      final serviceLabel = _selectedService.isEmpty
-          ? 'General care'
-          : _selectedService;
+      final serviceLabel = _selectedService.trim().isNotEmpty
+          ? _selectedService.trim()
+          : (widget.lockedService?.trim() ?? '');
       final pickupDetails = _currentPerson.notes.trim();
-      final startTimeValue = _timeOptions[_selectedTimeIndex];
+      final startTimeValue = _selectedStartTimeValue;
       final personAddress =
           (_activeAddress.addressLine ?? _activeAddress.subtitle).trim();
-      final billingAmount = _forceToyyibTestAmount ? 1.0 : widget.price;
+      final billingAmount = _forceToyyibTestAmount ? 2.0 : widget.price;
       final formattedDate = _formatDate(_selectedDate);
       final formattedTime = _formatTimeOfDay(startTimeValue);
       final billName = 'Booking: $serviceLabel';
       final billDescription =
           'Care booking for $serviceLabel on ${intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate)} at $formattedTime';
-      final paymentUrl = await _createToyyibPayBill(
+      final checkout = await _createToyyibPayBill(
         serviceLabel: serviceLabel,
         billingAmount: billingAmount,
         bookingInfo: {
           'caregiverId': widget.caregiver.id,
           'caregiverName': widget.caregiver.name,
-          'service': serviceLabel,
+          'caregiverPhoto': widget.caregiver.photoUrl,
+          'servicePreferences': [serviceLabel],
           'personId': _currentPerson.id,
           'personName': _currentPerson.name,
           'personAddress': personAddress,
@@ -315,8 +631,18 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         billName: billName,
         billDescription: billDescription,
       );
-      if (paymentUrl == null) return;
-      await launchUrl(paymentUrl, mode: LaunchMode.externalApplication);
+      if (checkout == null) return;
+      if (!mounted) return;
+      setState(() {
+        _awaitingPaymentResult = true;
+        _pendingPaymentBillCode = checkout.billCode;
+        _paymentFailureDialogShown = false;
+        _paymentSuccessDialogShown = false;
+      });
+      await launchUrl(
+        checkout.paymentUrl,
+        mode: LaunchMode.externalApplication,
+      );
       return;
     } catch (e) {
       if (!mounted) return;
@@ -338,7 +664,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     if (_isLoading || widget.editingBookingId == null) return;
     setState(() => _isLoading = true);
     try {
-      final startTimeValue = _timeOptions[_selectedTimeIndex];
+      final navigator = Navigator.of(context);
+      final startTimeValue = _selectedStartTimeValue;
       final addressText =
           (_activeAddress.addressLine ?? _activeAddress.subtitle).trim();
       final updates = {
@@ -357,7 +684,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
           .collection('bookings')
           .doc(widget.editingBookingId)
           .update(updates);
-      Navigator.of(context).pop(true);
+      if (!mounted) return;
+      navigator.pop(true);
     } catch (e) {
       if (!mounted) return;
     } finally {
@@ -376,7 +704,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   static const int _scheduleDaysAfter = 90;
 
   List<DateTime> get _scheduleDays {
-    final anchor = _normalizeDate(_selectedDate);
+    final anchor = _scheduleAnchorDate;
     return List.generate(
       _scheduleDaysBefore + _scheduleDaysAfter + 1,
       (index) => anchor.add(Duration(days: index - _scheduleDaysBefore)),
@@ -386,15 +714,15 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: _pageBackground,
       appBar: AppBar(
-        backgroundColor: Colors.white,
+        backgroundColor: _pageBackground,
         elevation: 0,
         centerTitle: true,
         automaticallyImplyLeading: false,
         flexibleSpace: Container(
           decoration: BoxDecoration(
-            color: Colors.white,
+            color: _pageBackground,
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.08),
@@ -450,6 +778,13 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
               final disabledWeekdays = _parseUnavailableWeekdays(
                 availabilityData['weeklySchedule'],
               );
+              final weeklyTimeRanges = _parseWeeklyTimeRanges(
+                availabilityData['weeklySchedule'],
+              );
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted) return;
+                _updateWeeklyTimeRanges(weeklyTimeRanges);
+              });
               return Padding(
                 padding: const EdgeInsets.only(bottom: 90),
                 child: ListView(
@@ -457,10 +792,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                   children: [
                     Padding(
                       padding: const EdgeInsets.only(bottom: 4),
-                      child: Text(
-                        'Selected Caregiver & Client',
-                        style: _sectionLabelTextStyle,
-                      ),
+                      child: _buildSectionTitle('Selected Caregiver & Client'),
                     ),
                     _buildProfileHeader(
                       location: location,
@@ -470,13 +802,21 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                     _buildPersonCard(),
                     const SizedBox(height: 16),
                     if (_isBookInAdvance) ...[
-                      _buildSectionTitle('Schedule'),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: _buildSectionTitle('Schedule'),
+                      ),
+                      const SizedBox(height: 8),
                       _buildScheduleChips(
                         blockedDateRanges: blockedRanges,
                         disabledWeekdays: disabledWeekdays,
                       ),
                       const SizedBox(height: 12),
-                      _buildSectionTitle('Choose Time'),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: _buildSectionTitle('Choose Time'),
+                      ),
+                      const SizedBox(height: 8),
                       _buildTimeChips(),
                       const SizedBox(height: 16),
                     ],
@@ -494,7 +834,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                     const SizedBox(height: 8),
                     _buildBookingSummaryDetails(),
                     const SizedBox(height: 12),
-                    const Text('Payment Method', style: _sectionLabelTextStyle),
+                    _buildSectionTitle('Payment Method'),
                     const SizedBox(height: 6),
                     if (!_lockServiceAndPayment) ...[const SizedBox(height: 6)],
                     _buildAddPaymentCard(),
@@ -512,7 +852,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       bottomSheet: Container(
         decoration: BoxDecoration(
           borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-          border: Border.all(color: Colors.grey.withOpacity(0.25)),
+          border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
         ),
         clipBehavior: Clip.hardEdge,
         child: Material(
@@ -569,43 +909,24 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.grey[200]!),
+        border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.08),
-            blurRadius: 16,
-            offset: const Offset(0, 5),
+            color: Colors.black.withValues(alpha: 0.10),
+            blurRadius: 18,
+            offset: const Offset(0, 8),
           ),
         ],
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          CircleAvatar(
+          DefaultProfileAvatar(
             radius: 32,
-            backgroundColor: widget.caregiver.photoUrl.isNotEmpty
-                ? Colors.white
-                : const Color.fromARGB(
-                    255,
-                    181,
-                    212,
-                    212,
-                  ).withValues(alpha: 0.1),
-            backgroundImage: widget.caregiver.photoUrl.isNotEmpty
-                ? NetworkImage(widget.caregiver.photoUrl)
-                : null,
-            child: widget.caregiver.photoUrl.isEmpty
-                ? Text(
-                    widget.caregiver.name.isNotEmpty
-                        ? widget.caregiver.name[0].toUpperCase()
-                        : 'C',
-                    style: const TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: _tealAccent,
-                    ),
-                  )
-                : null,
+            photoUrl: widget.caregiver.photoUrl,
+            label: widget.caregiver.name,
+            backgroundColor: const Color.fromARGB(255, 181, 212, 212),
+            accentColor: _tealAccent,
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -618,8 +939,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                       child: Text(
                         widget.caregiver.name,
                         style: const TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 13,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
                         ),
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -629,15 +950,15 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                       children: [
                         const Icon(
                           Icons.star,
-                          size: 12,
+                          size: 14,
                           color: Color(0xFFF4B63D),
                         ),
                         const SizedBox(width: 4),
                         Text(
                           widget.caregiver.rating.toStringAsFixed(1),
                           style: const TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
                             color: Colors.black87,
                           ),
                         ),
@@ -649,8 +970,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                 Text(
                   'Caregiver',
                   style: const TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
                     color: Colors.black54,
                   ),
                 ),
@@ -659,13 +980,14 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.place, size: 12, color: Colors.black45),
+                      const Icon(Icons.place, size: 14, color: Colors.black45),
                       const SizedBox(width: 4),
                       Expanded(
                         child: Text(
                           location,
                           style: const TextStyle(
-                            fontSize: 10,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
                             color: Colors.black54,
                           ),
                         ),
@@ -678,13 +1000,14 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.place, size: 12, color: Colors.black45),
+                      const Icon(Icons.place, size: 14, color: Colors.black45),
                       const SizedBox(width: 4),
                       Expanded(
                         child: Text(
                           defaultAddress!,
                           style: const TextStyle(
-                            fontSize: 10,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
                             color: Colors.black54,
                           ),
                         ),
@@ -731,17 +1054,20 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         if (labelText.isEmpty) {
           labelText = person.label?.trim() ?? '';
         }
+        if (_isEditingBooking) {
+          labelText = '';
+        }
         final card = Container(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Colors.grey[200]!),
+            border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withValues(alpha: 0.04),
-                blurRadius: 10,
-                offset: const Offset(0, 4),
+                color: Colors.black.withValues(alpha: 0.10),
+                blurRadius: 18,
+                offset: const Offset(0, 8),
               ),
             ],
           ),
@@ -765,13 +1091,13 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                           child: Text(
                             person.name,
                             style: const TextStyle(
-                              fontWeight: FontWeight.w600,
-                              fontSize: 13,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 15,
                             ),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        if (labelText.isNotEmpty) ...[
+                        if (labelText.isNotEmpty && !_isEditingBooking) ...[
                           const SizedBox(width: 6),
                           Flexible(
                             child: Container(
@@ -780,18 +1106,18 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                                 vertical: 2,
                               ),
                               decoration: BoxDecoration(
-                                color: Colors.grey[100],
-                                borderRadius: BorderRadius.circular(10),
+                                color: _tealAccent.withValues(alpha: 0.10),
+                                borderRadius: BorderRadius.circular(12),
                                 border: Border.all(
-                                  color: Colors.grey[300]!,
-                                  width: 0.5,
+                                  color: Colors.black12.withValues(alpha: 0.08),
                                 ),
                               ),
                               child: Text(
                                 labelText,
                                 style: const TextStyle(
-                                  fontSize: 9,
-                                  color: Colors.black54,
+                                  fontSize: 11,
+                                  color: Color(0xFF1B1D29),
+                                  fontWeight: FontWeight.w700,
                                 ),
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -804,8 +1130,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                     const Text(
                       'Client',
                       style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w600,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
                         color: Colors.black54,
                       ),
                     ),
@@ -816,7 +1142,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                         children: [
                           const Icon(
                             Icons.place,
-                            size: 12,
+                            size: 14,
                             color: Colors.black45,
                           ),
                           const SizedBox(width: 3),
@@ -824,7 +1150,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                             child: Text(
                               addressText,
                               style: const TextStyle(
-                                fontSize: 10,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
                                 color: Colors.black54,
                               ),
                             ),
@@ -881,6 +1208,11 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
           (selectedMap['label'] ?? selectedMap['forWho'] ?? selectedItem.label)
               ?.toString();
       final selectedPhone = selectedMap['phone']?.toString();
+      final selectedPhoto = (selectedMap['photoUrl'] ??
+              selectedMap['avatarUrl'] ??
+              selectedMap['profilePhoto'] ??
+              selectedMap['profileImageUrl'])
+          ?.toString();
       _currentPerson = PersonProfile(
         id: selectedMap['id']?.toString() ?? _currentPerson.id,
         name: (selectedName?.trim().isNotEmpty ?? false)
@@ -891,7 +1223,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
             ? selectedItem.addressLine!
             : selectedItem.subtitle,
         conditions: _currentPerson.conditions,
-        photoUrl: _currentPerson.photoUrl,
+        photoUrl: (selectedPhoto?.trim().isNotEmpty ?? false)
+            ? selectedPhoto!.trim()
+            : _currentPerson.photoUrl,
         label: (selectedLabel?.trim().isNotEmpty ?? false)
             ? selectedLabel!.trim()
             : _currentPerson.label,
@@ -927,16 +1261,74 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
           if (_scheduleViewportWidth != constraints.maxWidth) {
             _scheduleViewportWidth = constraints.maxWidth;
             _scheduleAutoCentered = false;
+            _scheduleCenterKey = null;
           }
           _scheduleSidePadding = horizontalPadding;
-          final layoutDays = days;
-          if (!_scheduleAutoCentered && constraints.maxWidth > 0) {
+          final layoutDays = days
+              .where((day) => !_isDateBlocked(day, ranges))
+              .where((day) => !disabledDays.contains(day.weekday))
+              .where(
+                (day) =>
+                    _weeklyTimeRanges.isEmpty ||
+                    _weeklyTimeRanges.containsKey(day.weekday),
+              )
+              .toList();
+
+          final normalizedSelected = _normalizeDate(_selectedDate);
+          final shouldIncludeSelected =
+              !_isDateBlocked(normalizedSelected, ranges) &&
+              !disabledDays.contains(normalizedSelected.weekday) &&
+              (_weeklyTimeRanges.isEmpty ||
+                  _weeklyTimeRanges.containsKey(normalizedSelected.weekday));
+          if (shouldIncludeSelected &&
+              !layoutDays.any((d) => _isSameDay(d, normalizedSelected))) {
+            layoutDays.add(normalizedSelected);
+            layoutDays.sort((a, b) => a.compareTo(b));
+          }
+
+          final centerKey = [
+            ranges.length,
+            disabledDays.length,
+            layoutDays.length,
+            normalizedSelected.year,
+            normalizedSelected.month,
+            normalizedSelected.day,
+          ].join('|');
+
+          _scheduleLayoutDaysSnapshot = layoutDays;
+          _scheduleRangesSnapshot = ranges;
+          _scheduleDisabledWeekdaysSnapshot = disabledDays;
+
+          final firstAllowedIndex = layoutDays.indexWhere(
+            (d) => !_isPastDate(d),
+          );
+          if (firstAllowedIndex <= 0) {
+            _scheduleMinOffset = 0;
+          } else {
+            final desiredMinCenter =
+                (firstAllowedIndex * _scheduleChipSpacing) +
+                _scheduleSidePadding +
+                (_scheduleChipWidth / 2);
+            final desiredMinOffset =
+                desiredMinCenter - (constraints.maxWidth / 2);
+            _scheduleMinOffset = max(0.0, desiredMinOffset);
+          }
+
+          if ((_scheduleCenterKey != centerKey || !_scheduleAutoCentered) &&
+              constraints.maxWidth > 0) {
+            _scheduleCenterKey = centerKey;
             WidgetsBinding.instance.addPostFrameCallback((_) {
               _scheduleAutoCentered = true;
               _scrollToSelectedDateIndex(
                 layoutDays: layoutDays,
+                ranges: ranges,
+                disabledWeekdays: disabledDays,
                 animate: false,
               );
+              if (_scheduleScrollController.hasClients &&
+                  _scheduleScrollController.offset < _scheduleMinOffset) {
+                _scheduleScrollController.jumpTo(_scheduleMinOffset);
+              }
             });
           }
           return Stack(
@@ -944,29 +1336,87 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
             children: [
               NotificationListener<ScrollNotification>(
                 onNotification: (notification) {
+                  if (notification is ScrollUpdateNotification &&
+                      !_scheduleScrollAnimating &&
+                      _scheduleScrollController.hasClients) {
+                    final offset = _scheduleScrollController.offset;
+                    if (offset < _scheduleMinOffset) {
+                      _scheduleScrollController.jumpTo(_scheduleMinOffset);
+                      return true;
+                    }
+
+                    _scheduleSnapDebounce?.cancel();
+                    _scheduleSnapDebounce = Timer(
+                      const Duration(milliseconds: 30),
+                      () {
+                        if (!mounted ||
+                            _scheduleScrollAnimating ||
+                            !_scheduleScrollController.hasClients) {
+                          return;
+                        }
+                        _handleScheduleScrollEnd(
+                          _scheduleRangesSnapshot,
+                          _scheduleDisabledWeekdaysSnapshot,
+                          _scheduleLayoutDaysSnapshot,
+                        );
+                      },
+                    );
+
+                    if (notification.dragDetails == null &&
+                        _scheduleLayoutDaysSnapshot.isNotEmpty) {
+                      final viewport =
+                          _scheduleScrollController.position.viewportDimension;
+                      if (viewport > 0) {
+                        final center =
+                            _scheduleScrollController.offset + (viewport / 2);
+                        final index = _nearestScheduleIndex(
+                          layoutDays: _scheduleLayoutDaysSnapshot,
+                          center: center,
+                        );
+                        final itemCenter =
+                            _scheduleSidePadding +
+                            (index * _scheduleChipSpacing) +
+                            (_scheduleChipWidth / 2);
+                        final distance = (itemCenter - center).abs();
+                        if (distance <= 48 &&
+                            _scheduleLastSnappedIndex != index) {
+                          _scheduleLastSnappedIndex = index;
+                          _scrollToDateIndex(index);
+                        }
+                      }
+                    }
+                  }
+                  if (notification is UserScrollNotification &&
+                      notification.direction == ScrollDirection.idle) {
+                    _handleScheduleScrollEnd(ranges, disabledDays, layoutDays);
+                  }
                   if (notification is ScrollEndNotification) {
+                    _scheduleSnapDebounce?.cancel();
                     _handleScheduleScrollEnd(ranges, disabledDays, layoutDays);
                   }
                   return false;
                 },
-                child: SingleChildScrollView(
+                child: ListView.builder(
                   controller: _scheduleScrollController,
                   scrollDirection: Axis.horizontal,
-                  physics: const BouncingScrollPhysics(),
+                  physics: _scheduleScrollPhysics,
                   padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
-                  child: Row(
-                    children: List.generate(layoutDays.length, (index) {
-                      final date = layoutDays[index];
-                      final bool disabled = _isDateDisabled(
-                        date,
-                        ranges,
-                        disabledDays,
-                      );
-                      final chipOpacity = disabled ? 0.55 : 1.0;
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 6),
-                        child: Opacity(
-                          opacity: chipOpacity,
+                  itemExtent: _scheduleChipSpacing,
+                  cacheExtent: _scheduleChipSpacing * 12,
+                  itemCount: layoutDays.length,
+                  itemBuilder: (context, index) {
+                    final date = layoutDays[index];
+                    final bool disabled = _isDateDisabled(
+                      date,
+                      ranges,
+                      disabledDays,
+                    );
+                    final chipOpacity = disabled ? 0.55 : 1.0;
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: Opacity(
+                        opacity: chipOpacity,
+                        child: RepaintBoundary(
                           child: Container(
                             width: _scheduleChipWidth,
                             decoration: BoxDecoration(
@@ -1013,9 +1463,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
                             ),
                           ),
                         ),
-                      );
-                    }),
-                  ),
+                      ),
+                    );
+                  },
                 ),
               ),
               IgnorePointer(
@@ -1037,74 +1487,191 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   }
 
   Widget _buildTimeChips() {
+    if (_isBookInAdvance && _weeklyTimeRanges.isEmpty) {
+      return const SizedBox(
+        height: 44,
+        child: Center(
+          child: SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
+    if (_timeOptions.isEmpty) {
+      return const SizedBox(
+        height: 44,
+        child: Center(
+          child: Text(
+            'No available times.',
+            style: TextStyle(
+              color: Colors.black54,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      );
+    }
     return SizedBox(
-      height: 38,
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        physics: const BouncingScrollPhysics(),
-        padding: const EdgeInsets.symmetric(horizontal: 6),
-        child: Row(
-          children: List.generate(_timeOptions.length, (index) {
-            final time = _timeOptions[index];
-            final selected = _selectedTimeIndex == index;
-            final pastTime = _isPastTime(time);
-            final chipOpacity = pastTime ? 0.45 : 1.0;
-            return Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: Opacity(
-                opacity: chipOpacity,
-                child: GestureDetector(
-                  onTap: pastTime
-                      ? null
-                      : () => setState(() => _selectedTimeIndex = index),
-                  child: Container(
-                    width: 60,
-                    decoration: BoxDecoration(
-                      color: selected
-                          ? _tealAccent
-                          : pastTime
-                          ? Colors.grey[100]
-                          : Colors.white,
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: selected
-                            ? Colors.transparent
-                            : pastTime
-                            ? Colors.grey[200]!
-                            : Colors.grey[300]!,
-                      ),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x08000000),
-                          blurRadius: 4,
-                          offset: Offset(0, 1),
-                        ),
-                      ],
-                    ),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 6,
-                    ),
-                    child: Center(
-                      child: Text(
-                        _formatTimeOfDay(time),
-                        style: TextStyle(
-                          fontSize: 9,
-                          fontWeight: FontWeight.w600,
-                          color: selected
-                              ? Colors.white
-                              : Colors.black87.withValues(
-                                  alpha: pastTime ? 0.4 : 1,
+      height: 44,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final horizontalPadding = max(
+            0.0,
+            (constraints.maxWidth - _timeChipWidth) / 2,
+          );
+          if (_timeViewportWidth != constraints.maxWidth) {
+            _timeViewportWidth = constraints.maxWidth;
+            _timeAutoCentered = false;
+            _timeCenterKey = null;
+          }
+          _timeSidePadding = horizontalPadding;
+
+          final firstAllowedIndex = _timeOptions.indexWhere(
+            (t) => !_isTimeDisabled(t),
+          );
+          if (firstAllowedIndex <= 0) {
+            _timeMinOffset = 0;
+          } else {
+            final desiredMinCenter =
+                (firstAllowedIndex * _timeChipSpacing) +
+                _timeSidePadding +
+                (_timeChipWidth / 2);
+            final desiredMinOffset =
+                desiredMinCenter - (constraints.maxWidth / 2);
+            _timeMinOffset = max(0.0, desiredMinOffset);
+          }
+
+          final centerKey = [
+            _selectedDate.year,
+            _selectedDate.month,
+            _selectedDate.day,
+            _timeOptions.length,
+            firstAllowedIndex,
+          ].join('|');
+
+          if ((_timeCenterKey != centerKey || !_timeAutoCentered) &&
+              constraints.maxWidth > 0) {
+            _timeCenterKey = centerKey;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              _timeAutoCentered = true;
+              if (firstAllowedIndex >= 0 &&
+                  _selectedTimeIndex < firstAllowedIndex) {
+                setState(() => _selectedTimeIndex = firstAllowedIndex);
+              }
+              _scrollToSelectedTimeIndex(animate: false);
+              if (_timeScrollController.hasClients &&
+                  _timeScrollController.offset < _timeMinOffset) {
+                _timeScrollController.jumpTo(_timeMinOffset);
+              }
+            });
+          }
+
+          return Stack(
+            alignment: Alignment.center,
+            children: [
+              NotificationListener<ScrollNotification>(
+                onNotification: (notification) {
+                  if (notification is ScrollUpdateNotification &&
+                      !_timeScrollAnimating &&
+                      _timeScrollController.hasClients) {
+                    final offset = _timeScrollController.offset;
+                    if (offset < _timeMinOffset) {
+                      _timeScrollController.jumpTo(_timeMinOffset);
+                      return true;
+                    }
+                    _timeSnapDebounce?.cancel();
+                    _timeSnapDebounce = Timer(
+                      const Duration(milliseconds: 30),
+                      () {
+                        if (!mounted ||
+                            _timeScrollAnimating ||
+                            !_timeScrollController.hasClients) {
+                          return;
+                        }
+                        _handleTimeScrollEnd();
+                      },
+                    );
+                  }
+                  if (notification is ScrollEndNotification) {
+                    _timeSnapDebounce?.cancel();
+                    _handleTimeScrollEnd();
+                  }
+                  return false;
+                },
+                child: ListView.builder(
+                  controller: _timeScrollController,
+                  scrollDirection: Axis.horizontal,
+                  physics: _scheduleScrollPhysics,
+                  padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
+                  itemExtent: _timeChipSpacing,
+                  cacheExtent: _timeChipSpacing * 12,
+                  itemCount: _timeOptions.length,
+                  itemBuilder: (context, index) {
+                    final time = _timeOptions[index];
+                    final disabled = _isTimeDisabled(time);
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Opacity(
+                        opacity: disabled ? 0.5 : 1,
+                        child: RepaintBoundary(
+                          child: Container(
+                            width: _timeChipWidth,
+                            decoration: BoxDecoration(
+                              color: disabled ? Colors.grey[100] : Colors.white,
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: Colors.grey[300]!,
+                                width: 1,
+                              ),
+                              boxShadow: const [
+                                BoxShadow(
+                                  color: Color(0x08000000),
+                                  blurRadius: 4,
+                                  offset: Offset(0, 1),
                                 ),
+                              ],
+                            ),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 6,
+                            ),
+                            child: Center(
+                              child: Text(
+                                _formatTimeOfDay(time),
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.black87.withValues(
+                                    alpha: disabled ? 0.4 : 1,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
                       ),
-                    ),
+                    );
+                  },
+                ),
+              ),
+              IgnorePointer(
+                child: Container(
+                  width: _timeChipWidth,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: _tealAccent, width: 1.5),
+                    color: Colors.transparent,
                   ),
                 ),
               ),
-            );
-          }),
-        ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -1210,7 +1777,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
 
   Widget _buildBookingSummaryDetails() {
     final dateLabel = intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate);
-    final timeLabel = _formatTimeOfDay(_timeOptions[_selectedTimeIndex]);
+    final timeLabel = _formatTimeOfDay(_selectedStartTimeValue);
     final serviceLabel = _selectedService.isEmpty
         ? 'General care'
         : _selectedService;
@@ -1388,7 +1955,14 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.grey[300]!),
+          border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.10),
+              blurRadius: 14,
+              offset: const Offset(0, 6),
+            ),
+          ],
         ),
         child: cardContent,
       );
@@ -1402,7 +1976,14 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.grey[300]!),
+          border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.10),
+              blurRadius: 14,
+              offset: const Offset(0, 6),
+            ),
+          ],
         ),
         child: cardContent,
       ),
@@ -1440,7 +2021,14 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.grey[300]!),
+          border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.10),
+              blurRadius: 14,
+              offset: const Offset(0, 6),
+            ),
+          ],
         ),
         child: cardContent,
       );
@@ -1455,7 +2043,14 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.grey[300]!),
+          border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.10),
+              blurRadius: 14,
+              offset: const Offset(0, 6),
+            ),
+          ],
         ),
         child: cardContent,
       ),
@@ -1566,19 +2161,104 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     final result = <int>{};
     if (raw is Iterable) {
       for (final entry in raw) {
-        if (entry is Map<String, dynamic>) {
-          final available = entry['available'];
-          final dayName = (entry['day'] as String?)?.trim();
-          if (dayName != null) {
-            final weekday = _weekdayFromName(dayName);
-            if (weekday != null && available == false) {
-              result.add(weekday);
-            }
-          }
+        if (entry is! Map) continue;
+        final map = Map<String, dynamic>.from(entry);
+
+        final dynamic availableRaw = map['available'];
+        final bool? isAvailable = switch (availableRaw) {
+          final bool v => v,
+          final String v =>
+            v.toLowerCase() == 'true'
+                ? true
+                : v.toLowerCase() == 'false'
+                ? false
+                : null,
+          final num v => v != 0,
+          _ => null,
+        };
+
+        final dayName = (map['day'] as String?)?.trim();
+        if (dayName == null || dayName.isEmpty) continue;
+
+        final weekday = _weekdayFromName(dayName);
+        if (weekday != null && isAvailable == false) {
+          result.add(weekday);
         }
       }
     }
     return result;
+  }
+
+  Map<int, _WeeklyTimeRange> _parseWeeklyTimeRanges(dynamic raw) {
+    final result = <int, _WeeklyTimeRange>{};
+    if (raw is Iterable) {
+      for (final entry in raw) {
+        if (entry is! Map) continue;
+        final map = Map<String, dynamic>.from(entry);
+
+        final dayName = (map['day'] as String?)?.trim();
+        if (dayName == null || dayName.isEmpty) continue;
+        final weekday = _weekdayFromName(dayName);
+        if (weekday == null) continue;
+
+        final dynamic availableRaw = map['available'];
+        final bool? isAvailable = switch (availableRaw) {
+          final bool v => v,
+          final String v =>
+            v.toLowerCase() == 'true'
+                ? true
+                : v.toLowerCase() == 'false'
+                ? false
+                : null,
+          final num v => v != 0,
+          _ => null,
+        };
+        if (isAvailable != true) continue;
+
+        final startRaw = (map['start'] as String?)?.trim();
+        final endRaw = (map['end'] as String?)?.trim();
+        final start = _parseTimeOfDay(startRaw);
+        final end = _parseTimeOfDay(endRaw);
+        if (start == null || end == null) continue;
+
+        result[weekday] = _WeeklyTimeRange(start: start, end: end);
+      }
+    }
+    return result;
+  }
+
+  TimeOfDay? _parseTimeOfDay(String? value) {
+    if (value == null || value.isEmpty) return null;
+    final parts = value.split(':');
+    if (parts.length != 2) return null;
+    final h = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (h == null || m == null) return null;
+    if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+    return TimeOfDay(hour: h, minute: m);
+  }
+
+  List<TimeOfDay> _generateTimeSlots({
+    required TimeOfDay start,
+    required TimeOfDay end,
+    required int minuteInterval,
+  }) {
+    final startMinutes = start.hour * 60 + start.minute;
+    final endMinutes = end.hour * 60 + end.minute;
+    if (minuteInterval <= 0 || endMinutes <= startMinutes) return const [];
+
+    int first = startMinutes;
+    if (first % minuteInterval != 0) {
+      first = ((first ~/ minuteInterval) + 1) * minuteInterval;
+    }
+    int last = endMinutes;
+    last = (last ~/ minuteInterval) * minuteInterval;
+
+    final slots = <TimeOfDay>[];
+    for (int m = first; m < last; m += minuteInterval) {
+      slots.add(TimeOfDay(hour: (m ~/ 60) % 24, minute: m % 60));
+    }
+    return slots;
   }
 
   int? _weekdayFromName(String name) {
@@ -1644,8 +2324,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     return _normalizeDate(date).isBefore(today);
   }
 
-  bool _isPastTime(TimeOfDay time) {
-    if (_isBookInAdvance) return false;
+  bool _isTimeDisabled(TimeOfDay time) {
     if (!_isSameDay(_selectedDate, DateTime.now())) return false;
     final now = DateTime.now();
     final candidate = DateTime(
@@ -1658,7 +2337,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
     return candidate.isBefore(now);
   }
 
-  Future<Uri?> _createToyyibPayBill({
+  Future<_ToyyibPayCheckout?> _createToyyibPayBill({
     required String serviceLabel,
     required double billingAmount,
     required Map<String, dynamic> bookingInfo,
@@ -1705,8 +2384,14 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       });
       debugPrint('ToyyibPay callable response: ${response.data}');
       final paymentUrl = response.data?['paymentUrl'] as String?;
+      final bookingId = response.data?['bookingId'] as String?;
+      final billCode = response.data?['billCode'] as String?;
       if (paymentUrl != null && paymentUrl.isNotEmpty) {
-        return Uri.parse(paymentUrl);
+        return _ToyyibPayCheckout(
+          bookingId: bookingId ?? '',
+          billCode: billCode ?? '',
+          paymentUrl: Uri.parse(paymentUrl),
+        );
       }
       await _showPaymentErrorDialog(
         'ToyyibPay did not return a payment link. Please try again.',
@@ -1722,6 +2407,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
   }
 
   Future<void> _showPaymentErrorDialog(String message) async {
+    if (_paymentSuccessDialogShown) return;
     if (!mounted) return;
     await showDialog<void>(
       context: context,
@@ -1737,4 +2423,36 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen> {
       ),
     );
   }
+
+  Future<void> _showPaymentResultDialog({
+    required String title,
+    required String message,
+  }) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ToyyibPayCheckout {
+  const _ToyyibPayCheckout({
+    required this.bookingId,
+    required this.billCode,
+    required this.paymentUrl,
+  });
+
+  final String bookingId;
+  final String billCode;
+  final Uri paymentUrl;
 }

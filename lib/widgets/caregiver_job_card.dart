@@ -441,11 +441,11 @@ class CaregiverJobCard extends StatelessWidget {
 }
 
 const BorderRadius _caregiverCardRadius = BorderRadius.all(Radius.circular(18));
-final Color _caregiverCardBorderColor = Colors.grey.shade300;
-final BoxShadow _caregiverCardShadow = const BoxShadow(
-  color: Color(0x14000000),
-  blurRadius: 16,
-  offset: Offset(0, 6),
+const Color _caregiverCardBorderColor = Color(0xFFD7DCE3);
+const BoxShadow _caregiverCardShadow = BoxShadow(
+  color: Color(0x1A000000),
+  blurRadius: 20,
+  offset: Offset(0, 10),
 );
 final BoxShadow _statusChipShadow = const BoxShadow(
   color: Color(0x14000000),

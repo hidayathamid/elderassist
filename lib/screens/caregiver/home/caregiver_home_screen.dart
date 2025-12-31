@@ -4,6 +4,7 @@ import 'dart:ui';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
@@ -22,11 +23,15 @@ const Color _primaryBlue = Color(0xFF00A8A7);
 const Color _primaryTeal = Color(0xFF26B4B1);
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _accentGold = Color(0xFFF4B63D);
+const Color _pageBackground = Color(0xFFF7F8FA);
+const Color _cardBorderColor = Color(0x14000000);
+const Color _cardShadowColor = Color(0x1A000000);
 const double _heroHeight = 320.0;
 const double _sheetInitialExtent = 0.83;
 const double _sheetMaxExtent = 1.0;
 const double _appBarTriggerExtent = 0.96;
 const double _sectionSpacing = 18.0;
+// ignore: unused_element
 const double _cardRadius = 18.0;
 const double _sectionCardHeight = 90.0;
 const double _headerTopPadding = 16.0;
@@ -42,13 +47,21 @@ double _homeJobCardWidth(BuildContext context) {
 }
 
 class CaregiverHomeScreen extends StatefulWidget {
-  const CaregiverHomeScreen({super.key});
+  const CaregiverHomeScreen({
+    super.key,
+    this.tabIndexListenable,
+    this.tabIndex = 0,
+  });
+
+  final ValueListenable<int>? tabIndexListenable;
+  final int tabIndex;
 
   @override
   State<CaregiverHomeScreen> createState() => _CaregiverHomeScreenState();
 }
 
-class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
+class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
+    with TickerProviderStateMixin {
   final GlobalKey _headerKey = GlobalKey();
   double _currentSheetExtent = _sheetInitialExtent;
   double _sheetMinExtent = _sheetInitialExtent;
@@ -56,6 +69,80 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
   bool _sheetMeasurementScheduled = false;
   bool _todayJobsSectionHidden = false;
   bool _scheduleSectionHidden = false;
+  AnimationController? _entryController;
+  late final Animation<double> _entryFade;
+  late final Animation<Offset> _entrySlide;
+  bool _wasActive = false;
+  // Hide "Schedule" category for now (keep existing logic without deleting it).
+  // ignore: prefer_final_fields
+  bool _hideScheduledCategory = true;
+
+  @override
+  void initState() {
+    super.initState();
+    final entryController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+    _entryController = entryController;
+    _entryFade = CurvedAnimation(
+      parent: entryController,
+      curve: Curves.easeOutCubic,
+    );
+    _entrySlide = Tween<Offset>(
+      begin: const Offset(0, 0.02),
+      end: Offset.zero,
+    ).animate(
+      CurvedAnimation(
+        parent: entryController,
+        curve: Curves.easeOutCubic,
+      ),
+    );
+
+    _wasActive = (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+        widget.tabIndex;
+    widget.tabIndexListenable?.addListener(_handleTabChange);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_wasActive) {
+        _playEntryAnimation();
+      } else {
+        _entryController?.value = 1;
+      }
+    });
+  }
+
+  void _playEntryAnimation() {
+    _entryController?.forward(from: 0);
+  }
+
+  void _handleTabChange() {
+    final currentIndex = widget.tabIndexListenable?.value;
+    if (currentIndex == null) return;
+    final isActive = currentIndex == widget.tabIndex;
+    if (isActive && !_wasActive) {
+      _playEntryAnimation();
+    }
+    _wasActive = isActive;
+  }
+
+  @override
+  void didUpdateWidget(covariant CaregiverHomeScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tabIndexListenable != widget.tabIndexListenable) {
+      oldWidget.tabIndexListenable?.removeListener(_handleTabChange);
+      widget.tabIndexListenable?.addListener(_handleTabChange);
+      _wasActive = (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+          widget.tabIndex;
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.tabIndexListenable?.removeListener(_handleTabChange);
+    _entryController?.dispose();
+    super.dispose();
+  }
 
   void _onSheetExtentChanged(double extent) {
     final normalized = extent.clamp(_sheetInitialExtent, _sheetMaxExtent);
@@ -78,6 +165,21 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
   }
 
   bool get _showFloatingAppBar => _currentSheetExtent >= _appBarTriggerExtent;
+
+  BoxDecoration _premiumCardDecoration({double radius = 18}) {
+    return BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(radius),
+      border: Border.all(color: _cardBorderColor),
+      boxShadow: const [
+        BoxShadow(
+          color: _cardShadowColor,
+          blurRadius: 16,
+          offset: Offset(0, 8),
+        ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -149,154 +251,167 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
             }
 
             return Scaffold(
-              backgroundColor: Colors.white,
-              body: Stack(
-                children: [
-                  Container(
-                    height: _heroHeight,
-                    decoration: const BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [_primaryBlue, _primaryTeal],
-                      ),
-                    ),
-                    child: SafeArea(
-                      bottom: false,
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(
-                          16,
-                          _headerTopPadding,
-                          16,
-                          0,
+              backgroundColor: _pageBackground,
+              body: FadeTransition(
+                opacity: _entryFade,
+                child: SlideTransition(
+                  position: _entrySlide,
+                  child: Stack(
+                    children: [
+                      Container(
+                        height: _heroHeight,
+                        decoration: const BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [_primaryBlue, _primaryTeal],
+                          ),
                         ),
-                        child: _buildHeader(
-                          context: context,
-                          name: name,
-                          photoUrl: photoUrl,
-                          greeting: greeting,
-                        ),
-                      ),
-                    ),
-                  ),
-                  DraggableScrollableSheet(
-                    initialChildSize: sheetInitialSize,
-                    minChildSize: _sheetMinExtent,
-                    maxChildSize: _sheetMaxExtent,
-                    builder: (context, scrollController) {
-                      return NotificationListener<
-                        DraggableScrollableNotification
-                      >(
-                        onNotification: (notification) {
-                          _onSheetExtentChanged(notification.extent);
-                          return false;
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-                          decoration: const BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.vertical(
-                              top: Radius.circular(28),
+                        child: SafeArea(
+                          bottom: false,
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(
+                              16,
+                              _headerTopPadding,
+                              16,
+                              0,
                             ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Color(0x22000000),
-                                blurRadius: 20,
-                                offset: Offset(0, -6),
-                              ),
-                            ],
-                          ),
-                          child: ListView(
-                            controller: scrollController,
-                            physics: const BouncingScrollPhysics(),
-                            children: [
-                              SizedBox(
-                                height: _calculateTopSpacing(showAppBar),
-                              ),
-                              _buildQuickActionSection(
-                                context,
-                                caregiverData: caregiverData,
-                                caregiverRef: caregiverRef,
-                                hasAssignedBooking: hasAssignedBooking,
-                                isAvailable: isAvailable,
-                              ),
-                              const SizedBox(height: _sectionSpacing),
-                              _buildSectionTitle(
-                                title: "Today's Jobs",
-                                hint: 'Care bookings assigned to you today.',
-                                trailing: _sectionToggleButton(
-                                  hidden: _todayJobsSectionHidden,
-                                  canHide: todayJobs.isEmpty,
-                                  onHide: _collapseTodayJobsSection,
-                                  onShow: _unhideTodayJobsSection,
-                                ),
-                              ),
-                              if (!(todayJobs.isEmpty &&
-                                  _todayJobsSectionHidden))
-                                const SizedBox(height: 12),
-                              if (!(todayJobs.isEmpty &&
-                                  _todayJobsSectionHidden))
-                                _buildTodayJobSection(context, todayJobs),
-                              const SizedBox(height: _sectionSpacing),
-                              _buildSectionTitle(
-                                title: 'Schedule',
-                                hint: 'A quick glance at your upcoming visits.',
-                                trailing: _sectionToggleButton(
-                                  hidden: _scheduleSectionHidden,
-                                  canHide: scheduledJobs.isEmpty,
-                                  onHide: _collapseScheduleSection,
-                                  onShow: _unhideScheduleSection,
-                                ),
-                              ),
-                              if (!(scheduledJobs.isEmpty &&
-                                  _scheduleSectionHidden))
-                                const SizedBox(height: 12),
-                              if (!(scheduledJobs.isEmpty &&
-                                  _scheduleSectionHidden))
-                                _buildScheduleCategory(context, scheduledJobs),
-                              const SizedBox(height: _sectionSpacing),
-                              _buildScheduledJobsSection(
-                                context,
-                                scheduledJobs,
-                              ),
-                              const SizedBox(height: _sectionSpacing),
-                              _buildSectionTitle(
-                                title: 'Earnings & Stats',
-                                hint:
-                                    'Summary of jobs completed and lifetime earnings.',
-                              ),
-                              const SizedBox(height: 12),
-                          _buildEarningsStatsRow(
-                            context,
-                            caregiverData: caregiverData,
-                            jobsCompleted: completedJobs,
-                            thisWeekValue: earningsSummary.thisWeekEarnings,
-                            totalValue: earningsSummary.totalEarnings,
-                            rating: ratingValue,
-                          ),
-                              const SizedBox(height: 28),
-                            ],
+                            child: _buildHeader(
+                              context: context,
+                              name: name,
+                              photoUrl: photoUrl,
+                              greeting: greeting,
+                            ),
                           ),
                         ),
-                      );
-                    },
-                  ),
-                  Positioned(
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    child: AnimatedSlide(
-                      offset: showAppBar ? Offset.zero : const Offset(0, -1),
-                      duration: const Duration(milliseconds: 260),
-                      curve: Curves.easeInOut,
-                      child: AnimatedOpacity(
-                        duration: const Duration(milliseconds: 200),
-                        opacity: showAppBar ? 1 : 0,
-                        child: _buildFloatingAppBar(),
                       ),
-                    ),
+                      DraggableScrollableSheet(
+                        initialChildSize: sheetInitialSize,
+                        minChildSize: _sheetMinExtent,
+                        maxChildSize: _sheetMaxExtent,
+                        builder: (context, scrollController) {
+                          return NotificationListener<
+                            DraggableScrollableNotification
+                          >(
+                            onNotification: (notification) {
+                              _onSheetExtentChanged(notification.extent);
+                              return false;
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                              decoration: const BoxDecoration(
+                                color: _pageBackground,
+                                borderRadius: BorderRadius.vertical(
+                                  top: Radius.circular(28),
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Color(0x22000000),
+                                    blurRadius: 20,
+                                    offset: Offset(0, -6),
+                                  ),
+                                ],
+                              ),
+                              child: ListView(
+                                controller: scrollController,
+                                physics: const BouncingScrollPhysics(),
+                                children: [
+                                  SizedBox(
+                                    height: _calculateTopSpacing(showAppBar),
+                                  ),
+                                  _buildQuickActionSection(
+                                    context,
+                                    caregiverData: caregiverData,
+                                    caregiverRef: caregiverRef,
+                                    hasAssignedBooking: hasAssignedBooking,
+                                    isAvailable: isAvailable,
+                                  ),
+                                  const SizedBox(height: _sectionSpacing),
+                                  _buildSectionTitle(
+                                    title: "Today's Jobs",
+                                    hint: 'Care bookings assigned to you today.',
+                                    trailing: _sectionToggleButton(
+                                      hidden: _todayJobsSectionHidden,
+                                      canHide: todayJobs.isEmpty,
+                                      onHide: _collapseTodayJobsSection,
+                                      onShow: _unhideTodayJobsSection,
+                                    ),
+                                  ),
+                                  if (!(todayJobs.isEmpty &&
+                                      _todayJobsSectionHidden))
+                                    const SizedBox(height: 12),
+                                  if (!(todayJobs.isEmpty &&
+                                      _todayJobsSectionHidden))
+                                    _buildTodayJobSection(context, todayJobs),
+                                  const SizedBox(height: _sectionSpacing),
+                                  _buildScheduledJobsSection(
+                                    context,
+                                    scheduledJobs,
+                                  ),
+                                  if (!_hideScheduledCategory) ...[
+                                    const SizedBox(height: _sectionSpacing),
+                                    _buildSectionTitle(
+                                      title: 'Schedule',
+                                      hint:
+                                          'A quick glance at your upcoming visits.',
+                                      trailing: _sectionToggleButton(
+                                        hidden: _scheduleSectionHidden,
+                                        canHide: scheduledJobs.isEmpty,
+                                        onHide: _collapseScheduleSection,
+                                        onShow: _unhideScheduleSection,
+                                      ),
+                                    ),
+                                    if (!(scheduledJobs.isEmpty &&
+                                        _scheduleSectionHidden))
+                                      const SizedBox(height: 12),
+                                    if (!(scheduledJobs.isEmpty &&
+                                        _scheduleSectionHidden))
+                                      _buildScheduleCategory(
+                                        context,
+                                        scheduledJobs,
+                                      ),
+                                    const SizedBox(height: _sectionSpacing),
+                                  ],
+                                  _buildSectionTitle(
+                                    title: 'Earnings & Stats',
+                                    hint:
+                                        'Summary of jobs completed and lifetime earnings.',
+                                  ),
+                                  const SizedBox(height: 12),
+                                  _buildEarningsStatsRow(
+                                    context,
+                                    caregiverData: caregiverData,
+                                    jobsCompleted: completedJobs,
+                                    thisWeekValue:
+                                        earningsSummary.thisWeekEarnings,
+                                    totalValue: earningsSummary.totalEarnings,
+                                    rating: ratingValue,
+                                  ),
+                                  const SizedBox(height: 28),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        child: AnimatedSlide(
+                          offset: showAppBar ? Offset.zero : const Offset(0, -1),
+                          duration: const Duration(milliseconds: 260),
+                          curve: Curves.easeInOut,
+                          child: AnimatedOpacity(
+                            duration: const Duration(milliseconds: 200),
+                            opacity: showAppBar ? 1 : 0,
+                            child: _buildFloatingAppBar(),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
             );
           },
@@ -309,10 +424,11 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
+        border: const Border(bottom: BorderSide(color: _cardBorderColor)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withAlpha(18),
-            blurRadius: 10,
+            color: _cardShadowColor,
+            blurRadius: 14,
             offset: const Offset(0, 4),
           ),
         ],
@@ -325,8 +441,8 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
             child: const Text(
               'Home',
               style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
                 color: _profileDarkText,
               ),
             ),
@@ -477,34 +593,18 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        _buildSectionTitle(
+          title: 'Quick Actions',
+          hint: 'Shortcuts to commonly used caregiver workflows.',
+        ),
+        const SizedBox(height: 6),
         Row(
           children: [
-            const Text(
-              'Quick Actions',
-              style: TextStyle(
-                fontWeight: FontWeight.w600,
-                fontSize: 14,
-                color: _profileDarkText,
-              ),
-            ),
-            const SizedBox(width: 4),
-            const _SectionInfoIcon(
-              message: 'Shortcuts to commonly used caregiver workflows.',
-            ),
+            for (var i = 0; i < actions.length; i++) ...[
+              if (i != 0) const SizedBox(width: 8),
+              Expanded(child: _QuickActionButton(action: actions[i])),
+            ],
           ],
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: actions
-              .map(
-                (action) => Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    child: _QuickActionButton(action: action),
-                  ),
-                ),
-              )
-              .toList(),
         ),
       ],
     );
@@ -632,12 +732,8 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
       ),
     ];
     return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.grey.withAlpha(120)),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+      decoration: _premiumCardDecoration(radius: 20),
+      padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
@@ -680,7 +776,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
           title,
           style: const TextStyle(
             fontSize: 14,
-            fontWeight: FontWeight.w600,
+            fontWeight: FontWeight.w800,
             color: _profileDarkText,
           ),
         ),
@@ -698,32 +794,55 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     required VoidCallback onHide,
     required VoidCallback onShow,
   }) {
-    if (hidden) {
+    TextButton buildPillButton({
+      required String label,
+      required IconData icon,
+      required VoidCallback onPressed,
+    }) {
       return TextButton(
-        onPressed: onShow,
+        onPressed: onPressed,
         style: TextButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          minimumSize: const Size(0, 0),
+          foregroundColor: _profileDarkText,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          minimumSize: const Size(0, 30),
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(999),
+            side: const BorderSide(color: _cardBorderColor),
+          ),
+          backgroundColor: Colors.white,
+          textStyle: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w800,
+          ),
         ),
-        child: const Text(
-          'Show section',
-          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 14,
+              color: _profileDarkText.withValues(alpha: 0.55),
+            ),
+            const SizedBox(width: 6),
+            Text(label),
+          ],
         ),
       );
     }
+
+    if (hidden) {
+      return buildPillButton(
+        label: 'Show',
+        icon: Icons.expand_more_rounded,
+        onPressed: onShow,
+      );
+    }
     if (!canHide) return null;
-    return TextButton(
+    return buildPillButton(
+      label: 'Hide',
+      icon: Icons.expand_less_rounded,
       onPressed: onHide,
-      style: TextButton.styleFrom(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        minimumSize: const Size(0, 0),
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      ),
-      child: const Text(
-        'Hide section',
-        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
-      ),
     );
   }
 
@@ -744,8 +863,10 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
     final dateLabel = nextJob.scheduledDateTime != null
         ? DateFormat('EEE, d MMM • h:mm a').format(nextJob.scheduledDateTime!)
         : (nextJob.time.isNotEmpty ? nextJob.time : 'Time TBD');
-    return SizedBox(
+    return Container(
       height: _sectionCardHeight,
+      decoration: _premiumCardDecoration(radius: 18),
+      padding: const EdgeInsets.fromLTRB(14, 0, 8, 0),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
@@ -753,38 +874,47 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
             width: 42,
             height: 42,
             decoration: BoxDecoration(
-              color: _primaryTeal.withOpacity(0.16),
+              color: _primaryTeal.withValues(alpha: 0.14),
               borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: _primaryTeal.withValues(alpha: 0.28)),
             ),
-            child: const Icon(Icons.schedule, color: _primaryTeal),
+            child: const Icon(Icons.schedule, color: _primaryTeal, size: 20),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Text(
                   nextJob.personName,
                   style: const TextStyle(
-                    fontWeight: FontWeight.bold,
+                    fontWeight: FontWeight.w800,
                     fontSize: 14,
+                    color: _profileDarkText,
                   ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
                 const SizedBox(height: 4),
                 Text(
                   dateLabel,
                   style: TextStyle(
                     fontSize: 12,
-                    color: _profileDarkText.withOpacity(0.6),
+                    color: _profileDarkText.withValues(alpha: 0.65),
                   ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
                 const SizedBox(height: 4),
                 Text(
                   nextJob.service,
                   style: TextStyle(
                     fontSize: 12,
-                    color: _profileDarkText.withOpacity(0.6),
+                    color: _profileDarkText.withValues(alpha: 0.65),
                   ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ],
             ),
@@ -793,12 +923,16 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
             onPressed: () =>
                 _openCaregiverJobDetails(context, nextJob.bookingId),
             style: TextButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              foregroundColor: _primaryBlue,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              minimumSize: const Size(0, 30),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              textStyle: const TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+              ),
             ),
-            child: const Text(
-              'View details',
-              style: TextStyle(fontWeight: FontWeight.w600),
-            ),
+            child: const Text('View details'),
           ),
         ],
       ),
@@ -909,17 +1043,17 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen> {
               foregroundColor: WidgetStateProperty.resolveWith<Color?>(
                 (states) => enabled ? Colors.black : Colors.grey.shade600,
               ),
-              elevation: WidgetStateProperty.all(enabled ? 2.0 : 0.0),
+              elevation: WidgetStateProperty.all(enabled ? 1.0 : 0.0),
               padding: WidgetStateProperty.all(
-                const EdgeInsets.symmetric(vertical: 14),
+                const EdgeInsets.symmetric(vertical: 12),
               ),
               shape: WidgetStateProperty.all(
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
               ),
             ),
             child: const Text(
               'Withdraw',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
             ),
           ),
         ),
@@ -1229,6 +1363,15 @@ class _QuickActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDisabled = action.disabled;
+    final iconColor = isDisabled ? Colors.grey.shade400 : _primaryBlue;
+    final ringColor = isDisabled
+        ? Colors.grey.withAlpha(60)
+        : _primaryBlue.withValues(alpha: 0.55);
+    final fillColor =
+        isDisabled ? Colors.grey.shade100 : _primaryBlue.withValues(alpha: 0.12);
+    final labelColor =
+        isDisabled ? _profileDarkText.withValues(alpha: 0.45) : _profileDarkText;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -1237,26 +1380,29 @@ class _QuickActionButton extends StatelessWidget {
           shape: const CircleBorder(),
           child: InkWell(
             customBorder: const CircleBorder(),
-            onTap: action.disabled ? null : action.onTap,
+            onTap: isDisabled ? null : action.onTap,
             child: Container(
               height: _buttonSize,
               width: _buttonSize,
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: action.disabled
-                    ? Colors.grey.shade100
-                    : _primaryBlue.withOpacity(0.12),
+                color: fillColor,
                 border: Border.all(
-                  color: action.disabled
-                      ? Colors.grey.withAlpha(60)
-                      : _primaryBlue.withOpacity(0.4),
+                  color: ringColor,
                 ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: isDisabled ? 0.06 : 0.12),
+                    blurRadius: 10,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
               ),
               child: Icon(
                 action.icon,
                 size: 22,
-                color: action.disabled ? Colors.grey.shade400 : _primaryBlue,
+                color: iconColor,
               ),
             ),
           ),
@@ -1265,7 +1411,11 @@ class _QuickActionButton extends StatelessWidget {
         Text(
           action.label,
           textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            color: labelColor,
+          ),
         ),
       ],
     );
@@ -1308,7 +1458,19 @@ class _SectionInfoIconState extends State<_SectionInfoIcon> {
         GestureDetector(
           onTap: _triggerHint,
           onLongPress: _triggerHint,
-          child: const Icon(Icons.info_outline, size: 16, color: _primaryBlue),
+          child: Container(
+            padding: const EdgeInsets.all(2),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.05),
+              shape: BoxShape.circle,
+              border: Border.all(color: _cardBorderColor),
+            ),
+            child: const Icon(
+              Icons.info_outline,
+              size: 16,
+              color: _primaryBlue,
+            ),
+          ),
         ),
         if (_showHint)
           Positioned(
@@ -1325,8 +1487,8 @@ class _SectionInfoIconState extends State<_SectionInfoIcon> {
                 widget.message,
                 style: const TextStyle(
                   color: Colors.white,
-                  fontSize: 11,
-                  height: 1.2,
+                  fontSize: 10,
+                  height: 1.25,
                 ),
               ),
             ),
@@ -1397,7 +1559,9 @@ List<CaregiverJob> _extractTodayJobs(List<CaregiverJob> jobs) {
 }
 
 List<CaregiverJob> _extractScheduledJobs(List<CaregiverJob> jobs) {
-  final filtered = jobs.where((job) => job.isScheduledStatus).toList();
+  final filtered = jobs
+      .where((job) => job.normalizedStatus == 'SCHEDULED')
+      .toList();
   filtered.sort((a, b) {
     final aDate = a.scheduledDateTime ?? DateTime(0);
     final bDate = b.scheduledDateTime ?? DateTime(0);

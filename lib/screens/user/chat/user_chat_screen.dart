@@ -58,6 +58,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
   XFile? _selectedImage;
   Uint8List? _selectedImageBytes;
   bool _isUploadingImage = false;
+  bool _markingRead = false;
 
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -172,34 +173,30 @@ class _UserChatScreenState extends State<UserChatScreen> {
     }
   }
 
-  void _showCallOptions() {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ListTile(
-            leading: const Icon(Icons.call),
-            title: const Text('Voice call'),
-            onTap: () {
-              Navigator.of(ctx).pop();
-            // intentionally no snackbar
-          },
-        ),
-          ListTile(
-            leading: const Icon(Icons.videocam),
-            title: const Text('Video call'),
-            onTap: () {
-              Navigator.of(ctx).pop();
-              // intentionally no snackbar
-            },
-          ),
-        ],
-      ),
+  Future<void> _maybeMarkMessagesRead(
+    List<ChatMessageModel> messages,
+    String userId,
+  ) async {
+    if (_markingRead) return;
+    if (userId.isEmpty) return;
+    final hasUnread = messages.any(
+      (msg) =>
+          msg.receiverId == userId &&
+          msg.readAt == null &&
+          !msg.isDeleted &&
+          !msg.hiddenFor.contains(userId),
     );
+    if (!hasUnread) return;
+
+    _markingRead = true;
+    try {
+      await _chatService.markChatMessagesRead(
+        chatId: widget.chatId,
+        receiverId: userId,
+      );
+    } finally {
+      _markingRead = false;
+    }
   }
 
   Future<void> _openGallery() async {
@@ -766,7 +763,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
               : [
                   IconButton(
                     padding: const EdgeInsets.all(8),
-                    onPressed: _showCallOptions,
+                    onPressed: () {},
                     icon: const Icon(
                       Icons.call,
                       color: _profileTextColor,
@@ -790,6 +787,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
                   }
 
                   final messages = snap.data!;
+                  _maybeMarkMessagesRead(messages, userId);
                   WidgetsBinding.instance.addPostFrameCallback(
                     (_) => _scrollToBottom(),
                   );

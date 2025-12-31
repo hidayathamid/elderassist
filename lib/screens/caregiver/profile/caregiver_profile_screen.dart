@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
@@ -20,22 +21,123 @@ const Color _accentBlue = Color(0xFF00A8A7);
 const Color _tealAccent = Color(0xFF00A8A7);
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _serviceChipBorder = Color(0xFFCCCCCC);
+const Color _profileBackground = Color(0xFFF6F7F9);
+const double _pageHorizontalPadding = 14.0;
+const double _cardRadius = 18.0;
+const TextStyle _sectionTitleStyle = TextStyle(
+  fontWeight: FontWeight.w800,
+  fontSize: 14,
+  color: _profileDarkText,
+);
 const TextStyle _profileDialogTitleStyle = TextStyle(
   fontWeight: FontWeight.w700,
 );
 const TextStyle _profileDialogContentStyle = TextStyle(color: Colors.black87);
 
-class CaregiverProfileScreen extends StatelessWidget {
-  const CaregiverProfileScreen({super.key});
+class CaregiverProfileScreen extends StatefulWidget {
+  const CaregiverProfileScreen({
+    super.key,
+    this.tabIndexListenable,
+    this.tabIndex = 0,
+  });
+
+  final ValueListenable<int>? tabIndexListenable;
+  final int tabIndex;
+
+  @override
+  State<CaregiverProfileScreen> createState() => _CaregiverProfileScreenState();
+}
+
+class _CaregiverProfileScreenState extends State<CaregiverProfileScreen>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _entryController;
+  late final Animation<double> _entryFade;
+  late final Animation<Offset> _entrySlide;
+  bool _wasActive = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _entryController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+    _entryFade = CurvedAnimation(
+      parent: _entryController,
+      curve: Curves.easeOutCubic,
+    );
+    _entrySlide = Tween<Offset>(
+      begin: const Offset(0, 0.02),
+      end: Offset.zero,
+    ).animate(
+      CurvedAnimation(
+        parent: _entryController,
+        curve: Curves.easeOutCubic,
+      ),
+    );
+
+    _wasActive =
+        (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+    widget.tabIndexListenable?.addListener(_handleTabChange);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_wasActive) {
+        _playEntryAnimation();
+      } else {
+        _entryController.value = 1;
+      }
+    });
+  }
+
+  void _playEntryAnimation() {
+    _entryController.forward(from: 0);
+  }
+
+  void _handleTabChange() {
+    final currentIndex = widget.tabIndexListenable?.value;
+    if (currentIndex == null) return;
+    final isActive = currentIndex == widget.tabIndex;
+    if (isActive && !_wasActive) {
+      _playEntryAnimation();
+    }
+    _wasActive = isActive;
+  }
+
+  @override
+  void didUpdateWidget(covariant CaregiverProfileScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tabIndexListenable != widget.tabIndexListenable) {
+      oldWidget.tabIndexListenable?.removeListener(_handleTabChange);
+      widget.tabIndexListenable?.addListener(_handleTabChange);
+      _wasActive =
+          (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.tabIndexListenable?.removeListener(_handleTabChange);
+    _entryController.dispose();
+    super.dispose();
+  }
+
+  Widget _buildAnimatedBody(Widget child) {
+    return FadeTransition(
+      opacity: _entryFade,
+      child: SlideTransition(position: _entrySlide, child: child),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       return Scaffold(
-        backgroundColor: Colors.white,
+        backgroundColor: _profileBackground,
         appBar: _buildAppBar(),
-        body: const Center(child: Text('Please sign in to view your profile')),
+        body: _buildAnimatedBody(
+          const Center(child: Text('Please sign in to view your profile')),
+        ),
       );
     }
 
@@ -48,10 +150,10 @@ class CaregiverProfileScreen extends StatelessWidget {
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           return Scaffold(
-            backgroundColor: Colors.white,
+            backgroundColor: _profileBackground,
             appBar: _buildAppBar(),
-            body: Center(
-              child: Text('Failed to load profile: ${snapshot.error}'),
+            body: _buildAnimatedBody(
+              Center(child: Text('Failed to load profile: ${snapshot.error}')),
             ),
           );
         }
@@ -60,9 +162,11 @@ class CaregiverProfileScreen extends StatelessWidget {
             !snapshot.hasData ||
             !snapshot.data!.exists) {
           return Scaffold(
-            backgroundColor: Colors.white,
+            backgroundColor: _profileBackground,
             appBar: _buildAppBar(),
-            body: const Center(child: CircularProgressIndicator()),
+            body: _buildAnimatedBody(
+              const Center(child: CircularProgressIndicator()),
+            ),
           );
         }
 
@@ -90,13 +194,15 @@ class CaregiverProfileScreen extends StatelessWidget {
             .snapshots();
 
         return Scaffold(
-          backgroundColor: Colors.white,
+          backgroundColor: _profileBackground,
           appBar: _buildAppBar(),
           body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
             stream: bookingsStream,
             builder: (context, bookingsSnapshot) {
               if (!bookingsSnapshot.hasData) {
-                return const Center(child: CircularProgressIndicator());
+                return _buildAnimatedBody(
+                  const Center(child: CircularProgressIndicator()),
+                );
               }
               final bookingDocs = bookingsSnapshot.data!.docs;
               final assignedJobs = bookingDocs
@@ -124,28 +230,32 @@ class CaregiverProfileScreen extends StatelessWidget {
                 stream: documentsStream,
                 builder: (context, documentsSnapshot) {
                   if (!documentsSnapshot.hasData) {
-                    return const Center(child: CircularProgressIndicator());
+                    return _buildAnimatedBody(
+                      const Center(child: CircularProgressIndicator()),
+                    );
                   }
                   final documentDocs = documentsSnapshot.data!.docs;
                   final verifiedDocs = documentDocs
                       .where((doc) => (doc.data()['status'] as bool?) == true)
                       .length;
-                  return _buildProfileContent(
-                    context: context,
-                    name: name,
-                    email: email,
-                    phone: phone,
-                    photoUrl: photoUrl.isNotEmpty ? photoUrl : null,
-                    rating: rating,
-                    available: available,
-                    assignedJobs: assignedJobs,
-                    completedThisMonth: completedThisMonth,
-                    services: services,
-                    documentsCount: documentDocs.length,
-                    certificationsCount: verifiedDocs,
-                    availabilityCount: availabilityCount,
-                    servicesCount: services.length,
-                    caregiverRef: caregiverRef,
+                  return _buildAnimatedBody(
+                    _buildProfileContent(
+                      context: context,
+                      name: name,
+                      email: email,
+                      phone: phone,
+                      photoUrl: photoUrl.isNotEmpty ? photoUrl : null,
+                      rating: rating,
+                      available: available,
+                      assignedJobs: assignedJobs,
+                      completedThisMonth: completedThisMonth,
+                      services: services,
+                      documentsCount: documentDocs.length,
+                      certificationsCount: verifiedDocs,
+                      availabilityCount: availabilityCount,
+                      servicesCount: services.length,
+                      caregiverRef: caregiverRef,
+                    ),
                   );
                 },
               );
@@ -167,9 +277,9 @@ class CaregiverProfileScreen extends StatelessWidget {
           color: Colors.white,
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.08),
-              blurRadius: 8,
-              offset: const Offset(0, 4),
+              color: Colors.black.withValues(alpha: 0.06),
+              blurRadius: 12,
+              offset: const Offset(0, 6),
             ),
           ],
         ),
@@ -178,8 +288,8 @@ class CaregiverProfileScreen extends StatelessWidget {
         'Account',
         style: TextStyle(
           color: _profileDarkText,
-          fontWeight: FontWeight.w600,
-          fontSize: 18,
+          fontWeight: FontWeight.w700,
+          fontSize: 17,
         ),
       ),
     );
@@ -208,21 +318,26 @@ class CaregiverProfileScreen extends StatelessWidget {
         children: [
           const SizedBox(height: 6),
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+            padding: const EdgeInsets.fromLTRB(
+              _pageHorizontalPadding,
+              4,
+              _pageHorizontalPadding,
+              4,
+            ),
             child: Container(
               decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Colors.grey.shade300),
+                borderRadius: BorderRadius.circular(_cardRadius),
+                border: Border.all(color: Colors.black.withValues(alpha: 0.07)),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.08),
-                    blurRadius: 16,
-                    offset: const Offset(0, 6),
+                    color: Colors.black.withValues(alpha: 0.07),
+                    blurRadius: 18,
+                    offset: const Offset(0, 10),
                   ),
                 ],
               ),
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+              padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -306,29 +421,29 @@ class CaregiverProfileScreen extends StatelessWidget {
           ),
           const SizedBox(height: 2),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+            padding: const EdgeInsets.fromLTRB(
+              _pageHorizontalPadding,
+              4,
+              _pageHorizontalPadding,
+              6,
+            ),
             child: _buildSectionHeader(
-              'Your Activity',
-              'Quick look at your jobs and monthly workload.',
-              const TextStyle(
-                color: _profileDarkText,
-                fontWeight: FontWeight.w700,
-                fontSize: 15,
-              ),
+              title: 'Your Activity',
+              hint: 'Quick look at your jobs and monthly workload.',
             ),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.symmetric(horizontal: _pageHorizontalPadding),
             child: Container(
               decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Colors.grey.shade300),
+                borderRadius: BorderRadius.circular(_cardRadius),
+                border: Border.all(color: Colors.black.withValues(alpha: 0.07)),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.08),
-                    blurRadius: 16,
-                    offset: const Offset(0, 6),
+                    color: Colors.black.withValues(alpha: 0.06),
+                    blurRadius: 18,
+                    offset: const Offset(0, 10),
                   ),
                 ],
               ),
@@ -358,31 +473,31 @@ class CaregiverProfileScreen extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+            padding: const EdgeInsets.fromLTRB(
+              _pageHorizontalPadding,
+              4,
+              _pageHorizontalPadding,
+              6,
+            ),
             child: _buildSectionHeader(
-              'Services Offered',
-              'The care types that you are currently sharing with families.',
-              const TextStyle(
-                fontSize: 14.5,
-                fontWeight: FontWeight.w600,
-                color: _profileDarkText,
-              ),
+              title: 'Services Offered',
+              hint: 'The care types that you are currently sharing with families.',
             ),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.symmetric(horizontal: _pageHorizontalPadding),
             child: Container(
               decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.circular(18),
+                borderRadius: BorderRadius.circular(_cardRadius),
                 border: Border.all(
-                  color: Colors.black12.withValues(alpha: 0.05),
+                  color: Colors.black.withValues(alpha: 0.07),
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.08),
-                    blurRadius: 16,
-                    offset: const Offset(0, 6),
+                    color: Colors.black.withValues(alpha: 0.06),
+                    blurRadius: 18,
+                    offset: const Offset(0, 10),
                   ),
                 ],
               ),
@@ -425,29 +540,29 @@ class CaregiverProfileScreen extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+            padding: const EdgeInsets.fromLTRB(
+              _pageHorizontalPadding,
+              4,
+              _pageHorizontalPadding,
+              10,
+            ),
             child: _buildSectionHeader(
-              'Account & Preferences',
-              'Manage your profile, availability, documents, and payout options.',
-              const TextStyle(
-                fontSize: 14.5,
-                fontWeight: FontWeight.w600,
-                color: _profileDarkText,
-              ),
+              title: 'Account & Preferences',
+              hint: 'Manage your profile, availability, documents, and payout options.',
             ),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.symmetric(horizontal: _pageHorizontalPadding),
             child: Container(
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.grey.shade200),
+                border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.04),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
+                    color: Colors.black.withValues(alpha: 0.06),
+                    blurRadius: 16,
+                    offset: const Offset(0, 10),
                   ),
                 ],
               ),
@@ -532,7 +647,7 @@ class CaregiverProfileScreen extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
+            padding: const EdgeInsets.symmetric(horizontal: _pageHorizontalPadding),
             child: SizedBox(
               width: double.infinity,
               child: ElevatedButton(
@@ -553,13 +668,13 @@ class CaregiverProfileScreen extends StatelessWidget {
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _accentGold,
                   foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
                   textStyle: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w700,
                   ),
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(18),
+                    borderRadius: BorderRadius.circular(16),
                   ),
                 ),
                 child: const Text('Log out'),
@@ -572,10 +687,10 @@ class CaregiverProfileScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildSectionHeader(String title, String hint, TextStyle style) {
+  Widget _buildSectionHeader({required String title, required String hint}) {
     return Row(
       children: [
-        Text(title, style: style),
+        Text(title, style: _sectionTitleStyle),
         const SizedBox(width: 6),
         _ProfileSectionInfoIcon(message: hint),
       ],
@@ -795,7 +910,7 @@ class _ZUSDivider extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(height: 1, color: const Color(0xFFEDEDED));
+    return Container(height: 1, color: Colors.black.withValues(alpha: 0.06));
   }
 }
 
@@ -836,7 +951,19 @@ class _ProfileSectionInfoIconState extends State<_ProfileSectionInfoIcon> {
         GestureDetector(
           onTap: _triggerHint,
           onLongPress: _triggerHint,
-          child: Icon(Icons.info_outline, size: 16, color: _tealAccent),
+          child: Container(
+            padding: const EdgeInsets.all(2),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.05),
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
+            ),
+            child: const Icon(
+              Icons.info_outline,
+              size: 16,
+              color: _tealAccent,
+            ),
+          ),
         ),
         if (_showHint)
           Positioned(

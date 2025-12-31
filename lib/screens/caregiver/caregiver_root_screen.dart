@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 import '../../../services/auth_service.dart';
 import '../../../services/chat_service.dart';
 import 'chat/caregiver_chat_list_screen.dart';
@@ -23,19 +25,39 @@ class CaregiverRootScreen extends StatefulWidget {
 
 class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
   int _selectedIndex = 0;
+  final ValueNotifier<int> _tabIndexNotifier = ValueNotifier<int>(0);
   final AuthService _auth = AuthService();
   final ChatService _chatService = ChatService();
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
+  bool _initialSeenSetup = false;
 
-  static const List<Widget> _pages = [
-    CaregiverHomeScreen(),
-    CaregiverJobsScreen(),
-    CaregiverSOSAlertsScreen(),
-    CaregiverChatListScreen(),
-    CaregiverProfileScreen(),
-  ];
+  late final List<Widget> _pages;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabIndexNotifier.value = _selectedIndex;
+    _pages = [
+      CaregiverHomeScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 0),
+      CaregiverJobsScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 1),
+      const CaregiverSOSAlertsScreen(),
+      CaregiverChatListScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 3),
+      CaregiverProfileScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 4),
+    ];
+  }
+
+  @override
+  void dispose() {
+    _tabIndexNotifier.dispose();
+    super.dispose();
+  }
 
   void _onTabSelected(int index) {
     setState(() => _selectedIndex = index);
+    _tabIndexNotifier.value = index;
+    if (index == 1) {
+      _markJobsSeen();
+    }
   }
 
   @override
@@ -44,6 +66,14 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
     final caregiverId = _auth.userId;
     final chatBadgeStream = caregiverId.isNotEmpty
         ? _chatService.streamUnreadCountForCaregiver(caregiverId)
+        : Stream<int>.value(0);
+
+    if (!_initialSeenSetup && caregiverId.isNotEmpty) {
+      _ensureJobsSeenInitialized(caregiverId);
+    }
+
+    final jobBadgeStream = caregiverId.isNotEmpty
+        ? _jobsBadgeStream(caregiverId)
         : Stream<int>.value(0);
     return Scaffold(
       backgroundColor: Colors.grey[50],
@@ -75,13 +105,20 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
               activeColor: _caregiverNavActiveBlue,
               onTap: () => _onTabSelected(0),
             ),
-            _CaregiverNavBubbleItem(
-              icon: Icons.list_alt,
-              label: 'Jobs',
-              index: 1,
-              isActive: _selectedIndex == 1,
-              activeColor: _caregiverNavActiveBlue,
-              onTap: () => _onTabSelected(1),
+            StreamBuilder<int>(
+              stream: jobBadgeStream,
+              builder: (context, snapshot) {
+                final badgeCount = snapshot.data ?? 0;
+                return _CaregiverNavBubbleItem(
+                  icon: Icons.list_alt,
+                  label: 'Jobs',
+                  index: 1,
+                  isActive: _selectedIndex == 1,
+                  activeColor: _caregiverNavActiveBlue,
+                  onTap: () => _onTabSelected(1),
+                  badgeCount: badgeCount,
+                );
+              },
             ),
             _CaregiverNavBubbleItem(
               icon: Icons.sos_rounded,
@@ -119,6 +156,59 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
         ),
       ),
     );
+  }
+
+  Future<void> _ensureJobsSeenInitialized(String caregiverId) async {
+    if (_initialSeenSetup) return;
+    _initialSeenSetup = true;
+    final docRef = _db.collection('caregivers').doc(caregiverId);
+    final snap = await docRef.get();
+    final data = snap.data();
+    final existing = data?['lastSeenJobsAt'];
+    if (existing != null) return;
+    await docRef.set(
+      {'lastSeenJobsAt': FieldValue.serverTimestamp()},
+      SetOptions(merge: true),
+    );
+  }
+
+  Future<void> _markJobsSeen() async {
+    final caregiverId = _auth.userId;
+    if (caregiverId.isEmpty) return;
+    await _db.collection('caregivers').doc(caregiverId).set(
+      {'lastSeenJobsAt': FieldValue.serverTimestamp()},
+      SetOptions(merge: true),
+    );
+  }
+
+  Stream<int> _jobsBadgeStream(String caregiverId) {
+    return _db.collection('caregivers').doc(caregiverId).snapshots().asyncExpand(
+      (doc) {
+        final lastSeen = doc.data()?['lastSeenJobsAt'] as Timestamp?;
+        if (lastSeen == null) return Stream<int>.value(0);
+        return _db
+            .collection('bookings')
+            .where('caregiverId', isEqualTo: caregiverId)
+            .where('createdAt', isGreaterThan: lastSeen)
+            .orderBy('createdAt', descending: true)
+            .snapshots()
+            .map((snapshot) {
+          var count = 0;
+          for (final booking in snapshot.docs) {
+            final data = booking.data();
+            if ((data['hidden'] as bool?) == true) continue;
+            final status = (data['status'] as String?)?.trim().toUpperCase();
+            final isJobStatus = status == 'ASSIGNED' ||
+                status == 'ONGOING' ||
+                status == 'IN_PROGRESS' ||
+                status == 'SCHEDULED';
+            if (!isJobStatus) continue;
+            count++;
+          }
+          return count;
+        });
+      },
+    ).distinct();
   }
 }
 

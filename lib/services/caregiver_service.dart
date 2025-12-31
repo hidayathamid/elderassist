@@ -45,6 +45,14 @@ class CaregiverService {
         );
   }
 
+  Stream<List<CaregiverModel>> streamCaregivers() {
+    return _db.collection("caregivers").snapshots().map(
+          (snap) => snap.docs
+              .map((d) => CaregiverModel.fromMap(d.id, d.data()))
+              .toList(),
+        );
+  }
+
   // Get caregiver by ID
   Future<CaregiverModel?> getCaregiver(String id) async {
     try {

@@ -8,14 +8,16 @@ import '../../widgets/standard_app_bar.dart';
 import '../user/activity/activity_screen.dart';
 import '../user/chat/user_chat_screen.dart';
 
-const double _chatCardRadius = 16;
+const double _chatCardRadius = 18;
 const double _chatCardRevealExtent = 118;
 const Color _chatMutedText = Color(0xFF1B1D29);
+const Color _chatPageBackground = Color(0xFFF7F8FA);
+const Color _chatCardBorder = Color(0xFFD7DCE3);
 
 final BoxShadow _chatCardShadow = BoxShadow(
-  color: Colors.black.withValues(alpha: 0.08),
-  blurRadius: 16,
-  offset: const Offset(0, 4),
+  color: Colors.black.withValues(alpha: 0.10),
+  blurRadius: 20,
+  offset: const Offset(0, 10),
 );
 
 final DateFormat _timeFormatter = DateFormat.jm();
@@ -208,13 +210,13 @@ class _ChatListScreenState extends State<ChatListScreen> {
             Icon(Icons.mark_email_unread, size: 18, color: activityAccentBlue),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(
-                'You have $totalUnread unread ${totalUnread == 1 ? 'messaremovege' : 'messages'}.',
-                style: TextStyle(
-                  fontWeight: FontWeight.w600,
-                  color: activityPrimaryTextColor,
-                  fontSize: 13,
-                ),
+               child: Text(
+                'You have $totalUnread unread ${totalUnread == 1 ? 'message' : 'messages'}.',
+                 style: TextStyle(
+                   fontWeight: FontWeight.w600,
+                   color: activityPrimaryTextColor,
+                   fontSize: 13,
+                 ),
               ),
             ),
             Container(
@@ -258,20 +260,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
         child: InkWell(
           borderRadius: BorderRadius.circular(_chatCardRadius),
           onTap: onDelete,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.start,
-            children: const [
-              Icon(Icons.delete_outline, color: Colors.white, size: 20),
-              SizedBox(width: 10),
-              Text(
-                'Delete',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
+          child: const _DeleteLabel(alignment: Alignment.centerLeft),
         ),
       ),
     );
@@ -280,7 +269,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: _chatPageBackground,
       appBar: buildProfileStyleAppBar(
         title: widget.title,
         onBack: widget.onBack,
@@ -318,17 +307,18 @@ class _ChatListScreenState extends State<ChatListScreen> {
             );
           }
 
-          final totalUnread = visibleChats.fold<int>(
-            0,
-            (acc, doc) => acc + _extractUnread(doc, widget.userId),
-          );
-
           return Padding(
             padding: const EdgeInsets.only(top: 12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _buildUnreadBanner(totalUnread),
+                StreamBuilder<int>(
+                  stream: _chatService.streamUnreadCountForParticipant(
+                    widget.userId,
+                  ),
+                  builder: (context, unreadSnapshot) =>
+                      _buildUnreadBanner(unreadSnapshot.data ?? 0),
+                ),
                 Expanded(
                   child: ListView.separated(
                     padding: const EdgeInsets.symmetric(
@@ -385,16 +375,24 @@ class _ChatListScreenState extends State<ChatListScreen> {
                                   (data['photoUrl'] as String?) ??
                                   '';
 
-                              return _ChatTile(
-                                chatId: chatDoc.id,
-                                currentUserId: widget.userId,
-                                otherUserId: otherUserId,
-                                displayName: displayName,
-                                photoUrl: photoUrl,
-                                lastMessage: lastMessage,
-                                timeText: timeText,
-                                unread: unread,
-                                hideCallAction: widget.hideCallAction,
+                              return StreamBuilder<int>(
+                                stream: _chatService.streamUnreadCountForChat(
+                                  chatDoc.id,
+                                  widget.userId,
+                                ),
+                                builder: (context, unreadSnapshot) {
+                                  return _ChatTile(
+                                    chatId: chatDoc.id,
+                                    currentUserId: widget.userId,
+                                    otherUserId: otherUserId,
+                                    displayName: displayName,
+                                    photoUrl: photoUrl,
+                                    lastMessage: lastMessage,
+                                    timeText: timeText,
+                                    unread: unreadSnapshot.data ?? unread,
+                                    hideCallAction: widget.hideCallAction,
+                                  );
+                                },
                               );
                             },
                           ),
@@ -469,13 +467,31 @@ class _ChatTile extends StatelessWidget {
   final int unread;
   final bool hideCallAction;
 
+  Widget _buildUnreadPill(int count) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+      decoration: BoxDecoration(
+        color: activityAccentBlue,
+        borderRadius: BorderRadius.circular(24),
+      ),
+      child: Text(
+        count.toString(),
+        style: const TextStyle(
+          fontSize: 11,
+          color: Colors.white,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(_chatCardRadius),
-        border: Border.all(color: Colors.grey.shade200),
+        border: Border.all(color: _chatCardBorder),
         boxShadow: [_chatCardShadow],
       ),
       child: Material(
@@ -516,41 +532,21 @@ class _ChatTile extends StatelessWidget {
                               displayName,
                               style: const TextStyle(
                                 fontWeight: FontWeight.w700,
-                                fontSize: 16,
+                                fontSize: 13,
                                 color: activityPrimaryTextColor,
                               ),
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          if (unread > 0) ...[
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 7,
-                                vertical: 2.5,
-                              ),
-                              decoration: BoxDecoration(
-                                color: activityAccentBlue,
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                              child: Text(
-                                unread.toString(),
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                          ],
                         ],
                       ),
-                      const SizedBox(height: 6),
+                      const SizedBox(height: 4),
                       Text(
                         lastMessage.isNotEmpty
                             ? lastMessage
                             : 'No messages yet',
                         style: const TextStyle(
-                          fontSize: 13,
+                          fontSize: 12,
                           color: Colors.black54,
                         ),
                         maxLines: 1,
@@ -566,16 +562,18 @@ class _ChatTile extends StatelessWidget {
                     Text(
                       timeText,
                       style: const TextStyle(
-                        fontSize: 11,
+                        fontSize: 10,
                         color: Colors.black54,
                       ),
                     ),
                     const SizedBox(height: 6),
-                    const Icon(
-                      Icons.chevron_right,
-                      size: 18,
-                      color: Colors.black38,
-                    ),
+                    unread > 0
+                        ? _buildUnreadPill(unread)
+                        : const Icon(
+                            Icons.chevron_right,
+                            size: 18,
+                            color: Colors.black38,
+                          ),
                   ],
                 ),
               ],
@@ -631,8 +629,9 @@ class _ChatSwipeRevealCardState extends State<_ChatSwipeRevealCard> {
 
   void _handlePointerEnd() {
     final shouldReveal = _dragOffset >= widget.revealExtent * 0.5;
+    final target = shouldReveal ? widget.revealExtent : 0.0;
     setState(() {
-      _dragOffset = shouldReveal ? widget.revealExtent : 0.0;
+      _dragOffset = target;
       _dragging = false;
       _dragActive = false;
     });
@@ -678,6 +677,33 @@ class _ChatSwipeRevealCardState extends State<_ChatSwipeRevealCard> {
           Transform.translate(
             offset: Offset(_dragOffset, 0),
             child: widget.child,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DeleteLabel extends StatelessWidget {
+  const _DeleteLabel({required this.alignment});
+
+  final Alignment alignment;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: alignment,
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.delete_outline, color: Colors.white, size: 20),
+          SizedBox(width: 10),
+          Text(
+            'Delete',
+            style: TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ],
       ),

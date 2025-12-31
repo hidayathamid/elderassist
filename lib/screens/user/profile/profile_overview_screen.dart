@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
@@ -21,13 +22,132 @@ const Color _accentGold = Color(0xFFF4B63D);
 const Color _tealAccent = Color(0xFF00A8A7);
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _serviceChipBorder = Color(0xFFCCCCCC);
+const Color _profileCardBorder = Color(0xFFD7DCE3);
+const Color _profileBackground = Color(0xFFF7F8FA);
 const TextStyle _profileDialogTitleStyle = TextStyle(
   fontWeight: FontWeight.w700,
 );
 const TextStyle _profileDialogContentStyle = TextStyle(color: Colors.black87);
 
-class ProfileOverviewScreen extends StatelessWidget {
-  const ProfileOverviewScreen({super.key});
+BoxDecoration _profileCardDecoration({double radius = 18}) {
+  return BoxDecoration(
+    color: Colors.white,
+    borderRadius: BorderRadius.circular(radius),
+    border: Border.all(color: _profileCardBorder),
+    boxShadow: [
+      BoxShadow(
+        color: Colors.black.withValues(alpha: 0.10),
+        blurRadius: 20,
+        offset: const Offset(0, 10),
+      ),
+    ],
+  );
+}
+
+class ProfileOverviewScreen extends StatefulWidget {
+  const ProfileOverviewScreen({
+    super.key,
+    this.tabIndexListenable,
+    this.tabIndex = 4,
+  });
+
+  final ValueListenable<int>? tabIndexListenable;
+  final int tabIndex;
+
+  @override
+  State<ProfileOverviewScreen> createState() => _ProfileOverviewScreenState();
+}
+
+class _ProfileOverviewScreenState extends State<ProfileOverviewScreen>
+    with SingleTickerProviderStateMixin {
+  AnimationController? _entryController;
+  Animation<double>? _entryFade;
+  Animation<Offset>? _entrySlide;
+  bool _wasActive = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final entryController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+    final entryFade = CurvedAnimation(
+      parent: entryController,
+      curve: Curves.easeOutCubic,
+    );
+    final entrySlide = Tween<Offset>(
+      begin: const Offset(0, 0.02),
+      end: Offset.zero,
+    ).animate(
+      CurvedAnimation(
+        parent: entryController,
+        curve: Curves.easeOutCubic,
+      ),
+    );
+    _entryController = entryController;
+    _entryFade = entryFade;
+    _entrySlide = entrySlide;
+
+    _wasActive =
+        (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+    widget.tabIndexListenable?.addListener(_handleTabChange);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_wasActive) {
+        _entryController?.forward(from: 0);
+      } else {
+        _entryController?.value = 1;
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant ProfileOverviewScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tabIndexListenable != widget.tabIndexListenable) {
+      oldWidget.tabIndexListenable?.removeListener(_handleTabChange);
+      widget.tabIndexListenable?.addListener(_handleTabChange);
+      _wasActive =
+          (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+    }
+  }
+
+  void _handleTabChange() {
+    final currentIndex = widget.tabIndexListenable?.value;
+    if (currentIndex == null) return;
+    final isActive = currentIndex == widget.tabIndex;
+    if (isActive && !_wasActive) {
+      _entryController?.forward(from: 0);
+    }
+    _wasActive = isActive;
+  }
+
+  @override
+  void dispose() {
+    widget.tabIndexListenable?.removeListener(_handleTabChange);
+    _entryController?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entryFade = _entryFade ?? const AlwaysStoppedAnimation<double>(1);
+    final entrySlide =
+        _entrySlide ?? const AlwaysStoppedAnimation<Offset>(Offset.zero);
+
+    return FadeTransition(
+      opacity: entryFade,
+      child: SlideTransition(
+        position: entrySlide,
+        child: const _ProfileOverviewContent(),
+      ),
+    );
+  }
+}
+
+class _ProfileOverviewContent extends StatelessWidget {
+  const _ProfileOverviewContent();
 
   Stream<DocumentSnapshot<Map<String, dynamic>>> _userStream() {
     final user = FirebaseAuth.instance.currentUser;
@@ -109,20 +229,20 @@ class ProfileOverviewScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: _profileBackground,
       appBar: AppBar(
-        backgroundColor: Colors.white,
+        backgroundColor: _profileBackground,
         elevation: 0,
         centerTitle: true,
         automaticallyImplyLeading: false,
         flexibleSpace: Container(
           decoration: BoxDecoration(
-            color: Colors.white,
+            color: _profileBackground,
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withValues(alpha: 0.08),
-                blurRadius: 8,
-                offset: const Offset(0, 4),
+                color: Colors.black.withValues(alpha: 0.10),
+                blurRadius: 18,
+                offset: const Offset(0, 6),
               ),
             ],
           ),
@@ -131,7 +251,7 @@ class ProfileOverviewScreen extends StatelessWidget {
           "Account",
           style: TextStyle(
             color: _profileDarkText,
-            fontWeight: FontWeight.w600,
+            fontWeight: FontWeight.w700,
             fontSize: 18,
           ),
         ),
@@ -221,24 +341,13 @@ class ProfileOverviewScreen extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
             child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Colors.grey.shade300),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.08),
-                    blurRadius: 16,
-                    offset: const Offset(0, 6),
-                  ),
-                ],
-              ),
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+              decoration: _profileCardDecoration(),
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   DefaultProfileAvatar(
-                    radius: 32,
+                    radius: 28,
                     photoUrl: user.photoUrl,
                     label: user.name.isNotEmpty ? user.name : user.email,
                   ),
@@ -250,8 +359,8 @@ class ProfileOverviewScreen extends StatelessWidget {
                         Text(
                           user.name,
                           style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
+                            fontSize: 15.5,
+                            fontWeight: FontWeight.w800,
                             color: _profileDarkText,
                           ),
                         ),
@@ -288,26 +397,15 @@ class ProfileOverviewScreen extends StatelessWidget {
               "See an overview of upcoming bookings, caregivers, and family stats.",
               const TextStyle(
                 color: _profileDarkText,
-                fontWeight: FontWeight.w700,
-                fontSize: 15,
+                fontWeight: FontWeight.w800,
+                fontSize: 15.5,
               ),
             ),
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Colors.grey.shade300),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.08),
-                    blurRadius: 16,
-                    offset: const Offset(0, 6),
-                  ),
-                ],
-              ),
+              decoration: _profileCardDecoration(),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -342,7 +440,7 @@ class ProfileOverviewScreen extends StatelessWidget {
               "These guide the caregivers we recommend for you.",
               const TextStyle(
                 fontSize: 14.5,
-                fontWeight: FontWeight.w600,
+                fontWeight: FontWeight.w800,
                 color: _profileDarkText,
               ),
             ),
@@ -350,20 +448,7 @@ class ProfileOverviewScreen extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(
-                  color: Colors.black12.withValues(alpha: 0.05),
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.08),
-                    blurRadius: 16,
-                    offset: const Offset(0, 6),
-                  ),
-                ],
-              ),
+              decoration: _profileCardDecoration(),
               child: SizedBox(
                 height: 44,
                 child: servicePreferences.isEmpty
@@ -410,7 +495,7 @@ class ProfileOverviewScreen extends StatelessWidget {
               "Quick links to manage your profile, addresses, and emergency contacts.",
               const TextStyle(
                 fontSize: 14.5,
-                fontWeight: FontWeight.w600,
+                fontWeight: FontWeight.w800,
                 color: _profileDarkText,
               ),
             ),
@@ -418,18 +503,7 @@ class ProfileOverviewScreen extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.grey.shade200),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.04),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
+              decoration: _profileCardDecoration(),
               child: Column(
                 children: [
                   _ZUSRow(
@@ -551,7 +625,7 @@ class ProfileOverviewScreen extends StatelessWidget {
       context: context,
       barrierDismissible: true,
       builder: (_) => AlertDialog(
-        backgroundColor: Colors.white,
+        backgroundColor: _profileBackground,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         title: const Text(
           'Log out?',
@@ -797,7 +871,19 @@ class _ProfileSectionInfoIconState extends State<_ProfileSectionInfoIcon> {
         GestureDetector(
           onTap: _triggerHint,
           onLongPress: _triggerHint,
-          child: Icon(Icons.info_outline, size: 16, color: _tealAccent),
+          child: Container(
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
+            ),
+            child: const Icon(
+              Icons.info_outline,
+              size: 14,
+              color: _tealAccent,
+            ),
+          ),
         ),
         if (_showHint)
           Positioned(

@@ -6,6 +6,7 @@ import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.d
 import 'package:emergencies_disability_assistance_app/screens/user/chat/user_chat_screen.dart';
 import 'package:emergencies_disability_assistance_app/services/chat_service.dart';
 import 'package:emergencies_disability_assistance_app/services/location_service.dart';
+import 'package:emergencies_disability_assistance_app/utils/service_preferences.dart';
 import '../../../widgets/live_location_map.dart';
 
 const BorderRadius _sectionBorderRadius = BorderRadius.all(Radius.circular(18));
@@ -232,7 +233,8 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
     final scheduledDate = (job['scheduledDate'] as String?) ?? '';
     final startTime = (job['startTime'] as String?) ?? '';
     final endTime = (job['endTime'] as String?) ?? '';
-    final service = (job['service'] as String?) ?? 'Home care';
+    final rawServiceLabel = extractServiceLabelFromFirestore(job);
+    final service = rawServiceLabel.isNotEmpty ? rawServiceLabel : 'Home care';
     final price = (job['price'] as Object?)?.toString() ?? 'RM 0';
     final location = (job['address'] as String?) ?? '';
     final timeLabel = _formatTimeLabel(startTime, endTime);

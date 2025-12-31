@@ -771,106 +771,118 @@ class _ProfileAddressEditScreenState extends State<ProfileAddressEditScreen> {
                           _labelSelector(),
                           const SizedBox(height: 8),
                           _addressCard(),
-                          const SizedBox(height: 12),
-                          const Text(
-                            'Telegram Emergency Access (Booked User)',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w600,
-                              fontSize: 12,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          TextFormField(
-                            controller: _telegramLinkCtrl,
-                            readOnly: true,
-                            showCursor: false,
-                            style: _inputFieldTextStyle,
-                            decoration: InputDecoration(
-                              hintText: 'Generate Telegram link',
-                              hintStyle: _inputFieldHintStyle,
-                              filled: true,
-                              fillColor: Colors.white,
-                              contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 14,
-                                vertical: 10,
-                              ),
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(16),
-                                borderSide: BorderSide(
-                                  color: Colors.grey[300]!,
-                                ),
-                              ),
-                              enabledBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(16),
-                                borderSide: BorderSide(
-                                  color: Colors.grey[300]!,
-                                ),
-                              ),
-                              focusedBorder: const OutlineInputBorder(
-                                borderRadius: BorderRadius.all(
-                                  Radius.circular(16),
-                                ),
-                                borderSide: BorderSide(
-                                  color: _profileDarkText,
-                                  width: 1.1,
-                                ),
-                              ),
-                              suffixIconConstraints: const BoxConstraints(
-                                minWidth: 90,
-                              ),
-                              suffixIcon: Padding(
-                                padding: const EdgeInsets.only(right: 6),
-                                child: SizedBox(
-                                  height: 32,
-                                  child: ElevatedButton(
-                                    onPressed: telegramButtonAction,
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: telegramButtonColor,
-                                      foregroundColor: Colors.white,
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 16,
-                                      ),
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(12),
-                                      ),
-                                    ),
-                                    child: _isGeneratingTelegramLink
-                                        ? const SizedBox(
-                                            width: 16,
-                                            height: 16,
-                                            child: CircularProgressIndicator(
-                                              strokeWidth: 2,
-                                              color: Colors.white,
-                                            ),
-                                          )
-                                        : Text(
-                                            hasTelegramLink
-                                                ? 'Copy'
-                                                : 'Generate',
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.w600,
-                                              fontSize: 12,
-                                            ),
-                                          ),
+                          Visibility(
+                            visible: false,
+                            maintainState: true,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const SizedBox(height: 12),
+                                const Text(
+                                  'Telegram Emergency Access (Booked User)',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 12,
                                   ),
                                 ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            telegramHelperText,
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: Colors.black54,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          const Text(
-                            'Your invite link will never expire.',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: Colors.black54,
+                                const SizedBox(height: 8),
+                                TextFormField(
+                                  controller: _telegramLinkCtrl,
+                                  readOnly: true,
+                                  showCursor: false,
+                                  style: _inputFieldTextStyle,
+                                  decoration: InputDecoration(
+                                    hintText: 'Generate Telegram link',
+                                    hintStyle: _inputFieldHintStyle,
+                                    filled: true,
+                                    fillColor: Colors.white,
+                                    contentPadding: const EdgeInsets.symmetric(
+                                      horizontal: 14,
+                                      vertical: 10,
+                                    ),
+                                    border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(16),
+                                      borderSide: BorderSide(
+                                        color: Colors.grey[300]!,
+                                      ),
+                                    ),
+                                    enabledBorder: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(16),
+                                      borderSide: BorderSide(
+                                        color: Colors.grey[300]!,
+                                      ),
+                                    ),
+                                    focusedBorder: const OutlineInputBorder(
+                                      borderRadius: BorderRadius.all(
+                                        Radius.circular(16),
+                                      ),
+                                      borderSide: BorderSide(
+                                        color: _profileDarkText,
+                                        width: 1.1,
+                                      ),
+                                    ),
+                                    suffixIconConstraints: const BoxConstraints(
+                                      minWidth: 90,
+                                    ),
+                                    suffixIcon: Padding(
+                                      padding: const EdgeInsets.only(right: 6),
+                                      child: SizedBox(
+                                        height: 32,
+                                        child: ElevatedButton(
+                                          onPressed: telegramButtonAction,
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor: telegramButtonColor,
+                                            foregroundColor: Colors.white,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 16,
+                                            ),
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius: BorderRadius.circular(
+                                                12,
+                                              ),
+                                            ),
+                                          ),
+                                          child: _isGeneratingTelegramLink
+                                              ? const SizedBox(
+                                                  width: 16,
+                                                  height: 16,
+                                                  child:
+                                                      CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                        color: Colors.white,
+                                                      ),
+                                                )
+                                              : Text(
+                                                  hasTelegramLink
+                                                      ? 'Copy'
+                                                      : 'Generate',
+                                                  style: const TextStyle(
+                                                    fontWeight: FontWeight.w600,
+                                                    fontSize: 12,
+                                                  ),
+                                                ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  telegramHelperText,
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.black54,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                const Text(
+                                  'Your invite link will never expire.',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.black54,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ],

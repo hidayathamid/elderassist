@@ -861,7 +861,6 @@ exports.createBookingAndPay = functions
     }
 
     const uid = context.auth.uid;
-    const bookingRef = db.collection("bookings").doc();
     const amount = Number(data.amount) || Number(data.servicePrice) || 0;
     const paymentResult = await createToyyibBill({
       billName: data.billName,
@@ -872,12 +871,28 @@ exports.createBookingAndPay = functions
       phone: data.phone,
     });
 
-    const bookingData = {
-      bookingId: bookingRef.id,
-      userId: uid,
+    const normalizeServicePreferences = (raw) => {
+      if (Array.isArray(raw)) {
+        return raw.map((value) => String(value).trim()).filter(Boolean);
+      }
+      if (typeof raw === "string" && raw.trim()) {
+        return [raw.trim()];
+      }
+      return [];
+    };
+
+    const servicePreferences = normalizeServicePreferences(
+      data.servicePreferences ?? data.service ?? data.services,
+    );
+    const serviceLabel = servicePreferences.join(", ");
+
+    const bookingId = db.collection("bookings").doc().id;
+    const bookingPayload = {
       caregiverId: data.caregiverId || "",
       caregiverName: data.caregiverName || "",
-      service: data.service || "",
+      caregiverPhoto: data.caregiverPhoto || data.photoUrl || "",
+      servicePreferences,
+      service: serviceLabel,
       personId: data.personId || "",
       personName: data.personName || "",
       personAddress: data.personAddress || "",
@@ -885,22 +900,33 @@ exports.createBookingAndPay = functions
       addressLabel: data.addressLabel || "",
       date: data.date || "",
       time: data.time || "",
-      paymentMethod: data.paymentMethod || "ToyyibPay",
-      servicePrice: Number(data.servicePrice) || 0,
       notes: data.notes || "",
-      status: "PENDING_PAYMENT",
-      toyyibBillCode: paymentResult.billCode,
-      toyyibPaymentUrl: paymentResult.paymentUrl,
-      notifyApp: true,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      servicePrice: Number(data.servicePrice) || 0,
     };
 
-    await bookingRef.set(bookingData);
+    await db.collection("payments").doc(paymentResult.billCode).set(
+      {
+        userId: uid,
+        bookingId,
+        billCode: paymentResult.billCode,
+        paymentUrl: paymentResult.paymentUrl,
+        paymentMethod: data.paymentMethod || "ToyyibPay",
+        amount,
+        currency: "MYR",
+        paymentStatus: "PENDING",
+        status: 2, // 1=paid,2=pending,3=failed (ToyyibPay conventions)
+        hidden: false,
+        booking: bookingPayload,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
 
     return {
       success: true,
-      bookingId: bookingRef.id,
+      bookingId,
+      billCode: paymentResult.billCode,
       paymentUrl: paymentResult.paymentUrl,
     };
   });
@@ -982,30 +1008,85 @@ exports.toyyibpayCallback = functions
         {
           status,          // 1 = success, 2 = pending, 3 = failed
           paidAt: Date.now(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
         { merge: true }
       );
 
-        const bookingSnap = await db
-          .collection("bookings")
-          .where("toyyibBillCode", "==", finalBillCode)
-        .limit(1)
-        .get();
-      if (!bookingSnap.empty) {
-        const bookingRef = bookingSnap.docs[0].ref;
-        const bookingUpdate = {
+      const paymentRef = db.collection("payments").doc(finalBillCode);
+      const paymentSnap = await paymentRef.get();
+      const paymentData = paymentSnap.data() || {};
+      const bookingId = String(paymentData.bookingId || "").trim();
+      const bookingPayload = paymentData.booking || {};
+      const userId = String(paymentData.userId || "").trim();
+      const paymentMethod = String(paymentData.paymentMethod || "ToyyibPay");
+      const amountValue = Number(paymentData.amount) || 0;
+
+      if (status === 1) {
+        const computedStatus = derivePaidBookingStatus(bookingPayload);
+        const bookingRef = db.collection("bookings").doc(bookingId || undefined);
+        const bookingData = {
+          bookingId: bookingRef.id,
+          userId,
+          caregiverId: bookingPayload.caregiverId || "",
+          caregiverName: bookingPayload.caregiverName || "",
+          caregiverPhoto: bookingPayload.caregiverPhoto || "",
+          servicePreferences: bookingPayload.servicePreferences || [],
+          service: bookingPayload.service || "",
+          personId: bookingPayload.personId || "",
+          personName: bookingPayload.personName || "",
+          personAddress: bookingPayload.personAddress || "",
+          addressId: bookingPayload.addressId || "",
+          addressLabel: bookingPayload.addressLabel || "",
+          date: bookingPayload.date || "",
+          time: bookingPayload.time || "",
+          paymentMethod,
+          servicePrice: Number(bookingPayload.servicePrice) || amountValue,
+          notes: bookingPayload.notes || "",
+          status: computedStatus,
+          paymentStatus: "PAID",
+          paidAt: Date.now(),
+          toyyibBillCode: finalBillCode,
+          toyyibPaymentUrl: paymentData.paymentUrl || null,
           notifyApp: true,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         };
-        if (status === 1) {
-          bookingUpdate.status = "ASSIGNED";
-          bookingUpdate.paymentStatus = "PAID";
-          bookingUpdate.paidAt = Date.now();
-        } else {
-          bookingUpdate.status = "PAYMENT_FAILED";
-          bookingUpdate.paymentStatus = status === 3 ? "FAILED" : "PENDING";
+
+        await bookingRef.set(bookingData, { merge: true });
+        await paymentRef.set(
+          {
+            bookingId: bookingRef.id,
+            paymentStatus: "PAID",
+            bookingStatus: computedStatus,
+            status: 1,
+            paidAt: Date.now(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+      } else if (status === 3) {
+        await paymentRef.set(
+          {
+            paymentStatus: "FAILED",
+            bookingStatus: "PAYMENT_FAILED",
+            status: 3,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+        if (bookingId) {
+          await db.collection("bookings").doc(bookingId).delete().catch(() => {});
         }
-        await bookingRef.update(bookingUpdate);
+      } else {
+        await paymentRef.set(
+          {
+            paymentStatus: "PENDING",
+            status: 2,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
       }
 
       res.status(200).send("OK");
@@ -1014,6 +1095,38 @@ exports.toyyibpayCallback = functions
       res.status(500).send("ERROR");
     }
   });
+
+function derivePaidBookingStatus(bookingData) {
+  const date = String(bookingData.date || "").trim(); // expected yyyy-MM-dd
+  const time = String(bookingData.time || "").trim(); // expected HH:mm
+
+  const nowEpoch = Date.now();
+  const scheduledEpoch = parseMalaysiaEpoch(date, time);
+  if (Number.isFinite(scheduledEpoch)) {
+    return scheduledEpoch > nowEpoch ? "SCHEDULED" : "ASSIGNED";
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    const todayMalaysia = malaysiaTodayString();
+    if (date > todayMalaysia) return "SCHEDULED";
+  }
+
+  return "ASSIGNED";
+}
+
+function parseMalaysiaEpoch(date, time) {
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return Number.NaN;
+  const safeTime = time && /^\d{2}:\d{2}$/.test(time) ? time : "00:00";
+  const iso = `${date}T${safeTime}:00+08:00`;
+  const epoch = Date.parse(iso);
+  return Number.isNaN(epoch) ? Number.NaN : epoch;
+}
+
+function malaysiaTodayString() {
+  // Malaysia is UTC+8 and does not observe DST.
+  const malaysiaEpoch = Date.now() + 8 * 60 * 60 * 1000;
+  return new Date(malaysiaEpoch).toISOString().slice(0, 10);
+}
 
 
 // =====================================================

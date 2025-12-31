@@ -4,11 +4,22 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:image_picker/image_picker.dart';
+import 'dart:async';
 
 import '../models/chat_message_model.dart';
 
 class ChatService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+
+  bool _isUnreadMessageFor(String receiverId, Map<String, dynamic> data) {
+    if (receiverId.isEmpty) return false;
+    if (data['readAt'] != null) return false;
+    if ((data['receiverId'] as String?)?.trim() != receiverId) return false;
+    if (data['isDeleted'] == true) return false;
+    final hiddenFor = (data['hiddenFor'] as List?)?.whereType<String>().toList();
+    if (hiddenFor != null && hiddenFor.contains(receiverId)) return false;
+    return true;
+  }
 
   /// ------------------------------------------------------------
   /// 1. CREATE OR GET CHAT ROOM
@@ -193,6 +204,120 @@ class ChatService {
         .snapshots();
   }
 
+  Stream<int> streamUnreadCountForChat(String chatId, String receiverId) {
+    if (chatId.isEmpty || receiverId.isEmpty) {
+      return Stream<int>.value(0);
+    }
+    return _db
+        .collection("chats")
+        .doc(chatId)
+        .collection("messages")
+        .where("receiverId", isEqualTo: receiverId)
+        .where("readAt", isNull: true)
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs.fold<int>(
+            0,
+            (acc, doc) => acc + (_isUnreadMessageFor(receiverId, doc.data()) ? 1 : 0),
+          ),
+        );
+  }
+
+  bool _isChatHiddenFor(String participantId, Map<String, dynamic> data) {
+    final hiddenValue = data['hidden'];
+    if (hiddenValue is bool) return hiddenValue;
+    if (hiddenValue is Map) {
+      final map = hiddenValue.cast<String, dynamic>();
+      return map[participantId] == true;
+    }
+    return false;
+  }
+
+  Stream<int> streamUnreadCountForParticipant(String participantId) {
+    if (participantId.isEmpty) return Stream<int>.value(0);
+
+    final controller = StreamController<int>.broadcast();
+    StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? chatsSub;
+    final messageSubs = <String, StreamSubscription<int>>{};
+    final unreadByChat = <String, int>{};
+
+    void emit() {
+      if (controller.isClosed) return;
+      final total = unreadByChat.values.fold<int>(0, (a, b) => a + b);
+      controller.add(total);
+    }
+
+    void subscribeToChat(String chatId) {
+      if (messageSubs.containsKey(chatId)) return;
+      messageSubs[chatId] = streamUnreadCountForChat(chatId, participantId).listen(
+        (count) {
+          unreadByChat[chatId] = count;
+          emit();
+        },
+        onError: controller.addError,
+      );
+    }
+
+    chatsSub = _db
+        .collection("chats")
+        .where("participants", arrayContains: participantId)
+        .snapshots()
+        .listen(
+      (snapshot) {
+        final nextChatIds = <String>{};
+        for (final doc in snapshot.docs) {
+          final data = doc.data();
+          if (_isChatHiddenFor(participantId, data)) continue;
+          nextChatIds.add(doc.id);
+          subscribeToChat(doc.id);
+        }
+
+        final removed = messageSubs.keys.where((id) => !nextChatIds.contains(id)).toList();
+        for (final chatId in removed) {
+          messageSubs.remove(chatId)?.cancel();
+          unreadByChat.remove(chatId);
+        }
+        emit();
+      },
+      onError: controller.addError,
+    );
+
+    controller.onCancel = () async {
+      await chatsSub?.cancel();
+      for (final sub in messageSubs.values) {
+        await sub.cancel();
+      }
+      await controller.close();
+    };
+
+    return controller.stream.distinct();
+  }
+
+  Future<void> markChatMessagesRead({
+    required String chatId,
+    required String receiverId,
+  }) async {
+    if (chatId.isEmpty || receiverId.isEmpty) return;
+
+    final query = await _db
+        .collection("chats")
+        .doc(chatId)
+        .collection("messages")
+        .where("receiverId", isEqualTo: receiverId)
+        .where("readAt", isNull: true)
+        .get();
+
+    if (query.docs.isEmpty) return;
+
+    final batch = _db.batch();
+    for (final doc in query.docs) {
+      final data = doc.data();
+      if (!_isUnreadMessageFor(receiverId, data)) continue;
+      batch.update(doc.reference, {"readAt": FieldValue.serverTimestamp()});
+    }
+    await batch.commit();
+  }
+
   /// ------------------------------------------------------------
   /// 6. MANAGE MESSAGES
   /// ------------------------------------------------------------
@@ -268,21 +393,80 @@ class ChatService {
   }
 
   Stream<int> streamUnreadCountForUser(String userId) {
-    return streamUserChats(userId).map(
-      (snapshot) => snapshot.docs.fold(
-        0,
-        (total, doc) => total + unreadFromDocument(doc.data(), userId),
-      ),
-    );
+    return streamUnreadCountForParticipant(userId);
   }
 
   Stream<int> streamUnreadCountForCaregiver(String caregiverId) {
-    return streamCaregiverChats(caregiverId).map(
-      (snapshot) => snapshot.docs.fold(
-        0,
-        (total, doc) =>
-            total + unreadFromDocument(doc.data(), caregiverId),
-      ),
+    return streamUnreadCountForParticipant(caregiverId);
+  }
+
+  Stream<int> streamUnreadCountForConversation({
+    required String participantId,
+    required String otherUserId,
+  }) {
+    if (participantId.isEmpty || otherUserId.isEmpty) {
+      return Stream<int>.value(0);
+    }
+
+    final controller = StreamController<int>.broadcast();
+    StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? chatsSub;
+    final messageSubs = <String, StreamSubscription<int>>{};
+    final unreadByChat = <String, int>{};
+
+    void emit() {
+      if (controller.isClosed) return;
+      final total = unreadByChat.values.fold<int>(0, (a, b) => a + b);
+      controller.add(total);
+    }
+
+    bool isConversationChat(Map<String, dynamic> data) {
+      final participants =
+          (data['participants'] as List?)?.whereType<String>().toList() ?? <String>[];
+      return participants.contains(participantId) && participants.contains(otherUserId);
+    }
+
+    chatsSub = _db
+        .collection("chats")
+        .where("participants", arrayContains: participantId)
+        .snapshots()
+        .listen(
+      (snapshot) {
+        final nextChatIds = <String>{};
+        for (final doc in snapshot.docs) {
+          final data = doc.data();
+          if (_isChatHiddenFor(participantId, data)) continue;
+          if (!isConversationChat(data)) continue;
+          nextChatIds.add(doc.id);
+          if (!messageSubs.containsKey(doc.id)) {
+            messageSubs[doc.id] =
+                streamUnreadCountForChat(doc.id, participantId).listen(
+              (count) {
+                unreadByChat[doc.id] = count;
+                emit();
+              },
+              onError: controller.addError,
+            );
+          }
+        }
+
+        final removed = messageSubs.keys.where((id) => !nextChatIds.contains(id)).toList();
+        for (final chatId in removed) {
+          messageSubs.remove(chatId)?.cancel();
+          unreadByChat.remove(chatId);
+        }
+        emit();
+      },
+      onError: controller.addError,
     );
+
+    controller.onCancel = () async {
+      await chatsSub?.cancel();
+      for (final sub in messageSubs.values) {
+        await sub.cancel();
+      }
+      await controller.close();
+    };
+
+    return controller.stream.distinct();
   }
  }

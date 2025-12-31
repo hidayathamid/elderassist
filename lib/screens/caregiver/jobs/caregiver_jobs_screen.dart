@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_booking_details_screen.dart';
@@ -10,11 +11,12 @@ import 'package:emergencies_disability_assistance_app/models/caregiver_job.dart'
 
 const List<String> _tabs = ['Active', 'Upcoming', 'History'];
 
-final Color _caregiverCardBorderColor = Colors.grey.shade300;
-final BoxShadow _caregiverCardShadow = BoxShadow(
-  color: const Color(0x14000000),
-  blurRadius: 16,
-  offset: const Offset(0, 6),
+const double _jobsHorizontalPadding = 14.0;
+const Color _jobsCardBorderColor = Color(0x12000000);
+const BoxShadow _jobsCardShadow = BoxShadow(
+  color: Color(0x12000000),
+  blurRadius: 18,
+  offset: Offset(0, 10),
 );
 const double _cancelRevealDistance = 140.0;
 const TextStyle _historyDialogTitleStyle = TextStyle(
@@ -122,15 +124,26 @@ const List<CaregiverJob> _previewActiveJobs = [
 ];
 
 class CaregiverJobsScreen extends StatefulWidget {
-  const CaregiverJobsScreen({super.key});
+  const CaregiverJobsScreen({
+    super.key,
+    this.tabIndexListenable,
+    this.tabIndex = 0,
+  });
+
+  final ValueListenable<int>? tabIndexListenable;
+  final int tabIndex;
 
   @override
   State<CaregiverJobsScreen> createState() => CaregiverJobsScreenState();
 }
 
 class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late final TabController _tabController;
+  late final AnimationController _entryController;
+  late final Animation<double> _entryFade;
+  late final Animation<Offset> _entrySlide;
+  bool _wasActive = false;
   final Set<String> _hiddenHistoryJobs = <String>{};
   String? _resetSwipeFor;
 
@@ -138,12 +151,73 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
   void initState() {
     super.initState();
     _tabController = TabController(length: _tabs.length, vsync: this);
+    _entryController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+    _entryFade = CurvedAnimation(
+      parent: _entryController,
+      curve: Curves.easeOutCubic,
+    );
+    _entrySlide = Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero)
+        .animate(
+          CurvedAnimation(
+            parent: _entryController,
+            curve: Curves.easeOutCubic,
+          ),
+        );
+
+    _wasActive =
+        (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+    widget.tabIndexListenable?.addListener(_handleTabChange);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_wasActive) {
+        _playEntryAnimation();
+      } else {
+        _entryController.value = 1;
+      }
+    });
+  }
+
+  void _playEntryAnimation() {
+    _entryController.forward(from: 0);
+  }
+
+  void _handleTabChange() {
+    final currentIndex = widget.tabIndexListenable?.value;
+    if (currentIndex == null) return;
+    final isActive = currentIndex == widget.tabIndex;
+    if (isActive && !_wasActive) {
+      _playEntryAnimation();
+    }
+    _wasActive = isActive;
+  }
+
+  @override
+  void didUpdateWidget(covariant CaregiverJobsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tabIndexListenable != widget.tabIndexListenable) {
+      oldWidget.tabIndexListenable?.removeListener(_handleTabChange);
+      widget.tabIndexListenable?.addListener(_handleTabChange);
+      _wasActive =
+          (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+    }
   }
 
   @override
   void dispose() {
+    widget.tabIndexListenable?.removeListener(_handleTabChange);
     _tabController.dispose();
+    _entryController.dispose();
     super.dispose();
+  }
+
+  Widget _buildAnimatedBody(Widget child) {
+    return FadeTransition(
+      opacity: _entryFade,
+      child: SlideTransition(position: _entrySlide, child: child),
+    );
   }
 
   @override
@@ -152,59 +226,64 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
     if (user == null) {
       return Scaffold(
         appBar: buildProfileStyleAppBar(title: 'Jobs'),
-        body: const Center(child: Text('Please sign in to view jobs')),
+        backgroundColor: activityBackgroundColor,
+        body: _buildAnimatedBody(
+          const Center(child: Text('Please sign in to view jobs')),
+        ),
       );
     }
 
     return Scaffold(
       backgroundColor: activityBackgroundColor,
       appBar: buildProfileStyleAppBar(title: 'Jobs'),
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: FirebaseFirestore.instance
-            .collection('bookings')
-            .where('caregiverId', isEqualTo: user.uid)
-            .orderBy('createdAt', descending: true)
-            .snapshots(),
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return Center(child: Text('Error: ${snapshot.error}'));
-          }
+      body: _buildAnimatedBody(
+        StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: FirebaseFirestore.instance
+              .collection('bookings')
+              .where('caregiverId', isEqualTo: user.uid)
+              .orderBy('createdAt', descending: true)
+              .snapshots(),
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
+              return Center(child: Text('Error: ${snapshot.error}'));
+            }
 
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return _buildJobsContent(
-              _previewActiveJobs,
-              _previewUpcomingJobs,
-              _previewHistoryJobs,
-            );
-          }
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return _buildJobsContent(
+                _previewActiveJobs,
+                _previewUpcomingJobs,
+                _previewHistoryJobs,
+              );
+            }
 
-          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-            return _buildJobsContent(
-              const <CaregiverJob>[],
-              const <CaregiverJob>[],
-              const <CaregiverJob>[],
-            );
-          }
+            if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+              return _buildJobsContent(
+                const <CaregiverJob>[],
+                const <CaregiverJob>[],
+                const <CaregiverJob>[],
+              );
+            }
 
-          final jobs = snapshot.data!.docs
-              .map((doc) => CaregiverJob.fromDoc(doc))
-              .whereType<CaregiverJob>()
-              .toList();
-          final active = jobs.where((job) {
-            final status = job.status.toUpperCase();
-            return status == 'ASSIGNED';
-          }).toList();
-          final upcoming = jobs.where((job) {
-            final status = job.status.toUpperCase();
-            return status == 'SCHEDULED';
-          }).toList();
-          final history = jobs.where((job) {
-            final status = job.status.toUpperCase();
-            return _isHistoryStatus(status);
-          }).toList();
+            final jobs = snapshot.data!.docs
+                .map((doc) => CaregiverJob.fromDoc(doc))
+                .whereType<CaregiverJob>()
+                .toList();
+            final active = jobs.where((job) {
+              final status = job.status.toUpperCase();
+              return status == 'ASSIGNED';
+            }).toList();
+            final upcoming = jobs.where((job) {
+              final status = job.status.toUpperCase();
+              return status == 'SCHEDULED';
+            }).toList();
+            final history = jobs.where((job) {
+              final status = job.status.toUpperCase();
+              return _isHistoryStatus(status);
+            }).toList();
 
-          return _buildJobsContent(active, upcoming, history);
-        },
+            return _buildJobsContent(active, upcoming, history);
+          },
+        ),
       ),
     );
   }
@@ -217,14 +296,24 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: const EdgeInsets.symmetric(
+            horizontal: _jobsHorizontalPadding,
+            vertical: 10,
+          ),
           child: SizedBox(
             height: 38,
             child: Container(
               decoration: BoxDecoration(
                 color: Colors.white,
-                border: Border.all(color: Colors.grey.shade300),
+                border: Border.all(color: _jobsCardBorderColor),
                 borderRadius: BorderRadius.circular(activitySegmentRadius),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x0F000000),
+                    blurRadius: 14,
+                    offset: Offset(0, 10),
+                  ),
+                ],
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(activitySegmentRadius),
@@ -240,8 +329,8 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
                   ),
                   indicatorSize: TabBarIndicatorSize.tab,
                   labelStyle: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 12.5,
                   ),
                   labelColor: Colors.black,
                   unselectedLabelColor: Colors.black54,
@@ -253,7 +342,12 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
         ),
         Expanded(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            padding: const EdgeInsets.fromLTRB(
+              _jobsHorizontalPadding,
+              8,
+              _jobsHorizontalPadding,
+              16,
+            ),
             child: TabBarView(
               controller: _tabController,
               physics: const NeverScrollableScrollPhysics(),
@@ -341,8 +435,8 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
       decoration: BoxDecoration(
         color: Colors.red.shade600,
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: _caregiverCardBorderColor),
-        boxShadow: [_caregiverCardShadow],
+        border: Border.all(color: _jobsCardBorderColor),
+        boxShadow: const [_jobsCardShadow],
       ),
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
       child: Material(
@@ -520,26 +614,38 @@ class _EmptyState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.max,
-        children: [
-          Icon(icon, size: 32, color: activityAccentBlue),
-          const SizedBox(height: 10),
-          Text(
-            title,
-            style: const TextStyle(
-              fontWeight: FontWeight.w700,
-              fontSize: 15,
-              color: activityPrimaryTextColor,
+      child: Container(
+        margin: const EdgeInsets.only(top: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        constraints: const BoxConstraints(maxWidth: 360),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: _jobsCardBorderColor),
+          boxShadow: const [_jobsCardShadow],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 28, color: activityAccentBlue),
+            const SizedBox(height: 8),
+            Text(
+              title,
+              style: const TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 14,
+                color: activityPrimaryTextColor,
+              ),
+              textAlign: TextAlign.center,
             ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            subtitle,
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 12, color: Colors.black54),
-          ),
-        ],
+            const SizedBox(height: 4),
+            Text(
+              subtitle,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+          ],
+        ),
       ),
     );
   }

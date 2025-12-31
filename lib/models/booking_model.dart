@@ -1,5 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../utils/service_preferences.dart';
+
 class BookingModel {
   final String bookingId;
   final String userId;
@@ -40,6 +42,7 @@ class BookingModel {
   });
 
   factory BookingModel.fromMap(String id, Map<String, dynamic> data) {
+    final serviceLabel = extractServiceLabelFromFirestore(data);
     return BookingModel(
       bookingId: id,
       userId: data['userId'] as String? ?? '',
@@ -47,7 +50,7 @@ class BookingModel {
       personId: data['personId'] as String? ?? '',
       personName: data['personName'] as String? ?? '',
       personAddress: data['personAddress'] as String? ?? '',
-      service: data['service'] as String? ?? '',
+      service: serviceLabel,
       date: data['date'] as String? ?? '',
       scheduledDate: data['scheduledDate'] as String? ?? '',
       time: data['time'] as String? ?? '',
@@ -68,7 +71,7 @@ class BookingModel {
       "personId": personId,
       "personName": personName,
       "personAddress": personAddress,
-      "service": service,
+      "servicePreferences": extractServicePreferencesList(service),
       "date": date,
       "scheduledDate": scheduledDate,
       "time": time,

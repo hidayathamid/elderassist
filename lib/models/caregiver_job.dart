@@ -1,6 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 
+import '../utils/service_preferences.dart';
+
 class CaregiverJob {
   const CaregiverJob({
     required this.bookingId,
@@ -55,6 +57,8 @@ class CaregiverJob {
       return '';
     }
 
+    final serviceLabel = extractServiceLabelFromFirestore(data);
+
     return CaregiverJob(
       bookingId: doc.id,
       userId: (data['userId'] as String?) ?? '',
@@ -76,7 +80,7 @@ class CaregiverJob {
           (data['address'] as String?) ??
           (data['personAddress'] as String?) ??
           '',
-      service: (data['service'] as String?) ?? 'Home care',
+      service: serviceLabel.isNotEmpty ? serviceLabel : 'Home care',
       personAge: parseAge(),
       time: (data['time'] as String?) ?? '',
       personLabel: (data['personLabel'] as String?) ?? '',

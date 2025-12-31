@@ -15,13 +15,21 @@ import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart' as geocoding;
 import 'package:emergencies_disability_assistance_app/screens/user/profile/profile_address_edit_screen.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
+import 'package:emergencies_disability_assistance_app/utils/map_styles.dart';
 
 import 'booking_caregiver_screen.dart';
 
 class BookingPersonScreen extends StatefulWidget {
-  const BookingPersonScreen({super.key, this.showBackButton = false});
+  const BookingPersonScreen({
+    super.key,
+    this.showBackButton = false,
+    this.tabIndexListenable,
+    this.tabIndex = 1,
+  });
 
   final bool showBackButton;
+  final ValueListenable<int>? tabIndexListenable;
+  final int tabIndex;
 
   @override
   State<BookingPersonScreen> createState() => _BookingPersonScreenState();
@@ -85,8 +93,12 @@ class AddressItem {
         map['city'] ??
         '';
     final forWhoValue = map['forWho'] ?? map['person'] ?? map['owner'] ?? '';
-    final photoUrlValue = map['photoUrl'];
-    final avatarValue = map['photoUrl'];
+    final photoUrlValue =
+        map['photoUrl'] ??
+        map['avatarUrl'] ??
+        map['profilePhoto'] ??
+        map['profileImageUrl'];
+    final avatarValue = photoUrlValue;
 
     return AddressItem(
       id: map['id']?.toString(),
@@ -147,9 +159,10 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   static const Color _primaryColor = Color(0xFFF4B63D);
   static const Color _accentBlue = Color(0xFF00B8C6);
   static const Color _disabledColor = Color(0xFFE5E5E5);
-  static const double _defaultCameraZoom = 18;
-  static const double _defaultCameraTilt = 60;
-  static const double _defaultCameraBearing = 180;
+  static const Color _pageBackground = Color(0xFFF7F8FA);
+  static const double _defaultCameraZoom = 14;
+  static const double _defaultCameraTilt = 0;
+  static const double _defaultCameraBearing = 0;
 
   GoogleMapController? _mapController;
   List<AddressItem> _addresses = [];
@@ -167,17 +180,17 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   LatLng _currentLatLng = const LatLng(3.1390, 101.6869);
   bool _hideFrontPanel = false;
   double _backdropOpacity = 0.0;
-  double _panelBlend = 0.0;
   bool _hasLocation = false;
-  final MapType _mapType = MapType.normal;
   bool _emptySelected = false;
   List<Map<String, dynamic>> _addressData = [];
   final ScrollController _addressScrollController = ScrollController();
   int _currentScrollIndex = 0;
   bool _isSnapping = false;
   int? _pendingScrollIndex;
-  static const double _itemExtent = 58.0;
-  static const double _minSheetSize = 0.26;
+  static const double _itemExtent = 72.0;
+  List<AddressItem> _renderedAddresses = const <AddressItem>[];
+  Set<String> _blockedBookingKeys = const <String>{};
+  static const double _minSheetSize = 0.28;
   static const double _maxSheetSize = 0.62;
   static const double _panelDownValue = 0.0;
   bool _isProgrammaticScroll = false;
@@ -196,6 +209,51 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   final Map<String, BitmapDescriptor> _markerCache = {};
   final Map<String, ui.Image> _avatarImageCache = {};
   BitmapDescriptor? _selectedPersonIcon;
+  Timer? _mapMoveDebounce;
+  LatLng? _pendingMapLatLng;
+  int _locationRequestSeq = 0;
+  int _markerRequestSeq = 0;
+  String? _selectedMarkerKey;
+
+  AnimationController? _entryController;
+  Animation<double>? _entryFade;
+  Animation<Offset>? _entrySlide;
+  bool _wasActive = false;
+
+  void _scheduleMapMove(
+    LatLng target, {
+    Duration delay = const Duration(milliseconds: 90),
+  }) {
+    _pendingMapLatLng = target;
+    _mapMoveDebounce?.cancel();
+    _mapMoveDebounce = Timer(delay, () {
+      if (!mounted) return;
+      final controller = _mapController;
+      final pending = _pendingMapLatLng;
+      if (controller == null || pending == null) return;
+      controller.animateCamera(_cameraUpdate(pending));
+    });
+  }
+
+  void _syncMapToSelected(AddressItem item, {bool debounceCamera = true}) {
+    final markerKey = _stableMarkerKeyForItem(item);
+    if (_selectedMarkerKey != markerKey) {
+      _selectedMarkerKey = markerKey;
+      _selectedPersonIcon = null; // avoid showing wrong avatar while loading
+    }
+
+    if (_isCurrentLocationItem(item)) {
+      _refreshDeviceLocation();
+      return;
+    }
+    if (item.lat == null || item.long == null) return;
+    final target = LatLng(item.lat!, item.long!);
+    if (debounceCamera) {
+      _scheduleMapMove(target);
+    } else {
+      _mapController?.animateCamera(_cameraUpdate(target));
+    }
+  }
 
   @override
   Ticker createTicker(TickerCallback onTick) {
@@ -217,13 +275,8 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       _currentScrollIndex = idx;
       final item = list[idx];
       _selected = item;
-      if (_isCurrentLocationItem(item)) {
-        _refreshDeviceLocation();
-      } else if (item.lat != null && item.long != null) {
-        _currentLatLng = LatLng(item.lat!, item.long!);
-        _mapController?.animateCamera(_cameraUpdate(_currentLatLng));
-      }
       setState(() {});
+      _syncMapToSelected(item, debounceCamera: true);
       _updateSelectedPersonMarkerIcon();
     }
   }
@@ -231,6 +284,21 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   @override
   void initState() {
     super.initState();
+
+    final entryController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+    _entryController = entryController;
+    _entryFade = CurvedAnimation(
+      parent: entryController,
+      curve: Curves.easeOutCubic,
+    );
+    _entrySlide = Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero)
+        .animate(
+          CurvedAnimation(parent: entryController, curve: Curves.easeOutCubic),
+        );
+
     _noteSheetController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 520),
@@ -255,6 +323,41 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     _updatePanelVisuals();
     _autoDetectLocation();
     _fetchAddresses();
+
+    _wasActive =
+        (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+        widget.tabIndex;
+    widget.tabIndexListenable?.addListener(_handleTabChange);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (widget.tabIndexListenable == null || _wasActive) {
+        _entryController?.forward(from: 0);
+      } else {
+        _entryController?.value = 1;
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant BookingPersonScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tabIndexListenable != widget.tabIndexListenable) {
+      oldWidget.tabIndexListenable?.removeListener(_handleTabChange);
+      widget.tabIndexListenable?.addListener(_handleTabChange);
+      _wasActive =
+          (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+          widget.tabIndex;
+    }
+  }
+
+  void _handleTabChange() {
+    final currentIndex = widget.tabIndexListenable?.value;
+    if (currentIndex == null) return;
+    final isActive = currentIndex == widget.tabIndex;
+    if (isActive && !_wasActive) {
+      _entryController?.forward(from: 0);
+    }
+    _wasActive = isActive;
   }
 
   void _updatePanelVisuals() {
@@ -265,7 +368,6 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     setState(() {
       _hideFrontPanel = size > 0.55;
       _backdropOpacity = t * 0.22;
-      _panelBlend = t;
     });
     _ensureSelectedVisibleWhenDown();
     _maybeFlushPendingScroll();
@@ -361,6 +463,9 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
 
   @override
   void dispose() {
+    _mapMoveDebounce?.cancel();
+    widget.tabIndexListenable?.removeListener(_handleTabChange);
+    _entryController?.dispose();
     for (final ticker in _tickers) {
       ticker.dispose();
     }
@@ -377,6 +482,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   }
 
   Future<void> _autoDetectLocation() async {
+    final int seq = ++_locationRequestSeq;
     try {
       final serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
@@ -394,13 +500,19 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         desiredAccuracy: LocationAccuracy.best,
       );
       final latLng = LatLng(pos.latitude, pos.longitude);
+      if (!mounted || seq != _locationRequestSeq) return;
+      final selected = _selected;
+      final bool shouldAnimate =
+          selected == null || _isCurrentLocationItem(selected);
       setState(() {
         _currentLatLng = latLng;
         _hasLocation = true;
         _selected ??= _currentAddressItem();
       });
       _updateSelectedPersonMarkerIcon();
-      _mapController?.animateCamera(_cameraUpdate(latLng));
+      if (shouldAnimate) {
+        _mapController?.animateCamera(_cameraUpdate(latLng));
+      }
       _updateDistances();
       _resolvePlaceName(latLng);
     } catch (_) {}
@@ -656,6 +768,12 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         long: item.long,
         forWho: item.forWho,
         addressLine: item.addressLine,
+        id: item.id,
+        label: item.label,
+        isCurrentLocation: item.isCurrentLocation,
+        isUserEntry: item.isUserEntry,
+        avatarUrl: item.avatarUrl,
+        photoUrl: item.photoUrl,
       );
       if (_selected != null &&
           _selected!.title == item.title &&
@@ -694,15 +812,14 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     } else {
       _scrollAfterPanelReady(_pendingScrollIndex!);
     }
-    if (item.lat != null && item.long != null) {
-      _currentLatLng = LatLng(item.lat!, item.long!);
-      _mapController?.animateCamera(_cameraUpdate(_currentLatLng));
-    }
+    _syncMapToSelected(item, debounceCamera: true);
   }
 
   void _snapToNearest() {
     if (_isProgrammaticScroll) return;
-    final list = _visibleAddresses();
+    final list = _renderedAddresses.isNotEmpty
+        ? _renderedAddresses
+        : _visibleAddresses();
     if (list.isEmpty || _isSnapping || !_addressScrollController.hasClients) {
       return;
     }
@@ -718,10 +835,17 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       0,
       list.length - 1,
     );
+    final selectedItem = list[nearestIndex];
     final double targetOffset = (nearestIndex * _itemExtent).clamp(
       0.0,
       position.maxScrollExtent,
     );
+    setState(() {
+      _currentScrollIndex = nearestIndex;
+      _selected = selectedItem;
+    });
+    _syncMapToSelected(selectedItem, debounceCamera: true);
+    _updateSelectedPersonMarkerIcon();
     _isSnapping = true;
     _addressScrollController
         .animateTo(
@@ -732,23 +856,13 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         .whenComplete(() => _isSnapping = false);
   }
 
-  void _scrollToCurrentLocation() {
-    if (!_hasLocation) return;
-    _selected = _currentAddressItem();
-    _currentScrollIndex = 0;
-    _pendingScrollIndex = 0;
-    _updateSelectedPersonMarkerIcon();
-    _animatePanelTo(
-      _panelDownValue,
-    ).whenComplete(() => _scrollAfterPanelReady(0));
-    _mapController?.animateCamera(_cameraUpdate(_currentLatLng));
-    setState(() {});
-  }
-
   void _scrollListToIndex(int index, {VoidCallback? onDone}) {
     if (!_addressScrollController.hasClients) return;
-    final visible = _visibleAddresses();
+    final visible = _renderedAddresses.isNotEmpty
+        ? _renderedAddresses
+        : _visibleAddresses();
     if (visible.isEmpty || index < 0 || index >= visible.length) return;
+    final selectedItem = visible[index];
     final position = _addressScrollController.position;
     final targetTop = (index * _itemExtent).clamp(
       position.minScrollExtent,
@@ -764,7 +878,10 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         .whenComplete(() {
           _isProgrammaticScroll = false;
           _currentScrollIndex = index;
+          _selected = selectedItem;
           _pendingScrollIndex = null;
+          _syncMapToSelected(selectedItem, debounceCamera: true);
+          _updateSelectedPersonMarkerIcon();
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (_addressScrollController.hasClients) {
               _addressScrollController.jumpTo(targetTop);
@@ -891,12 +1008,15 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   Widget _buildNotePanelContent() {
     final charCount = _noteFieldController.text.length;
     final canSave = _noteFieldController.text.trim().isNotEmpty;
+    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
     return Material(
       color: Colors.white,
-      elevation: 18,
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+      elevation: 12,
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+      child: AnimatedPadding(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+        padding: EdgeInsets.fromLTRB(16, 8, 16, 14 + bottomInset),
         child: SafeArea(
           top: false,
           child: Column(
@@ -908,93 +1028,172 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                 onVerticalDragEnd: _onNotePanelDragEnd,
                 behavior: HitTestBehavior.opaque,
                 child: SizedBox(
-                  height: 44,
+                  height: 40,
                   width: double.infinity,
                   child: Center(
                     child: Container(
                       width: 36,
                       height: 4,
                       decoration: BoxDecoration(
-                        color: Colors.grey[400],
+                        color: Colors.black.withValues(alpha: 0.16),
                         borderRadius: BorderRadius.circular(24),
                       ),
                     ),
                   ),
                 ),
               ),
-              const Text(
-                'Note to Caregiver',
-                textAlign: TextAlign.start,
-                textDirection: TextDirection.ltr,
-                style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 16,
-                  color: Colors.black87,
-                ),
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: _accentBlue.withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(
+                      Icons.sticky_note_2_outlined,
+                      size: 16,
+                      color: _accentBlue,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Note to caregiver',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 15,
+                            color: Colors.black87,
+                          ),
+                        ),
+                        SizedBox(height: 1),
+                        Text(
+                          'Optional. Add helpful details (allergies, meds, mobility).',
+                          style: TextStyle(
+                            color: Colors.black54,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Close',
+                    onPressed: _hideNoteSheet,
+                    icon: const Icon(Icons.close_rounded),
+                    splashRadius: 18,
+                  ),
+                ],
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 10),
               TextField(
                 controller: _noteFieldController,
                 maxLength: 150,
                 maxLines: 3,
                 autofocus: false,
+                textInputAction: TextInputAction.done,
                 decoration: InputDecoration(
-                  hintText:
-                      'Add person details (e.g. allergies, medical conditions)',
+                  hintText: 'Example: allergies, medication, mobility needs',
+                  isDense: true,
                   filled: true,
-                  fillColor: Colors.white,
+                  fillColor: const Color(0xFFF7F8FA),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: BorderSide(color: Colors.grey.shade200),
+                  ),
                   enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(14),
-                    borderSide: const BorderSide(color: Colors.black26),
+                    borderSide: BorderSide(color: Colors.grey.shade200),
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(14),
                     borderSide: const BorderSide(
-                      color: Colors.black87,
-                      width: 1.2,
+                      color: _accentBlue,
+                      width: 1.5,
                     ),
                   ),
                   counterText: '',
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
+                  contentPadding: const EdgeInsets.fromLTRB(12, 11, 12, 11),
                 ),
                 style: const TextStyle(
-                  fontSize: 12,
+                  fontSize: 13,
                   fontWeight: FontWeight.w600,
                 ),
                 onChanged: (_) => setState(() {}),
+                onSubmitted: (_) {
+                  if (canSave) _confirmNoteSheet();
+                },
               ),
               const SizedBox(height: 6),
-              Text(
-                '$charCount/150 characters',
-                textAlign: TextAlign.right,
-                style: const TextStyle(
-                  color: Colors.black54,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 14),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: canSave ? _confirmNoteSheet : null,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: canSave ? _primaryColor : _disabledColor,
-                    foregroundColor: canSave ? Colors.black : Colors.white70,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    textStyle: const TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 15,
+              Row(
+                children: [
+                  Text(
+                    '$charCount/150',
+                    style: const TextStyle(
+                      color: Colors.black54,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-                  child: const Text('Save'),
-                ),
+                  const Spacer(),
+                  if (canSave)
+                    const Icon(
+                      Icons.check_circle_rounded,
+                      size: 16,
+                      color: _accentBlue,
+                    ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextButton(
+                      onPressed: () {
+                        FocusScope.of(context).unfocus();
+                        setState(() => _noteFieldController.clear());
+                      },
+                      style: TextButton.styleFrom(
+                        foregroundColor: Colors.black87,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        textStyle: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                        ),
+                      ),
+                      child: const Text('Clear'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: canSave ? _confirmNoteSheet : null,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: canSave
+                            ? _primaryColor
+                            : _disabledColor,
+                        foregroundColor: canSave
+                            ? Colors.black
+                            : Colors.white70,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        textStyle: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 14,
+                        ),
+                      ),
+                      child: const Text('Save'),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -1006,6 +1205,24 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   void _openCaregiverScreen() {
     final selected = _selected;
     if (selected == null) return;
+    final selectedKey = _stableMarkerKeyForItem(selected);
+    final selectedKeys = _collectAddressKeys(
+      id: selectedKey,
+      address: selected.addressLine,
+      subtitle: selected.subtitle,
+      forWho: selected.forWho,
+      title: selected.title,
+    );
+    final blocked = selectedKeys.any(_blockedBookingKeys.contains);
+    if (blocked) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('This person is currently in an active booking.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
     final person = _personFromAddress(selected);
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -1034,7 +1251,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     final photoUrl = _avatarUrlForTile(item);
     final photo = (isSelf ? (_userPhotoUrl ?? photoUrl) : photoUrl) ?? '';
     return PersonProfile(
-      id: item.id ?? UniqueKey().toString(),
+      id: _stablePersonId(item),
       name: name,
       age: 0,
       address: addressText,
@@ -1160,327 +1377,421 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
 
   @override
   Widget build(BuildContext context) {
-    final bool canChoose = _selected != null;
-    final List<AddressItem> visibleList = _visibleAddresses();
-    final bool isEmpty = visibleList.isEmpty;
-    final double panelHeight = _currentSheetHeight(context);
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    final activeBookingsStream = (userId == null || userId.isEmpty)
+        ? Stream<Set<String>>.value(const <String>{})
+        : FirebaseFirestore.instance
+              .collection('bookings')
+              .where('userId', isEqualTo: userId)
+              .where('status', isEqualTo: 'ASSIGNED')
+              .snapshots()
+              .map((snapshot) {
+                final result = <String>{};
+                for (final doc in snapshot.docs) {
+                  final data = doc.data();
+                  result.addAll(
+                    _collectAddressKeys(
+                      id: data['personId'],
+                      address: data['personAddress'],
+                      subtitle: data['personAddress'],
+                      forWho: data['personName'],
+                      title: data['personName'],
+                    ),
+                  );
+                  result.addAll(
+                    _collectAddressKeys(
+                      id: data['addressId'],
+                      address: data['addressLabel'],
+                      subtitle: data['addressLabel'],
+                      forWho: data['personName'],
+                      title: data['personName'],
+                    ),
+                  );
+                }
+                return result;
+              });
 
-    return Scaffold(
-      backgroundColor: Colors.grey[50],
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        automaticallyImplyLeading: false,
-        centerTitle: true,
-        leading: widget.showBackButton
-            ? IconButton(
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints.tightFor(
-                  width: 48,
-                  height: 48,
-                ),
-                icon: const Icon(
-                  Icons.arrow_back_ios_new_rounded,
-                  color: _bookingAppBarText,
-                  size: 20,
-                ),
-                onPressed: () => Navigator.of(context).pop(),
-              )
-            : null,
-        flexibleSpace: Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.08),
-                blurRadius: 8,
-                offset: const Offset(0, 4),
+    return StreamBuilder<Set<String>>(
+      stream: activeBookingsStream,
+      builder: (context, bookingSnapshot) {
+        final blockedKeys = bookingSnapshot.data ?? const <String>{};
+        _blockedBookingKeys = blockedKeys;
+        final List<AddressItem> filteredVisibleList = _visibleAddresses();
+        _renderedAddresses = filteredVisibleList;
+
+        if (_renderedAddresses.isNotEmpty &&
+            _currentScrollIndex >= _renderedAddresses.length) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted || _renderedAddresses.isEmpty) return;
+            final newIndex = (_renderedAddresses.length - 1).clamp(0, 999999);
+            setState(() {
+              _currentScrollIndex = newIndex;
+              _selected = _renderedAddresses[newIndex];
+            });
+            _updateSelectedPersonMarkerIcon();
+            _syncMapToSelected(
+              _renderedAddresses[newIndex],
+              debounceCamera: true,
+            );
+          });
+        }
+        final bool isEmpty = filteredVisibleList.isEmpty;
+
+        bool isBlockedSelection = false;
+        final selected = _selected;
+        if (selected != null) {
+          final selectedKey = _stableMarkerKeyForItem(selected);
+          final selectedKeys = _collectAddressKeys(
+            id: selectedKey,
+            address: selected.addressLine,
+            subtitle: selected.subtitle,
+            forWho: selected.forWho,
+            title: selected.title,
+          );
+          isBlockedSelection = selectedKeys.any(blockedKeys.contains);
+        }
+
+        final bool canChoose = _selected != null && !isBlockedSelection;
+        final double panelHeight = _currentSheetHeight(context);
+        final entryFade = _entryFade ?? const AlwaysStoppedAnimation<double>(1);
+        final entrySlide =
+            _entrySlide ?? const AlwaysStoppedAnimation<Offset>(Offset.zero);
+
+        return Scaffold(
+          backgroundColor: _pageBackground,
+          appBar: AppBar(
+            backgroundColor: Colors.white,
+            elevation: 0,
+            automaticallyImplyLeading: false,
+            centerTitle: true,
+            leading: widget.showBackButton
+                ? IconButton(
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 48,
+                      height: 48,
+                    ),
+                    icon: const Icon(
+                      Icons.arrow_back_ios_new_rounded,
+                      color: _bookingAppBarText,
+                      size: 20,
+                    ),
+                    onPressed: () => Navigator.of(context).pop(),
+                  )
+                : null,
+            flexibleSpace: Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.08),
+                    blurRadius: 8,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
               ),
-            ],
-          ),
-        ),
-        title: const Text(
-          'Booking',
-          style: TextStyle(
-            color: _bookingAppBarText,
-            fontWeight: FontWeight.w600,
-            fontSize: 18,
-          ),
-        ),
-      ),
-      body: SafeArea(
-        child: Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: Colors.grey.withOpacity(0.25)),
-            borderRadius: BorderRadius.circular(18),
-          ),
-          clipBehavior: Clip.hardEdge,
-          child: Stack(
-            children: [
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: _minSheetHeightPx(context),
-                child: GoogleMap(
-                  initialCameraPosition: _cameraPosition(_currentLatLng),
-                  zoomControlsEnabled: false,
-                  myLocationButtonEnabled: false,
-                  myLocationEnabled: false,
-                  markers: {_buildMarker()},
-                  onMapCreated: (c) {
-                    _mapController = c;
-                    _autoDetectLocation();
-                  },
-                ),
+            ),
+            title: const Text(
+              'Booking',
+              style: TextStyle(
+                color: _bookingAppBarText,
+                fontWeight: FontWeight.w600,
+                fontSize: 18,
               ),
-              IgnorePointer(
-                ignoring: true,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  color: Colors.black.withValues(alpha: _backdropOpacity),
-                ),
-              ),
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                height: panelHeight,
+            ),
+          ),
+          body: FadeTransition(
+            opacity: entryFade,
+            child: SlideTransition(
+              position: entrySlide,
+              child: SafeArea(
                 child: Container(
                   decoration: BoxDecoration(
                     color: Colors.white,
-                    borderRadius: const BorderRadius.vertical(
-                      top: Radius.circular(18),
+                    border: Border.all(
+                      color: Colors.black12.withValues(alpha: 0.08),
                     ),
-                    border: Border.all(color: Colors.grey.shade300, width: 1),
-                    boxShadow: const [
+                    borderRadius: BorderRadius.circular(18),
+                    boxShadow: [
                       BoxShadow(
-                        color: Color(0x1F000000),
-                        blurRadius: 14,
-                        offset: Offset(0, -3),
+                        color: Colors.black.withValues(alpha: 0.10),
+                        blurRadius: 18,
+                        offset: const Offset(0, 8),
                       ),
                     ],
                   ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.max,
+                  clipBehavior: Clip.hardEdge,
+                  child: Stack(
                     children: [
-                      GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        dragStartBehavior: DragStartBehavior.down,
-                        onVerticalDragStart: _onHandleDragStart,
-                        onVerticalDragUpdate: _onHandleDragUpdate,
-                        onVerticalDragEnd: _onHandleDragEnd,
-                        child: SizedBox(
-                          height: 44,
-                          width: double.infinity,
-                          child: Center(
-                            child: Container(
-                              width: 36,
-                              height: 4,
-                              decoration: BoxDecoration(
-                                color: Colors.grey[400],
-                                borderRadius: BorderRadius.circular(24),
-                              ),
-                            ),
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: _minSheetHeightPx(context),
+                        child: GoogleMap(
+                          initialCameraPosition: _cameraPosition(
+                            _currentLatLng,
+                          ),
+                          style: boldMapStyle,
+                          zoomControlsEnabled: false,
+                          myLocationButtonEnabled: false,
+                          myLocationEnabled: false,
+                          markers: {_buildMarker()},
+                          onMapCreated: (c) {
+                            _mapController = c;
+                            _autoDetectLocation();
+                          },
+                        ),
+                      ),
+                      IgnorePointer(
+                        ignoring: true,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          color: Colors.black.withValues(
+                            alpha: _backdropOpacity,
                           ),
                         ),
                       ),
-                      const Divider(height: 1),
-                      Expanded(
-                        child: Stack(
-                          children: [
-                            NotificationListener<ScrollNotification>(
-                              onNotification: (notification) {
-                                if (notification is ScrollEndNotification ||
-                                    (notification is UserScrollNotification &&
-                                        notification.direction ==
-                                            ScrollDirection.idle)) {
-                                  _snapToNearest();
-                                }
-                                return false;
-                              },
-                              child: ListView.builder(
-                                controller: _addressScrollController,
-                                physics: isEmpty
-                                    ? const ClampingScrollPhysics()
-                                    : const _ItemSnapScrollPhysics(
-                                        itemExtent: _itemExtent,
-                                      ),
-                                padding: EdgeInsets.only(
-                                  left: 12,
-                                  right: 12,
-                                  top: 0,
-                                  bottom:
-                                      MediaQuery.of(context).padding.bottom +
-                                      120,
-                                ),
-                                itemExtent: isEmpty ? null : _itemExtent,
-                                itemCount: isEmpty ? 1 : visibleList.length,
-                                itemBuilder: (context, index) {
-                                  if (isEmpty) {
-                                    return Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 8,
-                                        vertical: 6,
-                                      ),
-                                      child: _emptyState(context),
-                                    );
-                                  }
-                                  final item = visibleList[index];
-                                  final bool isActive =
-                                      index == _currentScrollIndex;
-                                  final bool isCurrent =
-                                      _hasLocation && index == 0;
-                                  return _addressTile(
-                                    item,
-                                    isActive: isActive,
-                                    showEdit: !isCurrent,
-                                    isCurrent: isCurrent,
-                                    onTap: () =>
-                                        _onAddressSelected(item, index),
-                                    onEdit: () => _openEditAddress(
-                                      _hasLocation ? index - 1 : index,
-                                    ),
-                                  );
-                                },
-                              ),
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        height: panelHeight,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: const BorderRadius.vertical(
+                              top: Radius.circular(18),
                             ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              AnimatedPositioned(
-                duration: const Duration(milliseconds: 340),
-                curve: Curves.easeOut,
-                left: 6,
-                right: 6,
-                bottom: _hideFrontPanel ? -110 : 4,
-                child: Container(
-                  decoration: BoxDecoration(
-                    border: Border.all(color: Colors.grey.withOpacity(0.3)),
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Material(
-                    color: Colors.white,
-                    elevation: 12,
-                    shadowColor: Colors.black.withValues(alpha: 0.3),
-                    borderRadius: BorderRadius.circular(16),
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 14),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (isEmpty) const SizedBox(height: 4),
-                          Row(
+                            border: Border.all(
+                              color: Colors.black12.withValues(alpha: 0.08),
+                              width: 1,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.10),
+                                blurRadius: 18,
+                                offset: const Offset(0, -6),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.max,
                             children: [
-                              Expanded(
-                                child: Text(
-                                  _note?.isNotEmpty == true
-                                      ? _note!
-                                      : 'Add person details (e.g. allergies, medical conditions)',
-                                  style: const TextStyle(
-                                    color: _accentBlue,
-                                    fontWeight: FontWeight.w600,
-                                    fontSize: 12,
+                              GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                dragStartBehavior: DragStartBehavior.down,
+                                onVerticalDragStart: _onHandleDragStart,
+                                onVerticalDragUpdate: _onHandleDragUpdate,
+                                onVerticalDragEnd: _onHandleDragEnd,
+                                child: SizedBox(
+                                  height: 44,
+                                  width: double.infinity,
+                                  child: Center(
+                                    child: Container(
+                                      width: 36,
+                                      height: 4,
+                                      decoration: BoxDecoration(
+                                        color: Colors.black.withValues(
+                                          alpha: 0.16,
+                                        ),
+                                        borderRadius: BorderRadius.circular(24),
+                                      ),
+                                    ),
                                   ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
                                 ),
                               ),
-                              const SizedBox(width: 8),
-                              InkWell(
-                                onTap: _openNoteSheet,
-                                borderRadius: BorderRadius.circular(16),
-                                child: Container(
-                                  padding: const EdgeInsets.all(3.5),
-                                  decoration: const BoxDecoration(
-                                    color: Color(0xFF00B8C6),
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: const Icon(
-                                    Icons.add,
-                                    color: Colors.white,
-                                    size: 11,
-                                  ),
+                              const Divider(height: 1),
+                              Expanded(
+                                child: Stack(
+                                  children: [
+                                    NotificationListener<ScrollNotification>(
+                                      onNotification: (notification) {
+                                        if (notification
+                                                is ScrollEndNotification ||
+                                            (notification
+                                                    is UserScrollNotification &&
+                                                notification.direction ==
+                                                    ScrollDirection.idle)) {
+                                          _snapToNearest();
+                                        }
+                                        return false;
+                                      },
+                                      child: ListView.builder(
+                                        controller: _addressScrollController,
+                                        physics: isEmpty
+                                            ? const ClampingScrollPhysics()
+                                            : const _ItemSnapScrollPhysics(
+                                                itemExtent: _itemExtent,
+                                              ),
+                                        padding: EdgeInsets.only(
+                                          left: 12,
+                                          right: 12,
+                                          top: 0,
+                                          bottom:
+                                              MediaQuery.of(
+                                                context,
+                                              ).padding.bottom +
+                                              120,
+                                        ),
+                                        itemExtent: isEmpty
+                                            ? null
+                                            : _itemExtent,
+                                        itemCount: isEmpty
+                                            ? 1
+                                            : filteredVisibleList.length,
+                                        itemBuilder: (context, index) {
+                                          if (isEmpty) {
+                                            return Padding(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 8,
+                                                    vertical: 6,
+                                                  ),
+                                              child: _emptyState(context),
+                                            );
+                                          }
+                                          final item =
+                                              filteredVisibleList[index];
+                                          final bool isActive =
+                                              index == _currentScrollIndex;
+                                          final bool isCurrent =
+                                              _hasLocation && index == 0;
+                                          return _addressTile(
+                                            item,
+                                            isActive: isActive,
+                                            showEdit: !isCurrent,
+                                            isCurrent: isCurrent,
+                                            onTap: () =>
+                                                _onAddressSelected(item, index),
+                                            onEdit: () => _openEditAddress(
+                                              _hasLocation ? index - 1 : index,
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 6),
-                          SizedBox(
-                            width: double.infinity,
-                            child: ElevatedButton(
-                              onPressed: canChoose
-                                  ? _openCaregiverScreen
-                                  : null,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: canChoose
-                                    ? _primaryColor
-                                    : _disabledColor,
-                                foregroundColor: canChoose
-                                    ? Colors.black
-                                    : Colors.white70,
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 10,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(18),
-                                ),
-                                textStyle: const TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 14,
-                                ),
+                        ),
+                      ),
+                      AnimatedPositioned(
+                        duration: const Duration(milliseconds: 340),
+                        curve: Curves.easeOut,
+                        left: 6,
+                        right: 6,
+                        bottom: _hideFrontPanel ? -110 : 4,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                              color: Colors.black12.withValues(alpha: 0.08),
+                            ),
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: Material(
+                            color: Colors.white,
+                            elevation: 10,
+                            shadowColor: Colors.black.withValues(alpha: 0.22),
+                            borderRadius: BorderRadius.circular(16),
+                            child: Padding(
+                              padding: const EdgeInsets.fromLTRB(
+                                12,
+                                10,
+                                12,
+                                14,
                               ),
-                              child: const Text('Choose this person'),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  if (isEmpty) const SizedBox(height: 4),
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          _note?.isNotEmpty == true
+                                              ? _note!
+                                              : 'Add person details (e.g. allergies, medical conditions)',
+                                          style: const TextStyle(
+                                            color: _accentBlue,
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 12,
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      InkWell(
+                                        onTap: _openNoteSheet,
+                                        borderRadius: BorderRadius.circular(16),
+                                        child: Container(
+                                          padding: const EdgeInsets.all(3.5),
+                                          decoration: const BoxDecoration(
+                                            color: Color(0xFF00B8C6),
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: const Icon(
+                                            Icons.add,
+                                            color: Colors.white,
+                                            size: 11,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+                                  SizedBox(
+                                    width: double.infinity,
+                                    child: ElevatedButton(
+                                      onPressed: canChoose
+                                          ? _openCaregiverScreen
+                                          : null,
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: canChoose
+                                            ? _primaryColor
+                                            : _disabledColor,
+                                        foregroundColor: canChoose
+                                            ? Colors.black
+                                            : Colors.white70,
+                                        padding: const EdgeInsets.symmetric(
+                                          vertical: 10,
+                                        ),
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(
+                                            18,
+                                          ),
+                                        ),
+                                        textStyle: const TextStyle(
+                                          fontWeight: FontWeight.w700,
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        isBlockedSelection
+                                            ? 'Currently in active booking'
+                                            : 'Choose this person',
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
-                        ],
+                        ),
                       ),
-                    ),
+                      if (_noteSheetVisible) _buildNotePanelOverlay(),
+                    ],
                   ),
                 ),
               ),
-              if (_noteSheetVisible) _buildNotePanelOverlay(),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _currentLocationButton() {
-    final media = MediaQuery.of(context);
-    final double bottomOffset = media.padding.bottom + 16;
-    final double iconOpacity = (1 - (_panelController.value * 1.4)).clamp(
-      0.0,
-      1.0,
-    );
-    return Positioned(
-      right: 12,
-      bottom: bottomOffset,
-      child: IgnorePointer(
-        ignoring: iconOpacity <= 0.05,
-        child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 150),
-          opacity: iconOpacity,
-          child: Material(
-            color: Colors.white,
-            shape: const CircleBorder(),
-            elevation: 6,
-            child: IconButton(
-              icon: const Icon(Icons.my_location_outlined),
-              color: Colors.black87,
-              iconSize: 18,
-              tooltip: 'Current location',
-              onPressed: _scrollToCurrentLocation,
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -1517,21 +1828,21 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     return InkWell(
       onTap: onTap,
       child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 1),
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+        margin: const EdgeInsets.symmetric(vertical: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
         decoration: BoxDecoration(
-          color: isActive ? const Color(0xFFE4F4FF) : Colors.white,
-          borderRadius: BorderRadius.circular(14),
+          color: isActive ? _accentBlue.withValues(alpha: 0.08) : Colors.white,
+          borderRadius: BorderRadius.circular(16),
           border: Border.all(
             color: isActive
-                ? const Color(0xFF00B8C6)
-                : Colors.grey.withOpacity(0.2),
+                ? _accentBlue
+                : Colors.black12.withValues(alpha: 0.08),
           ),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(isActive ? 0.08 : 0.03),
-              blurRadius: isActive ? 12 : 4,
-              offset: const Offset(0, 2),
+              color: Colors.black.withValues(alpha: isActive ? 0.14 : 0.10),
+              blurRadius: 14,
+              offset: const Offset(0, 4),
             ),
           ],
         ),
@@ -1539,7 +1850,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             DefaultProfileAvatar(
-              radius: 14,
+              radius: 16,
               photoUrl: _avatarUrlForTile(item),
               label: displayTitle,
             ),
@@ -1557,11 +1868,9 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                       text: TextSpan(
                         text: displayTitle,
                         style: TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 14,
-                          color: isActive
-                              ? const Color(0xFF00B8C6)
-                              : Colors.black87,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                          color: isActive ? _accentBlue : Colors.black87,
                         ),
                         children: labelTag != null
                             ? [
@@ -1569,10 +1878,10 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                                 TextSpan(
                                   text: labelTag,
                                   style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
                                     color: isActive
-                                        ? const Color(0xFF00B8C6)
+                                        ? _accentBlue
                                         : Colors.black54,
                                   ),
                                 ),
@@ -1587,22 +1896,30 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                     children: [
                       Text(
                         distanceText,
-                        style: const TextStyle(
-                          color: Colors.black54,
-                          fontSize: 11,
+                        style: TextStyle(
+                          color: Colors.black.withValues(alpha: 0.68),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
                       const SizedBox(width: 6),
-                      const Text('-', style: TextStyle(color: Colors.black26)),
+                      Text(
+                        '•',
+                        style: TextStyle(
+                          color: Colors.black.withValues(alpha: 0.35),
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
                           addressLine,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.black54,
-                            fontSize: 11,
+                          style: TextStyle(
+                            color: Colors.black.withValues(alpha: 0.65),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
@@ -1615,7 +1932,22 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
             if (showEdit)
               InkWell(
                 onTap: onEdit,
-                child: const Icon(Icons.edit, color: Colors.black54, size: 18),
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.05),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: Colors.black12.withValues(alpha: 0.08),
+                    ),
+                  ),
+                  child: Icon(
+                    Icons.edit_outlined,
+                    color: Colors.black.withValues(alpha: 0.70),
+                    size: 18,
+                  ),
+                ),
               ),
           ],
         ),
@@ -1666,9 +1998,17 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   }
 
   Marker _buildMarker() {
+    LatLng markerPos = _currentLatLng;
+    final selected = _selected;
+    if (selected != null &&
+        !_isCurrentLocationItem(selected) &&
+        selected.lat != null &&
+        selected.long != null) {
+      markerPos = LatLng(selected.lat!, selected.long!);
+    }
     return Marker(
       markerId: const MarkerId('selected'),
-      position: _currentLatLng,
+      position: markerPos,
       icon:
           _selectedPersonIcon ??
           BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
@@ -1683,17 +2023,18 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       }
       return;
     }
+    final int requestSeq = ++_markerRequestSeq;
     final person = _personFromAddress(_selected!);
     final String? photoUrl = person.photoUrl.trim().isNotEmpty
         ? person.photoUrl.trim()
         : null;
     final descriptor = await _cachedAvatarMarker(
-      "selected_person:${photoUrl ?? 'default'}",
+      "selected_person:${person.id}:${photoUrl ?? 'default'}",
       fillColor: _primaryColor,
-      label: null,
+      label: person.name.trim().isNotEmpty ? person.name.trim()[0] : null,
       photoUrl: photoUrl,
     );
-    if (!mounted) return;
+    if (!mounted || requestSeq != _markerRequestSeq) return;
     setState(() => _selectedPersonIcon = descriptor);
   }
 
@@ -1709,7 +2050,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     final descriptor = await _buildAvatarMarker(
       fillColor: fillColor,
       label: label,
-      size: 130,
+      size: 60,
       avatar: avatar,
     );
     _markerCache[key] = descriptor;
@@ -1752,7 +2093,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       circleRadius,
     );
     final Paint outlinePaint = Paint()
-      ..color = Colors.yellow.shade700
+      ..color = Colors.white
       ..style = PaintingStyle.stroke
       ..strokeWidth = outlineWidth;
     if (avatar == null) {
@@ -1835,7 +2176,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       debugPrint('Avatar marker drawing failed; using default marker');
       return BitmapDescriptor.defaultMarker;
     }
-    return BitmapDescriptor.fromBytes(byteData.buffer.asUint8List());
+    return BitmapDescriptor.bytes(byteData.buffer.asUint8List());
   }
 
   List<AddressItem> _visibleAddresses() {
@@ -1858,6 +2199,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       addressLine: _currentLocationName,
       avatarUrl: _userPhotoUrl,
       photoUrl: _userPhotoUrl,
+      isCurrentLocation: true,
     );
   }
 
@@ -1895,27 +2237,46 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     final bool titleMatch =
         item.title.toLowerCase() == 'current location'.toLowerCase() ||
         item.title.toLowerCase() == 'you';
-    final bool coordsMatch =
-        item.lat == _currentLatLng.latitude &&
-        item.long == _currentLatLng.longitude;
-    return titleMatch || coordsMatch;
+    return item.isCurrentLocation || titleMatch;
+  }
+
+  String _stableMarkerKeyForItem(AddressItem item) {
+    final id = item.id?.trim();
+    if (id != null && id.isNotEmpty) return id;
+    final lat = item.lat?.toStringAsFixed(6) ?? '';
+    final lng = item.long?.toStringAsFixed(6) ?? '';
+    final title = item.title.trim();
+    final subtitle = item.subtitle.trim();
+    return '$title|$subtitle|$lat,$lng';
   }
 
   Future<void> _refreshDeviceLocation() async {
+    final int seq = ++_locationRequestSeq;
     try {
       final pos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.best,
       );
       final latLng = LatLng(pos.latitude, pos.longitude);
+      if (!mounted || seq != _locationRequestSeq) return;
+      final selected = _selected;
+      final bool shouldApply =
+          selected == null || _isCurrentLocationItem(selected);
+      if (!shouldApply) return;
       _currentLatLng = latLng;
       _hasLocation = true;
       await _resolvePlaceName(latLng);
+      if (!mounted || seq != _locationRequestSeq) return;
       _updateDistances();
       _mapController?.animateCamera(_cameraUpdate(latLng));
       if (mounted) setState(() {});
     } catch (_) {
       // ignore location failures
     }
+  }
+
+  String _stablePersonId(AddressItem item) {
+    final markerKey = _stableMarkerKeyForItem(item);
+    return markerKey.isNotEmpty ? markerKey : UniqueKey().toString();
   }
 }
 

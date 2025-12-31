@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../../services/auth_service.dart';
@@ -21,7 +24,9 @@ import 'package:emergencies_disability_assistance_app/models/payment_document_ta
 import 'package:intl/intl.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 
-const Color activityBackgroundColor = Colors.white;
+import '../../../utils/service_preferences.dart';
+
+const Color activityBackgroundColor = Color(0xFFF7F8FA);
 const Color activityPrimaryTextColor = Color(0xFF1B1D29);
 const Color activityAccentBlue = Color(0xFF00A8A7);
 const Color activityButtonYellow = Color(0xFFF4B63D);
@@ -36,16 +41,16 @@ const TextStyle _activityDialogTitleStyle = TextStyle(
 );
 const TextStyle _activityDialogContentStyle = TextStyle(color: Colors.black87);
 
-final Color _activityCardBorderColor = Colors.grey.shade300;
+const Color _activityCardBorderColor = Color(0xFFD7DCE3);
 final BoxShadow _activityCardShadow = BoxShadow(
-  color: Colors.black.withValues(alpha: 0.08),
-  blurRadius: 16,
-  offset: const Offset(0, 6),
+  color: Colors.black.withValues(alpha: 0.10),
+  blurRadius: 20,
+  offset: const Offset(0, 10),
 );
 final BoxShadow _statusCardShadow = BoxShadow(
   color: Colors.black.withValues(alpha: 0.08),
-  blurRadius: 8,
-  offset: const Offset(0, 4),
+  blurRadius: 12,
+  offset: const Offset(0, 6),
 );
 const List<String> _cancellationReasons = [
   'No longer need assistance',
@@ -62,14 +67,26 @@ const BorderRadius _activityCardBorderRadius = BorderRadius.all(
 );
 
 class ActivityScreen extends StatefulWidget {
-  const ActivityScreen({super.key});
+  const ActivityScreen({
+    super.key,
+    this.tabIndexListenable,
+    this.tabIndex = 3,
+  });
+
+  final ValueListenable<int>? tabIndexListenable;
+  final int tabIndex;
 
   @override
   State<ActivityScreen> createState() => _ActivityScreenState();
 }
 
 class _ActivityScreenState extends State<ActivityScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
+  AnimationController? _entryController;
+  Animation<double>? _entryFade;
+  Animation<Offset>? _entrySlide;
+  bool _wasActive = false;
+
   String? _resetSwipeFor;
   ActivityBooking? _pendingCancellationBooking;
   String? _selectedReason;
@@ -107,6 +124,38 @@ class _ActivityScreenState extends State<ActivityScreen>
   @override
   void initState() {
     super.initState();
+
+    final entryController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+    _entryController = entryController;
+    _entryFade = CurvedAnimation(
+      parent: entryController,
+      curve: Curves.easeOutCubic,
+    );
+    _entrySlide = Tween<Offset>(
+      begin: const Offset(0, 0.02),
+      end: Offset.zero,
+    ).animate(
+      CurvedAnimation(
+        parent: entryController,
+        curve: Curves.easeOutCubic,
+      ),
+    );
+    _wasActive =
+        (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+    widget.tabIndexListenable?.addListener(_handleTabChange);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_wasActive) {
+        _entryController?.forward(from: 0);
+      } else {
+        _entryController?.value = 1;
+      }
+    });
+
     _reasonSheetController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 520),
@@ -123,7 +172,30 @@ class _ActivityScreenState extends State<ActivityScreen>
   }
 
   @override
+  void didUpdateWidget(covariant ActivityScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tabIndexListenable != widget.tabIndexListenable) {
+      oldWidget.tabIndexListenable?.removeListener(_handleTabChange);
+      widget.tabIndexListenable?.addListener(_handleTabChange);
+      _wasActive =
+          (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+    }
+  }
+
+  void _handleTabChange() {
+    final currentIndex = widget.tabIndexListenable?.value;
+    if (currentIndex == null) return;
+    final isActive = currentIndex == widget.tabIndex;
+    if (isActive && !_wasActive) {
+      _entryController?.forward(from: 0);
+    }
+    _wasActive = isActive;
+  }
+
+  @override
   void dispose() {
+    widget.tabIndexListenable?.removeListener(_handleTabChange);
+    _entryController?.dispose();
     _reasonSheetController.dispose();
     _otherReasonController.dispose();
     super.dispose();
@@ -141,6 +213,7 @@ class _ActivityScreenState extends State<ActivityScreen>
         .toString()
         .toUpperCase();
     final cancellationReason = (data['cancellationReason'] as String?)?.trim();
+    final serviceLabel = extractServiceLabelFromFirestore(data);
     return ActivityBooking(
       id: docId,
       caregiverId: (data['caregiverId'] as String?) ?? '',
@@ -149,7 +222,7 @@ class _ActivityScreenState extends State<ActivityScreen>
       addressId: (data['addressId'] as String?) ?? '',
       personName: (data['personName'] as String?) ?? 'Family member',
       personAddress: (data['personAddress'] as String?) ?? '',
-      service: (data['service'] as String?) ?? 'Home care',
+      service: serviceLabel.isNotEmpty ? serviceLabel : 'Home care',
       date: date,
       time: time,
       scheduledDate: scheduledDate,
@@ -165,12 +238,22 @@ class _ActivityScreenState extends State<ActivityScreen>
   }
 
   Future<List<_EnrichedBooking>> _enrichBookings(
-    List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
-  ) async {
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> docs, {
+    required String currentUserId,
+    required Set<String> reviewedBookingIds,
+  }) async {
     final futures = docs.map((doc) async {
       final data = doc.data();
       final hidden = (data['hidden'] as bool?) ?? false;
       if (hidden) return null;
+      final rawStatus = (data['status'] as String?)?.trim().toUpperCase();
+      final paymentStatus =
+          (data['paymentStatus'] as String?)?.trim().toUpperCase();
+      if (rawStatus == 'PAYMENT_FAILED' ||
+          rawStatus == 'PENDING_PAYMENT' ||
+          paymentStatus == 'FAILED') {
+        return null;
+      }
       final caregiverId = (data['caregiverId'] as String?) ?? '';
       final userId = (data['userId'] as String?) ?? '';
       final caregiverDoc = caregiverId.isNotEmpty
@@ -185,26 +268,13 @@ class _ActivityScreenState extends State<ActivityScreen>
                 .doc(userId)
                 .get()
           : null;
-      bool hasReview = false;
-      if (userId.isNotEmpty) {
-        try {
-          final reviewSnapshot = await FirebaseFirestore.instance
-              .collection('reviews')
-              .where('bookingId', isEqualTo: doc.id)
-              .where('userId', isEqualTo: userId)
-              .limit(1)
-              .get();
-          hasReview = reviewSnapshot.docs.isNotEmpty;
-        } catch (_) {
-          hasReview = false;
-        }
-      }
+      final hasReview = reviewedBookingIds.contains(doc.id);
       return _EnrichedBooking(
         bookingId: doc.id,
         booking: _mapFromDoc(data, doc.id),
         status: (data['status'] as String?) ?? 'PENDING',
         caregiverId: caregiverId,
-        userId: userId,
+        userId: userId.isNotEmpty ? userId : currentUserId,
         hasReview: hasReview,
         caregiverData: caregiverDoc?.data(),
         userData: userDoc?.data(),
@@ -216,100 +286,111 @@ class _ActivityScreenState extends State<ActivityScreen>
 
   @override
   Widget build(BuildContext context) {
+    final entryFade = _entryFade ?? const AlwaysStoppedAnimation<double>(1);
+    final entrySlide =
+        _entrySlide ?? const AlwaysStoppedAnimation<Offset>(Offset.zero);
+
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
-      return const Scaffold(
-        body: Center(child: Text('Please sign in to view activity')),
+      return FadeTransition(
+        opacity: entryFade,
+        child: SlideTransition(
+          position: entrySlide,
+          child: const Scaffold(
+            body: Center(child: Text('Please sign in to view activity')),
+          ),
+        ),
       );
     }
 
     final userId = user.uid;
     final unreadStream = _chatService.streamUnreadCountForUser(userId);
-    return Scaffold(
-      backgroundColor: activityBackgroundColor,
-      appBar: buildProfileStyleAppBar(title: 'Activity'),
-      body: StreamBuilder<List<_EnrichedBooking>>(
-        stream: _enrichedBookingsStream(user.uid),
-        builder: (context, enrichedSnapshot) {
-          if (enrichedSnapshot.hasError) {
-            return Center(child: Text('Error: ${enrichedSnapshot.error}'));
-          }
-          final enriched = enrichedSnapshot.data;
-          if (enriched == null) {
-            if (_cachedEnriched != null) {
-              return _buildActivityContent(_cachedEnriched!);
-            }
-            return const SizedBox.shrink();
-          }
-          _cachedEnriched = enriched;
-          return _buildActivityContent(enriched);
-        },
-      ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
-      floatingActionButton: StreamBuilder<int>(
-        stream: unreadStream,
-        builder: (context, snapshot) {
-          final badgeCount = snapshot.data ?? 0;
-          return Stack(
-            alignment: Alignment.center,
-            clipBehavior: Clip.none,
-            children: [
-              GestureDetector(
-                onTap: _navigateToChatList,
-                child: Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.12),
-                        blurRadius: 8,
-                        offset: const Offset(0, 4),
+    return FadeTransition(
+      opacity: entryFade,
+      child: SlideTransition(
+        position: entrySlide,
+        child: Scaffold(
+          backgroundColor: activityBackgroundColor,
+          appBar: buildProfileStyleAppBar(title: 'Activity'),
+          body: StreamBuilder<List<_EnrichedBooking>>(
+            stream: _enrichedBookingsStream(user.uid),
+            builder: (context, enrichedSnapshot) {
+              if (enrichedSnapshot.hasError) {
+                return Center(child: Text('Error: ${enrichedSnapshot.error}'));
+              }
+              final enriched = enrichedSnapshot.data;
+              if (enriched == null) {
+                if (_cachedEnriched != null) {
+                  return _buildActivityContent(_cachedEnriched!);
+                }
+                return const SizedBox.shrink();
+              }
+              _cachedEnriched = enriched;
+              return _buildActivityContent(enriched);
+            },
+          ),
+          floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
+          floatingActionButton: StreamBuilder<int>(
+            stream: unreadStream,
+            builder: (context, snapshot) {
+              final badgeCount = snapshot.data ?? 0;
+              return Stack(
+                alignment: Alignment.center,
+                clipBehavior: Clip.none,
+                children: [
+                  GestureDetector(
+                    onTap: _navigateToChatList,
+                    child: Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: _activityCardBorderColor),
+                        boxShadow: [_statusCardShadow],
                       ),
-                    ],
-                  ),
-                  child: const Icon(
-                    Icons.chat_bubble_outline,
-                    color: activityAccentBlue,
-                    size: 20,
-                  ),
-                ),
-              ),
-              if (badgeCount > 0)
-                Positioned(
-                  top: 2,
-                  right: 2,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(999),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.1),
-                          blurRadius: 6,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: Text(
-                      badgeCount.toString(),
-                      style: const TextStyle(
+                      child: const Icon(
+                        Icons.chat_bubble_outline,
                         color: activityAccentBlue,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 10,
+                        size: 20,
                       ),
                     ),
                   ),
-                ),
-            ],
-          );
-        },
+                  if (badgeCount > 0)
+                    Positioned(
+                      bottom: -4,
+                      right: -4,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 7,
+                          vertical: 2.5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: activityAccentBlue,
+                          borderRadius: BorderRadius.circular(24),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Colors.black26,
+                              blurRadius: 10,
+                              offset: Offset(0, 5),
+                            ),
+                          ],
+                        ),
+                        child: Text(
+                          badgeCount.toString(),
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
+        ),
       ),
     );
   }
@@ -330,7 +411,7 @@ class _ActivityScreenState extends State<ActivityScreen>
     }
 
     return ListView.separated(
-      padding: const EdgeInsets.only(top: 8, bottom: 16),
+      padding: const EdgeInsets.only(top: 0, bottom: 16),
       itemCount: list.length,
       separatorBuilder: (_, __) => const SizedBox(height: 12),
       itemBuilder: (_, index) {
@@ -428,7 +509,7 @@ class _ActivityScreenState extends State<ActivityScreen>
       context: context,
       barrierDismissible: true,
       builder: (_) => AlertDialog(
-        backgroundColor: Colors.white,
+        backgroundColor: activityBackgroundColor,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         title: const Text(
           'Remove from history',
@@ -451,7 +532,7 @@ class _ActivityScreenState extends State<ActivityScreen>
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
                 ),
-                side: BorderSide(color: Colors.grey.shade300),
+                side: const BorderSide(color: _activityCardBorderColor),
                 padding: const EdgeInsets.symmetric(vertical: 12),
               ),
               child: const Text(
@@ -521,7 +602,7 @@ class _ActivityScreenState extends State<ActivityScreen>
       return const SizedBox.shrink();
     }
     return ListView.separated(
-      padding: const EdgeInsets.only(top: 8, bottom: 16),
+      padding: const EdgeInsets.only(top: 0, bottom: 16),
       itemCount: list.length,
       separatorBuilder: (_, __) => const SizedBox(height: 12),
       itemBuilder: (_, index) {
@@ -604,7 +685,7 @@ class _ActivityScreenState extends State<ActivityScreen>
       context: context,
       barrierDismissible: true,
       builder: (_) => AlertDialog(
-        backgroundColor: Colors.white,
+        backgroundColor: activityBackgroundColor,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         title: const Text(
           'Payment details required',
@@ -627,7 +708,7 @@ class _ActivityScreenState extends State<ActivityScreen>
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
                 ),
-                side: BorderSide(color: Colors.grey.shade300),
+                side: const BorderSide(color: _activityCardBorderColor),
                 padding: const EdgeInsets.symmetric(vertical: 12),
               ),
               child: const Text(
@@ -690,11 +771,12 @@ class _ActivityScreenState extends State<ActivityScreen>
               )
               .toList()
         : list;
-    return visibleList.isEmpty
+
+    final body = visibleList.isEmpty
         ? _buildEmptyState(icon, title, subtitle)
-        : (isHistory
-              ? _buildHistoryList(visibleList)
-              : _buildList(visibleList));
+        : (isHistory ? _buildHistoryList(visibleList) : _buildList(visibleList));
+
+    return body;
   }
 
   Widget _buildEmptyState(IconData icon, String title, String subtitle) {
@@ -752,17 +834,11 @@ class _ActivityScreenState extends State<ActivityScreen>
                       Container(
                         decoration: BoxDecoration(
                           color: Colors.white,
-                          border: Border.all(color: Colors.grey.shade300),
+                          border: Border.all(color: _activityCardBorderColor),
                           borderRadius: BorderRadius.circular(
                             activitySegmentRadius,
                           ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.04),
-                              blurRadius: 10,
-                              offset: const Offset(0, 4),
-                            ),
-                          ],
+                          boxShadow: [_activityCardShadow],
                         ),
                       ),
                       Positioned.fill(
@@ -946,7 +1022,7 @@ class _ActivityScreenState extends State<ActivityScreen>
               ),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(16),
-                borderSide: BorderSide(color: Colors.grey.shade300),
+              borderSide: const BorderSide(color: _activityCardBorderColor),
               ),
               hintText: 'Tell us why you need to cancel',
               hintStyle: TextStyle(
@@ -1041,7 +1117,7 @@ class _ActivityScreenState extends State<ActivityScreen>
         color: Colors.white,
         borderRadius: BorderRadius.circular(18),
         border: Border.all(
-          color: isSelected ? activityAccentBlue : Colors.grey.shade200,
+          color: isSelected ? activityAccentBlue : _activityCardBorderColor,
         ),
         boxShadow: [_activityCardShadow],
       ),
@@ -1088,12 +1164,65 @@ class _ActivityScreenState extends State<ActivityScreen>
   }
 
   Stream<List<_EnrichedBooking>> _enrichedBookingsStream(String userId) {
-    return FirebaseFirestore.instance
+    final bookingsStream = FirebaseFirestore.instance
         .collection('bookings')
         .where('userId', isEqualTo: userId)
         .orderBy('createdAt', descending: true)
-        .snapshots()
-        .asyncMap((snapshot) => _enrichBookings(snapshot.docs));
+        .snapshots();
+    final reviewsStream = FirebaseFirestore.instance
+        .collection('reviews')
+        .where('userId', isEqualTo: userId)
+        .snapshots();
+
+    return Stream.multi((controller) {
+      List<QueryDocumentSnapshot<Map<String, dynamic>>>? latestBookings;
+      Set<String>? latestReviewedBookingIds;
+      var emitting = false;
+
+      Future<void> emitIfReady() async {
+        if (emitting) return;
+        if (latestBookings == null || latestReviewedBookingIds == null) return;
+        emitting = true;
+        try {
+          final enriched = await _enrichBookings(
+            latestBookings!,
+            currentUserId: userId,
+            reviewedBookingIds: latestReviewedBookingIds!,
+          );
+          controller.add(enriched);
+        } catch (e, st) {
+          controller.addError(e, st);
+        } finally {
+          emitting = false;
+        }
+      }
+
+      final bookingsSub = bookingsStream.listen(
+        (snapshot) {
+          latestBookings = snapshot.docs;
+          emitIfReady();
+        },
+        onError: controller.addError,
+      );
+      final reviewsSub = reviewsStream.listen(
+        (snapshot) {
+          latestReviewedBookingIds = snapshot.docs
+              .map((doc) => (doc.data()['bookingId'] as String?) ?? '')
+              .where((bookingId) => bookingId.isNotEmpty)
+              .toSet();
+          emitIfReady();
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          latestReviewedBookingIds = <String>{};
+          emitIfReady();
+        },
+      );
+
+      controller.onCancel = () async {
+        await bookingsSub.cancel();
+        await reviewsSub.cancel();
+      };
+    });
   }
 }
 
@@ -1293,6 +1422,19 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
       final navigator = Navigator.of(context);
 
       final caregiverName = await _loadCaregiverName();
+      final personProfile = _buildPersonProfile();
+      final caregiverData = widget.caregiverData;
+      final caregiverPhotoUrl =
+          (caregiverData?['photoUrl'] as String?)?.trim().isNotEmpty == true
+              ? (caregiverData?['photoUrl'] as String).trim()
+              : ((caregiverData?['avatarUrl'] as String?)?.trim().isNotEmpty ==
+                      true
+                  ? (caregiverData?['avatarUrl'] as String).trim()
+                  : null);
+      final caregiverPhone =
+          (caregiverData?['phone'] as String?)?.trim() ??
+          (caregiverData?['phoneNumber'] as String?)?.trim();
+
       if (!mounted) return;
       navigator.push(
         MaterialPageRoute(
@@ -1328,6 +1470,7 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
   }
 
   Future<void> _openRateReview(BuildContext context) async {
+    final tabController = DefaultTabController.of(context);
     final result = await Navigator.push(
       context,
       MaterialPageRoute(
@@ -1340,7 +1483,6 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
     );
     if (!mounted) return;
     if (result == 'history') {
-      final tabController = DefaultTabController.of(context);
       tabController.animateTo(1);
     }
   }
@@ -1637,6 +1779,10 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
       icon: Icons.chat_bubble_outline,
       onPressed: _isChatting ? null : () => _startChat(context),
       kind: _ActionButtonKind.circle,
+      badgeStream: _chatService.streamUnreadCountForConversation(
+        participantId: _auth.userId,
+        otherUserId: widget.booking.caregiverId,
+      ),
     );
 
     final normalizedStatus = widget.booking.rawStatus.trim().toUpperCase();
@@ -1907,14 +2053,14 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
               ),
               child: Row(
                 children: [
-                  DefaultProfileAvatar(
-                    radius: 14,
-                    photoUrl:
-                        (personProfile.photoUrl.trim().isNotEmpty ?? false)
-                        ? personProfile.photoUrl.trim()
-                        : null,
-                    label: personName,
-                  ),
+                    DefaultProfileAvatar(
+                      radius: 14,
+                      photoUrl:
+                        personProfile.photoUrl.trim().isNotEmpty
+                            ? personProfile.photoUrl.trim()
+                            : null,
+                      label: personName,
+                    ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Column(
@@ -2075,28 +2221,66 @@ class _CircleActionButton extends StatelessWidget {
 
   final _ActionConfig action;
 
+  Widget _buildUnreadPill(int count) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+      decoration: BoxDecoration(
+        color: activityAccentBlue,
+        borderRadius: BorderRadius.circular(24),
+      ),
+      child: Text(
+        count.toString(),
+        style: const TextStyle(
+          fontSize: 11,
+          color: Colors.white,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildButton(BuildContext context, int badgeCount) {
+    final isEnabled = action.enabled && action.onPressed != null;
+    final button = OutlinedButton(
+      onPressed: isEnabled ? action.onPressed : null,
+      style: OutlinedButton.styleFrom(
+        shape: const CircleBorder(),
+        padding: EdgeInsets.zero,
+        side: const BorderSide(color: _activityCardBorderColor),
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black54,
+        minimumSize: const Size(40, 40),
+      ),
+      child: Icon(
+        action.icon ?? Icons.chat_bubble_outline,
+        size: 18,
+        color: isEnabled ? Colors.black54 : Colors.black26,
+      ),
+    );
+
+    if (badgeCount <= 0) return button;
+
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Positioned.fill(child: button),
+        Positioned(bottom: -4, right: -4, child: _buildUnreadPill(badgeCount)),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final isEnabled = action.enabled && action.onPressed != null;
     return SizedBox(
       width: 40,
       height: 40,
-      child: OutlinedButton(
-        onPressed: isEnabled ? action.onPressed : null,
-        style: OutlinedButton.styleFrom(
-          shape: const CircleBorder(),
-          padding: EdgeInsets.zero,
-          side: BorderSide(color: Colors.grey.shade300),
-          backgroundColor: Colors.white,
-          foregroundColor: Colors.black54,
-          minimumSize: const Size(40, 40),
-        ),
-        child: Icon(
-          action.icon ?? Icons.chat_bubble_outline,
-          size: 18,
-          color: isEnabled ? Colors.black54 : Colors.black26,
-        ),
-      ),
+      child: action.badgeStream == null
+          ? _buildButton(context, 0)
+          : StreamBuilder<int>(
+              stream: action.badgeStream,
+              builder: (context, snapshot) =>
+                  _buildButton(context, snapshot.data ?? 0),
+            ),
     );
   }
 }
@@ -2171,7 +2355,7 @@ class _PillActionButton extends StatelessWidget {
         style = OutlinedButton.styleFrom(
           backgroundColor: Colors.white,
           foregroundColor: Colors.black87,
-          side: BorderSide(color: Colors.grey.shade300),
+          side: const BorderSide(color: _activityCardBorderColor),
           shape: RoundedRectangleBorder(borderRadius: radius),
           textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
           minimumSize: const Size(0, _pillButtonHeight),
@@ -2204,6 +2388,7 @@ class _ActionConfig {
     this.tone = _PillTone.outline,
     this.kind = _ActionButtonKind.pill,
     this.enabled = true,
+    this.badgeStream,
   });
 
   final String label;
@@ -2212,4 +2397,81 @@ class _ActionConfig {
   final _PillTone tone;
   final _ActionButtonKind kind;
   final bool enabled;
+  final Stream<int>? badgeStream;
+}
+
+class _ActivitySectionInfoIcon extends StatefulWidget {
+  const _ActivitySectionInfoIcon({required this.message});
+
+  final String message;
+
+  @override
+  State<_ActivitySectionInfoIcon> createState() => _ActivitySectionInfoIconState();
+}
+
+class _ActivitySectionInfoIconState extends State<_ActivitySectionInfoIcon> {
+  bool _showHint = false;
+  Timer? _hintTimer;
+
+  void _triggerHint() {
+    _hintTimer?.cancel();
+    setState(() => _showHint = true);
+    _hintTimer = Timer(const Duration(seconds: 2), () {
+      if (!mounted) return;
+      setState(() => _showHint = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _hintTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        GestureDetector(
+          onTap: _triggerHint,
+          onLongPress: _triggerHint,
+          child: Container(
+            padding: const EdgeInsets.all(2),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.05),
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
+            ),
+            child: const Icon(
+              Icons.info_outline,
+              size: 16,
+              color: activityAccentBlue,
+            ),
+          ),
+        ),
+        if (_showHint)
+          Positioned(
+            right: -170,
+            bottom: 30,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.black87,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              constraints: const BoxConstraints(maxWidth: 200),
+              child: Text(
+                widget.message,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  height: 1.2,
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
 }

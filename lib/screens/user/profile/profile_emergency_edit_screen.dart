@@ -347,104 +347,129 @@ class _ProfileEmergencyEditScreenState
                                 ),
                                 const SizedBox(height: 10),
                                 _buildPhoneField(),
-                                const SizedBox(height: 12),
-                                const Text(
-                                  'Telegram pairing link',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                    fontSize: 12,
-                                    color: _profileDarkText,
-                                  ),
-                                ),
-                                const SizedBox(height: 6),
-                                TextFormField(
-                                  controller: _pairingLinkCtrl,
-                                  readOnly: true,
-                                  showCursor: false,
-                                  style: _inputFieldTextStyle,
-                                  decoration: InputDecoration(
-                                    hintText: 'Generate pairing link',
-                                    hintStyle: _inputFieldHintStyle,
-                                    filled: true,
-                                    fillColor: Colors.white,
-                                    contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 14,
-                                      vertical: 10,
-                                    ),
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(16),
-                                      borderSide: BorderSide(
-                                        color: Colors.grey[300]!,
-                                      ),
-                                    ),
-                                    enabledBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(16),
-                                      borderSide: BorderSide(
-                                        color: Colors.grey[300]!,
-                                      ),
-                                    ),
-                                    focusedBorder: const OutlineInputBorder(
-                                      borderRadius: BorderRadius.all(
-                                        Radius.circular(16),
-                                      ),
-                                      borderSide: BorderSide(
-                                        color: _profileDarkText,
-                                        width: 1.1,
-                                      ),
-                                    ),
-                                    suffixIconConstraints: const BoxConstraints(
-                                      minWidth: 90,
-                                    ),
-                                    suffixIcon: Padding(
-                                      padding: const EdgeInsets.only(right: 6),
-                                      child: SizedBox(
-                                        height: 32,
-                                        child: ElevatedButton(
-                                          onPressed: _isGeneratingLink
-                                              ? null
-                                              : telegramButtonAction,
-                                          style: ElevatedButton.styleFrom(
-                                            backgroundColor:
-                                                telegramButtonColor,
-                                            foregroundColor: Colors.white,
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 16,
-                                            ),
-                                            shape: RoundedRectangleBorder(
-                                              borderRadius:
-                                                  BorderRadius.circular(12),
-                                            ),
-                                          ),
-                                          child: _isGeneratingLink
-                                              ? const SizedBox(
-                                                  width: 16,
-                                                  height: 16,
-                                                  child:
-                                                      CircularProgressIndicator(
-                                                        strokeWidth: 2,
-                                                        color: Colors.white,
-                                                      ),
-                                                )
-                                              : Text(
-                                                  hasPairingLink
-                                                      ? 'Copy'
-                                                      : 'Generate',
-                                                  style: const TextStyle(
-                                                    fontWeight: FontWeight.w600,
-                                                    fontSize: 12,
-                                                  ),
-                                                ),
+                                Visibility(
+                                  visible: false,
+                                  maintainState: true,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      const SizedBox(height: 12),
+                                      const Text(
+                                        'Telegram pairing link',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.w600,
+                                          fontSize: 12,
+                                          color: _profileDarkText,
                                         ),
                                       ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  telegramHelperText,
-                                  style: const TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.black54,
+                                      const SizedBox(height: 6),
+                                      TextFormField(
+                                        controller: _pairingLinkCtrl,
+                                        readOnly: true,
+                                        showCursor: false,
+                                        style: _inputFieldTextStyle,
+                                        decoration: InputDecoration(
+                                          hintText: 'Generate pairing link',
+                                          hintStyle: _inputFieldHintStyle,
+                                          filled: true,
+                                          fillColor: Colors.white,
+                                          contentPadding:
+                                              const EdgeInsets.symmetric(
+                                                horizontal: 14,
+                                                vertical: 10,
+                                              ),
+                                          border: OutlineInputBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(16),
+                                            borderSide: BorderSide(
+                                              color: Colors.grey[300]!,
+                                            ),
+                                          ),
+                                          enabledBorder: OutlineInputBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(16),
+                                            borderSide: BorderSide(
+                                              color: Colors.grey[300]!,
+                                            ),
+                                          ),
+                                          focusedBorder:
+                                              const OutlineInputBorder(
+                                                borderRadius: BorderRadius.all(
+                                                  Radius.circular(16),
+                                                ),
+                                                borderSide: BorderSide(
+                                                  color: _profileDarkText,
+                                                  width: 1.1,
+                                                ),
+                                              ),
+                                          suffixIconConstraints:
+                                              const BoxConstraints(
+                                                minWidth: 90,
+                                              ),
+                                          suffixIcon: Padding(
+                                            padding: const EdgeInsets.only(
+                                              right: 6,
+                                            ),
+                                            child: SizedBox(
+                                              height: 32,
+                                              child: ElevatedButton(
+                                                onPressed: _isGeneratingLink
+                                                    ? null
+                                                    : telegramButtonAction,
+                                                style:
+                                                    ElevatedButton.styleFrom(
+                                                      backgroundColor:
+                                                          telegramButtonColor,
+                                                      foregroundColor:
+                                                          Colors.white,
+                                                      padding:
+                                                          const EdgeInsets.symmetric(
+                                                            horizontal: 16,
+                                                          ),
+                                                      shape:
+                                                          RoundedRectangleBorder(
+                                                        borderRadius:
+                                                            BorderRadius
+                                                                .circular(12),
+                                                      ),
+                                                    ),
+                                                child: _isGeneratingLink
+                                                    ? const SizedBox(
+                                                        width: 16,
+                                                        height: 16,
+                                                        child:
+                                                            CircularProgressIndicator(
+                                                              strokeWidth: 2,
+                                                              color:
+                                                                  Colors.white,
+                                                            ),
+                                                      )
+                                                    : Text(
+                                                        hasPairingLink
+                                                            ? 'Copy'
+                                                            : 'Generate',
+                                                        style:
+                                                            const TextStyle(
+                                                          fontWeight:
+                                                              FontWeight.w600,
+                                                          fontSize: 12,
+                                                        ),
+                                                      ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        telegramHelperText,
+                                        style: const TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.black54,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ],

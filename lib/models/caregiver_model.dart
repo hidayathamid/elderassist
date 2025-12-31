@@ -1,8 +1,13 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 class CaregiverModel {
   final String caregiverId;
   final String name;
   final String phone;
   final String photoUrl;
+  final String bio;
+  final String defaultAddress;
+  final DateTime? lastSeenJobsAt;
   final String specialization;
   final List<String> services;
   final List<String> certifications;
@@ -18,6 +23,9 @@ class CaregiverModel {
     required this.name,
     required this.phone,
     required this.photoUrl,
+    this.bio = '',
+    this.defaultAddress = '',
+    this.lastSeenJobsAt,
     this.specialization = '',
     required this.services,
     required this.certifications,
@@ -35,8 +43,13 @@ class CaregiverModel {
       name: data['name'],
       phone: data['phone'],
       photoUrl: data['photoUrl'],
+      bio: data['bio'] as String? ?? '',
+      defaultAddress: data['defaultAddress'] as String? ?? '',
+      lastSeenJobsAt: _dateTimeFromFirestore(data['lastSeenJobsAt']),
       specialization: data['specialization'] ?? '',
-      services: _safeStringList(data['services']),
+      services: _safeStringList(
+        data['servicePreferences'] ?? data['services'],
+      ),
       certifications: _safeStringList(data['certifications']),
       rating: (data['rating']).toDouble(),
       jobsCompleted: _safeInt(data['jobsCompleted']),
@@ -54,8 +67,13 @@ class CaregiverModel {
       name: safeData['name'] as String? ?? '',
       phone: safeData['phone'] as String? ?? '',
       photoUrl: safeData['photoUrl'] as String? ?? '',
+      bio: safeData['bio'] as String? ?? '',
+      defaultAddress: safeData['defaultAddress'] as String? ?? '',
+      lastSeenJobsAt: _dateTimeFromFirestore(safeData['lastSeenJobsAt']),
       specialization: safeData['specialization'] as String? ?? '',
-      services: _safeStringList(safeData['services']),
+      services: _safeStringList(
+        safeData['servicePreferences'] ?? safeData['services'],
+      ),
       certifications: _safeStringList(safeData['certifications']),
       rating: _safeDouble(safeData['rating']),
       jobsCompleted: _safeInt(safeData['jobsCompleted']),
@@ -71,8 +89,11 @@ class CaregiverModel {
       "name": name,
       "phone": phone,
       "photoUrl": photoUrl,
+      "bio": bio,
+      "defaultAddress": defaultAddress,
+      "lastSeenJobsAt": lastSeenJobsAt,
       "specialization": specialization,
-      "services": services,
+      "servicePreferences": services,
       "certifications": certifications,
       "rating": rating,
       "jobsCompleted": jobsCompleted,
@@ -88,6 +109,16 @@ class CaregiverModel {
       return value.whereType<String>().toList();
     }
     return const [];
+  }
+
+  static DateTime? _dateTimeFromFirestore(dynamic value) {
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    if (value is String) return DateTime.tryParse(value);
+    if (value is num) {
+      return DateTime.fromMillisecondsSinceEpoch(value.toInt());
+    }
+    return null;
   }
 
   static double _safeDouble(dynamic value, [double fallback = 0.0]) {

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:emergencies_disability_assistance_app/models/payment_document_target.dart';
+import 'package:emergencies_disability_assistance_app/utils/service_preferences.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.dart';
 
@@ -97,6 +98,10 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
   bool _isCaregiverAccount = false;
   String? _historyNotificationMessage;
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _cachedWithdrawDocs = [];
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> _cachedPaymentDocs = [];
+  Timestamp? _lastSeenPaymentHistoryAt;
+  bool _historySeenInitialized = false;
+  TabController? _tabController;
 
   @override
   void initState() {
@@ -106,6 +111,54 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     _accountNumberController.addListener(_onFormFieldChanged);
     _bankSearchController.addListener(_refreshBankOverlay);
     _historyNotificationMessage = widget.historyNotificationMessage;
+  }
+
+  void _handleTabChange() {
+    final controller = _tabController;
+    if (controller == null) return;
+    if (controller.index != 1) return;
+    if (controller.indexIsChanging) return;
+    _markPaymentHistorySeen();
+  }
+
+  Stream<int> _newPaymentHistoryCountStream({
+    required String userId,
+    required DocumentReference<Map<String, dynamic>> targetRef,
+  }) {
+    if (userId.isEmpty) return Stream<int>.value(0);
+    return targetRef.snapshots().asyncExpand((doc) {
+      final lastSeen = doc.data()?['lastSeenPaymentHistoryAt'] as Timestamp?;
+      if (lastSeen == null) return Stream<int>.value(0);
+      _lastSeenPaymentHistoryAt = lastSeen;
+      return FirebaseFirestore.instance
+          .collection('payments')
+          .where('userId', isEqualTo: userId)
+          .where('updatedAt', isGreaterThan: lastSeen)
+          .orderBy('updatedAt', descending: true)
+          .snapshots()
+          .map((snap) {
+            var count = 0;
+            for (final payment in snap.docs) {
+              final data = payment.data();
+              if ((data['hidden'] as bool?) == true) continue;
+              final status = (data['status'] as num?)?.toInt();
+              final paymentStatus =
+                  (data['paymentStatus'] as String?)?.trim().toUpperCase();
+              if (status == 3 || paymentStatus == 'FAILED') continue;
+              count++;
+            }
+            return count;
+          });
+    }).distinct();
+  }
+
+  Future<void> _markPaymentHistorySeen() async {
+    final ref = _activeTargetRef;
+    if (ref == null) return;
+    await ref.set({
+      'lastSeenPaymentHistoryAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    _lastSeenPaymentHistoryAt = Timestamp.now();
   }
 
   Future<void> _loadSavedDetails() async {
@@ -124,7 +177,8 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       case PaymentDocumentTarget.caregiver:
         resolvedRef = caregiverRef;
         if (caregiverSnap.exists) {
-          data = caregiverSnap.data()?['paymentDetails'] as Map<String, dynamic>?;
+          data =
+              caregiverSnap.data()?['paymentDetails'] as Map<String, dynamic>?;
         }
         break;
       case PaymentDocumentTarget.user:
@@ -132,10 +186,10 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
         data = userSnap.data()?['paymentDetails'] as Map<String, dynamic>?;
         break;
       case PaymentDocumentTarget.auto:
-      default:
         if (caregiverSnap.exists) {
           resolvedRef = caregiverRef;
-          data = caregiverSnap.data()?['paymentDetails'] as Map<String, dynamic>?;
+          data =
+              caregiverSnap.data()?['paymentDetails'] as Map<String, dynamic>?;
         }
         if (data == null) {
           resolvedRef = userRef;
@@ -143,6 +197,19 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
         }
     }
     _activeTargetRef = resolvedRef;
+    if (!_historySeenInitialized) {
+      _historySeenInitialized = true;
+      final resolvedSnap = await resolvedRef.get();
+      final existingSeen = resolvedSnap.data()?['lastSeenPaymentHistoryAt'];
+      if (existingSeen is Timestamp) {
+        _lastSeenPaymentHistoryAt = existingSeen;
+      } else {
+        await resolvedRef.set({
+          'lastSeenPaymentHistoryAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+        _lastSeenPaymentHistoryAt = Timestamp.now();
+      }
+    }
     if (data == null) {
       if (!mounted) return;
       setState(() {
@@ -184,7 +251,9 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
           'accountNumber': _accountNumberController.text.trim(),
         };
         final targetRef = _activeTargetRef ?? await _determineTargetRef(userId);
-        await targetRef.set({'paymentDetails': paymentDetails}, SetOptions(merge: true));
+        await targetRef.set({
+          'paymentDetails': paymentDetails,
+        }, SetOptions(merge: true));
       }
       if (!mounted) return;
       await _loadSavedDetails();
@@ -197,6 +266,7 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
 
   @override
   void dispose() {
+    _tabController?.removeListener(_handleTabChange);
     _accountNameController
       ..removeListener(_onFormFieldChanged)
       ..dispose();
@@ -214,10 +284,14 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: () async {
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
         final shouldLeave = await _handleBackPress();
-        return shouldLeave;
+        if (!shouldLeave) return;
+        if (!context.mounted) return;
+        Navigator.of(context).pop();
       },
       child: Scaffold(
         backgroundColor: Colors.white,
@@ -229,20 +303,32 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
           child: DefaultTabController(
             initialIndex: widget.initialTabIndex.clamp(0, 1).toInt(),
             length: 2,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-              child: Column(
-                children: [
-                  _buildSegmentTabBar(),
-                  const SizedBox(height: 14),
-                  Expanded(
-                    child: TabBarView(
-                      physics: const NeverScrollableScrollPhysics(),
-                      children: [_paymentForm(), _historySection()],
-                    ),
+            child: Builder(
+              builder: (tabContext) {
+                final controller = DefaultTabController.of(tabContext);
+                if (controller != _tabController) {
+                  _tabController?.removeListener(_handleTabChange);
+                  _tabController = controller..addListener(_handleTabChange);
+                  WidgetsBinding.instance.addPostFrameCallback(
+                    (_) => _handleTabChange(),
+                  );
+                }
+                return Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+                  child: Column(
+                    children: [
+                      _buildSegmentTabBar(),
+                      const SizedBox(height: 14),
+                      Expanded(
+                        child: TabBarView(
+                          physics: const NeverScrollableScrollPhysics(),
+                          children: [_paymentForm(), _historySection()],
+                        ),
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                );
+              },
             ),
           ),
         ),
@@ -282,9 +368,34 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                 ),
                 labelColor: Colors.black,
                 unselectedLabelColor: Colors.black54,
-                tabs: const [
-                  Tab(text: 'Payout Account'),
-                  Tab(text: 'History'),
+                tabs: [
+                  const Tab(text: 'Payout Account'),
+                  Tab(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text('History'),
+                        const SizedBox(width: 6),
+                        StreamBuilder<int>(
+                          stream:
+                              _activeTargetRef == null ||
+                                  (FirebaseAuth.instance.currentUser?.uid ?? '')
+                                      .isEmpty
+                              ? Stream<int>.empty()
+                              : _newPaymentHistoryCountStream(
+                                  userId:
+                                      FirebaseAuth.instance.currentUser!.uid,
+                                  targetRef: _activeTargetRef!,
+                                ),
+                          builder: (context, snapshot) {
+                            final count = snapshot.data ?? 0;
+                            if (count <= 0) return const SizedBox.shrink();
+                            return _CountPill(count: count);
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -764,42 +875,152 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
   Widget _historySection() {
     final userId = FirebaseAuth.instance.currentUser?.uid;
     if (userId == null) return const SizedBox.shrink();
-    final stream = FirebaseFirestore.instance
-        .collection('bookings')
-        .where('userId', isEqualTo: userId)
-        .orderBy('createdAt', descending: true)
-        .snapshots();
+    final paymentField = _isCaregiverAccount ? 'caregiverId' : 'userId';
+    final baseQuery = FirebaseFirestore.instance
+        .collection('payments')
+        .where(paymentField, isEqualTo: userId)
+        ;
+    final stream = _isCaregiverAccount
+        ? baseQuery.snapshots()
+        : baseQuery.orderBy('updatedAt', descending: true).snapshots();
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: stream,
       builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          if (_cachedPaymentDocs.isNotEmpty) {
+            final visibleDocs = _cachedPaymentDocs.where((doc) {
+              final data = doc.data();
+              if ((data['hidden'] as bool?) == true) return false;
+              final status = (data['status'] as num?)?.toInt();
+              final paymentStatus =
+                  (data['paymentStatus'] as String?)?.trim().toUpperCase();
+              return !(status == 3 || paymentStatus == 'FAILED');
+            }).toList();
+            return _buildHistoryList(visibleDocs, const [], const []);
+          }
+          return _historyPlaceholder(
+            'Unable to load payments.',
+            'Please check your connection and try again.',
+          );
+        }
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
         }
-        final docs = snapshot.data?.docs ?? [];
-        final visibleDocs = docs
-            .where((doc) => (doc.data()['hidden'] as bool?) != true)
-            .toList();
+        final docs = snapshot.data?.docs ?? const [];
+        final sortedDocs = List<QueryDocumentSnapshot<Map<String, dynamic>>>.of(
+          docs,
+        )..sort((a, b) {
+            final tsA = a.data()['updatedAt'] as Timestamp?;
+            final tsB = b.data()['updatedAt'] as Timestamp?;
+            if (tsA == null && tsB == null) return 0;
+            if (tsA == null) return 1;
+            if (tsB == null) return -1;
+            return tsB.compareTo(tsA);
+          });
+        if (docs.isNotEmpty) {
+          _cachedPaymentDocs = sortedDocs;
+        }
+
+        final lastSeen = _lastSeenPaymentHistoryAt;
+        bool isNew(Map<String, dynamic> data) {
+          if (lastSeen == null) return false;
+          final updatedAt = data['updatedAt'] as Timestamp?;
+          return updatedAt != null && updatedAt.compareTo(lastSeen) > 0;
+        }
+
+        bool isCancelled(Map<String, dynamic> data) {
+          final status = (data['status'] as num?)?.toInt();
+          if (status == 3) return true;
+          final paymentStatus =
+              (data['paymentStatus'] as String?)?.trim().toUpperCase();
+          return paymentStatus == 'CANCELLED' || paymentStatus == 'CANCELED';
+        }
+
+        bool isPaid(Map<String, dynamic> data) {
+          final status = (data['status'] as num?)?.toInt();
+          if (status == 1) return true;
+          final paymentStatus =
+              (data['paymentStatus'] as String?)?.trim().toUpperCase();
+          return paymentStatus == 'PAID' || paymentStatus == 'SUCCESS';
+        }
+
+        final visibleDocs = sortedDocs.where((doc) {
+          final data = doc.data();
+          if ((data['hidden'] as bool?) == true) return false;
+          final status = (data['status'] as num?)?.toInt();
+          final paymentStatus =
+              (data['paymentStatus'] as String?)?.trim().toUpperCase();
+          return !(status == 3 || paymentStatus == 'FAILED');
+        }).toList();
+
+        final cancelledCount =
+            sortedDocs
+                .where((doc) => isCancelled(doc.data()) && isNew(doc.data()))
+                .length;
+        final paidCount =
+            sortedDocs.where((doc) => isPaid(doc.data()) && isNew(doc.data())).length;
+
+        final notices = <_HistoryNoticeCard>[];
+        if (!_isCaregiverAccount && cancelledCount > 0) {
+          notices.add(
+            _HistoryNoticeCard(
+              icon: Icons.cancel_outlined,
+              iconColor: _statusCancelled,
+              statusLabel: 'Cancelled',
+              message: cancelledCount == 1
+                  ? 'A payment was cancelled. You can place the booking again anytime.'
+                  : '$cancelledCount payments were cancelled. You can place those bookings again anytime.',
+            ),
+          );
+        }
+        if (_isCaregiverAccount && paidCount > 0) {
+          notices.add(
+            _HistoryNoticeCard(
+              icon: Icons.check_circle_outline,
+              iconColor: _statusPaid,
+              statusLabel: 'Paid',
+              message: paidCount == 1
+                  ? 'You received a new successful payment.'
+                  : 'You received $paidCount new successful payments.',
+            ),
+          );
+        }
+        if (_isCaregiverAccount && cancelledCount > 0) {
+          notices.add(
+            _HistoryNoticeCard(
+              icon: Icons.event_busy_outlined,
+              iconColor: _statusCancelled,
+              statusLabel: 'Cancelled',
+              message: cancelledCount == 1
+                  ? 'A booking payment was cancelled.'
+                  : '$cancelledCount booking payments were cancelled.',
+            ),
+          );
+        }
+        if (_historyNotificationMessage != null) {
+          notices.add(
+            _HistoryNoticeCard(
+              message: _historyNotificationMessage!,
+              statusLabel: 'Pending',
+            ),
+          );
+        }
+
         final withdrawStream = _isCaregiverAccount
             ? FirebaseFirestore.instance
-                .collection('withdrawRequests')
-                .where('caregiverId', isEqualTo: userId)
-                .orderBy('requestedAt', descending: true)
-                .snapshots()
+                  .collection('withdrawRequests')
+                  .where('caregiverId', isEqualTo: userId)
+                  .orderBy('requestedAt', descending: true)
+                  .snapshots()
             : null;
         if (withdrawStream == null) {
-          final notice = _historyNotificationMessage != null
-              ? _HistoryNoticeCard(
-                  message: _historyNotificationMessage!,
-                  statusLabel: 'Pending',
-                )
-              : null;
-          if (visibleDocs.isEmpty && notice == null) {
+          if (visibleDocs.isEmpty && notices.isEmpty) {
             return _historyPlaceholder(
               'No payment history yet.',
-              'Payments appear here after your first completed booking.',
+              'Pending and completed payments will appear here.',
             );
           }
-          return _buildHistoryList(visibleDocs, notice, const []);
+          return _buildHistoryList(visibleDocs, notices, const []);
         }
         return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
           stream: withdrawStream,
@@ -811,25 +1032,17 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
             final effectiveWithdrawDocs = latestWithdrawDocs.isNotEmpty
                 ? latestWithdrawDocs
                 : _cachedWithdrawDocs;
-            final notice = effectiveWithdrawDocs.isEmpty &&
-                    _historyNotificationMessage != null &&
-                    latestWithdrawDocs.isEmpty
-                ? _HistoryNoticeCard(
-                    message: _historyNotificationMessage!,
-                    statusLabel: 'Pending',
-                  )
-                : null;
             if (visibleDocs.isEmpty &&
                 effectiveWithdrawDocs.isEmpty &&
-                notice == null) {
+                notices.isEmpty) {
               return _historyPlaceholder(
                 'No payment history yet.',
-                'Payments appear here after your first completed booking.',
+                'Pending and completed payments will appear here.',
               );
             }
             return _buildHistoryList(
               visibleDocs,
-              notice,
+              notices,
               effectiveWithdrawDocs,
             );
           },
@@ -849,18 +1062,42 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
 
   Widget _buildHistoryList(
     List<QueryDocumentSnapshot<Map<String, dynamic>>> visibleDocs,
-    _HistoryNoticeCard? notice,
+    List<_HistoryNoticeCard> notices,
     List<QueryDocumentSnapshot<Map<String, dynamic>>> withdrawDocs,
   ) {
     final entries = <Widget>[];
-    if (notice != null) {
-      entries.add(notice);
+    if (notices.isNotEmpty) {
+      entries.addAll(notices);
+    }
+
+    final lastSeen = _lastSeenPaymentHistoryAt;
+    final newCount = lastSeen == null
+        ? 0
+        : visibleDocs.where((doc) {
+            final updatedAt = doc.data()['updatedAt'] as Timestamp?;
+            return updatedAt != null && updatedAt.compareTo(lastSeen) > 0;
+          }).length;
+    if (newCount > 0) {
+      entries.add(
+        _HistoryNoticeCard(
+          icon: Icons.notifications_active_outlined,
+          iconColor: _segmentIndicatorColor,
+          statusLabel: 'New updates',
+          message:
+              'You have $newCount new ${newCount == 1 ? 'payment update' : 'payment updates'}.',
+        ),
+      );
     }
     for (final doc in withdrawDocs) {
       entries.add(_buildWithdrawHistoryCard(doc));
     }
     for (final doc in visibleDocs) {
-      entries.add(_historyCard(doc.id, doc.data()));
+      final updatedAt = doc.data()['updatedAt'] as Timestamp?;
+      final isNew =
+          lastSeen != null &&
+          updatedAt != null &&
+          updatedAt.compareTo(lastSeen) > 0;
+      entries.add(_paymentHistoryCard(doc.id, doc.data(), isNew: isNew));
     }
     if (entries.isEmpty) return const SizedBox.shrink();
     return ListView.separated(
@@ -915,8 +1152,9 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
   Future<DocumentReference<Map<String, dynamic>>> _determineTargetRef(
     String userId,
   ) async {
-    final caregiverRef =
-        FirebaseFirestore.instance.collection('caregivers').doc(userId);
+    final caregiverRef = FirebaseFirestore.instance
+        .collection('caregivers')
+        .doc(userId);
     final userRef = FirebaseFirestore.instance.collection('users').doc(userId);
     switch (widget.target) {
       case PaymentDocumentTarget.caregiver:
@@ -924,20 +1162,23 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       case PaymentDocumentTarget.user:
         return userRef;
       case PaymentDocumentTarget.auto:
-      default:
         final caregiverSnap = await caregiverRef.get();
         if (caregiverSnap.exists) return caregiverRef;
         return userRef;
     }
   }
 
-  Widget _historyCard(String id, Map<String, dynamic> data) {
-    final service = (data['service'] as String?) ?? 'Service';
+  // ignore: unused_element
+  Widget _historyCard(
+    String id,
+    Map<String, dynamic> data, {
+    bool isNew = false,
+  }) {
+    final serviceLabel = extractServiceLabelFromFirestore(data);
+    final service = serviceLabel.isNotEmpty ? serviceLabel : 'Service';
     final amount = (data['servicePrice'] as num?)?.toDouble() ?? 0;
     final bookingStatus =
         (data['status'] as String?)?.toUpperCase() ?? 'PENDING';
-    final paymentStatus =
-        (data['paymentStatus'] as String?)?.toUpperCase() ?? bookingStatus;
     final reason = (data['cancellationReason'] as String?) ?? '';
     final personName = (data['personName'] as String?) ?? '';
     final caregiverName = (data['caregiverName'] as String?) ?? '';
@@ -946,171 +1187,389 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     final date = (data['date'] as String?) ?? '';
     final time = (data['time'] as String?) ?? '';
     final notes = (data['notes'] as String?) ?? '';
-    final showRefundInProgress =
-        paymentStatus == 'REFUND_REQUESTED' || bookingStatus.contains('CANCEL');
+    final showRefundInProgress = bookingStatus.contains('CANCEL');
 
     return _SwipeableHistoryCard(
       backgroundBuilder: (onDeleteTap) => _buildDeleteBackground(onDeleteTap),
       onDeletePressed: () => _confirmHideBooking(id),
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: Colors.white,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () {},
           borderRadius: _historyCardBorderRadius,
-          border: Border.all(color: _cardBorderColor),
-          boxShadow: [_historyCardShadow],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                DefaultProfileAvatar(
-                  radius: 20,
-                  photoUrl: caregiverPhoto?.isNotEmpty == true
-                      ? caregiverPhoto
-                      : null,
-                  label: caregiverName.isNotEmpty
-                      ? caregiverName
-                      : (service.isNotEmpty ? service : '?'),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        caregiverName.isNotEmpty ? caregiverName : service,
-                        style: const TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      if (service.isNotEmpty && caregiverName.isNotEmpty)
-                        Text(
-                          service,
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: Colors.black54,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-                _StatusChip(
-                  bookingStatus: bookingStatus,
-                  paymentStatus: paymentStatus,
-                ),
-              ],
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: _historyCardBorderRadius,
+              border: Border.all(color: _cardBorderColor),
+              boxShadow: [_historyCardShadow],
             ),
-            const SizedBox(height: 6),
-            Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(
-                  Icons.calendar_month,
-                  size: 12,
-                  color: Colors.black54,
+                Row(
+                  children: [
+                    DefaultProfileAvatar(
+                      radius: 20,
+                      photoUrl: caregiverPhoto?.isNotEmpty == true
+                          ? caregiverPhoto
+                          : null,
+                      label: caregiverName.isNotEmpty
+                          ? caregiverName
+                          : (service.isNotEmpty ? service : '?'),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            caregiverName.isNotEmpty ? caregiverName : service,
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          if (service.isNotEmpty && caregiverName.isNotEmpty)
+                            Text(
+                              service,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Colors.black54,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        _StatusChip(bookingStatus: bookingStatus),
+                        const SizedBox(height: 6),
+                        isNew
+                            ? const _CountPill(count: 1)
+                            : const Icon(
+                                Icons.chevron_right,
+                                size: 18,
+                                color: Colors.black38,
+                              ),
+                      ],
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 4),
-                Text(
-                  date.isNotEmpty ? date : '-',
-                  style: const TextStyle(fontSize: 10, color: Colors.black54),
-                ),
-                const SizedBox(width: 12),
-                const Icon(Icons.access_time, size: 12, color: Colors.black54),
-                const SizedBox(width: 4),
-                Text(
-                  time.isNotEmpty ? time : '-',
-                  style: const TextStyle(fontSize: 10, color: Colors.black54),
-                ),
-                if (reason.isNotEmpty) ...[
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      'Reason: $reason',
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.calendar_month,
+                      size: 12,
+                      color: Colors.black54,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      date.isNotEmpty ? date : '-',
                       style: const TextStyle(
                         fontSize: 10,
-                        color: Colors.redAccent,
+                        color: Colors.black54,
                       ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                     ),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.grey.shade100,
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Row(
-                children: [
-                  DefaultProfileAvatar(
-                    radius: 16,
-                    label: personName.isNotEmpty ? personName : caregiverName,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          personName.isNotEmpty ? personName : caregiverName,
+                    const SizedBox(width: 12),
+                    const Icon(
+                      Icons.access_time,
+                      size: 12,
+                      color: Colors.black54,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      time.isNotEmpty ? time : '-',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: Colors.black54,
+                      ),
+                    ),
+                    if (reason.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          'Reason: $reason',
                           style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 11,
+                            fontSize: 10,
+                            color: Colors.redAccent,
                           ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
-                        if (personAddress.isNotEmpty)
-                          Text(
-                            personAddress,
-                            style: const TextStyle(
-                              fontSize: 10,
-                              color: Colors.black54,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Text(
-                  'RM ${amount.toStringAsFixed(2)}',
-                  style: const TextStyle(fontSize: 11, color: Colors.black54),
+                      ),
+                    ],
+                  ],
                 ),
-                const Spacer(),
-                if (showRefundInProgress)
-                  const Text(
-                    'Refund in progress (ToyyibPay)',
-                    style: TextStyle(fontSize: 11, color: Colors.black54),
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(
+                    children: [
+                      DefaultProfileAvatar(
+                        radius: 16,
+                        label: personName.isNotEmpty
+                            ? personName
+                            : caregiverName,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              personName.isNotEmpty
+                                  ? personName
+                                  : caregiverName,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 11,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            if (personAddress.isNotEmpty)
+                              Text(
+                                personAddress,
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.black54,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Text(
+                      'RM ${amount.toStringAsFixed(2)}',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.black54,
+                      ),
+                    ),
+                    const Spacer(),
+                    if (showRefundInProgress)
+                      const Text(
+                        'Refund in progress (ToyyibPay)',
+                        style: TextStyle(fontSize: 11, color: Colors.black54),
+                      ),
+                  ],
+                ),
+                if (notes.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      notes,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.black87,
+                      ),
+                    ),
                   ),
               ],
             ),
-            if (notes.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  notes,
-                  style: const TextStyle(fontSize: 11, color: Colors.black87),
-                ),
-              ),
-          ],
+          ),
         ),
       ),
     );
   }
 
+  Widget _paymentHistoryCard(
+    String id,
+    Map<String, dynamic> data, {
+    bool isNew = false,
+  }) {
+    final booking = (data['booking'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final caregiverName =
+        (booking['caregiverName'] as String?)?.trim() ?? 'Caregiver';
+    final caregiverPhoto = (booking['caregiverPhoto'] as String?)?.trim();
+    final personName = (booking['personName'] as String?)?.trim() ?? '';
+    final date = (booking['date'] as String?)?.trim() ?? '';
+    final time = (booking['time'] as String?)?.trim() ?? '';
+    final serviceLabel = extractServiceLabelFromFirestore(booking);
+    final service = serviceLabel.isNotEmpty
+        ? serviceLabel
+        : (booking['service'] as String?)?.trim() ?? 'Service';
+    final amount = (data['amount'] as num?)?.toDouble() ??
+        (booking['servicePrice'] as num?)?.toDouble() ??
+        0.0;
+    final paymentStatus =
+        (data['paymentStatus'] as String?)?.trim().toUpperCase() ?? 'PENDING';
+    final bookingStatus =
+        (data['bookingStatus'] as String?)?.trim().toUpperCase() ?? '';
+
+    final statusLabel = paymentStatus == 'PAID' ? 'Paid' : 'Pending';
+    final statusColor = paymentStatus == 'PAID' ? _statusPaid : _statusPending;
+
+    return _SwipeableHistoryCard(
+      backgroundBuilder: (onDeleteTap) => _buildDeleteBackground(onDeleteTap),
+      onDeletePressed: () => _confirmHidePayment(id),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () {},
+          borderRadius: _historyCardBorderRadius,
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: _historyCardBorderRadius,
+              border: Border.all(color: _cardBorderColor),
+              boxShadow: [_historyCardShadow],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    DefaultProfileAvatar(
+                      radius: 20,
+                      photoUrl: caregiverPhoto?.isNotEmpty == true
+                          ? caregiverPhoto
+                          : null,
+                      label: caregiverName.isNotEmpty
+                          ? caregiverName
+                          : (service.isNotEmpty ? service : '?'),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            caregiverName,
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              color: _profileDarkText,
+                            ),
+                          ),
+                          if (service.isNotEmpty)
+                            Text(
+                              service,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.black54,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        _PaymentStatusChip(label: statusLabel, color: statusColor),
+                        const SizedBox(height: 6),
+                        isNew
+                            ? const _CountPill(count: 1)
+                            : const Icon(
+                                Icons.chevron_right,
+                                size: 18,
+                                color: Colors.black38,
+                              ),
+                      ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Icon(Icons.payments_outlined, size: 12),
+                    const SizedBox(width: 6),
+                    Text(
+                      'RM ${amount.toStringAsFixed(2)}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 12,
+                        color: _profileDarkText,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      statusLabel,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: statusColor,
+                      ),
+                    ),
+                    const Spacer(),
+                    if (bookingStatus.isNotEmpty)
+                      Text(
+                        bookingStatus,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.black54,
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    const Icon(Icons.calendar_month_outlined, size: 12),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        [date, time].where((v) => v.isNotEmpty).join(' • '),
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.black87,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+                if (personName.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      const Icon(Icons.person_outline, size: 12),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          personName,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.black87,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ignore: unused_element
   Future<bool> _confirmHideBooking(String bookingId) async {
     final result = await showDialog<bool>(
       context: context,
@@ -1182,6 +1641,77 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     return result ?? false;
   }
 
+  Future<bool> _confirmHidePayment(String paymentId) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: const Text(
+          'Hide this payment?',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontWeight: FontWeight.w700),
+        ),
+        content: const Text(
+          'This hides the payment entry from your history.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.black87),
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actionsPadding: const EdgeInsets.only(bottom: 12),
+        actions: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 120,
+                child: OutlinedButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  style: OutlinedButton.styleFrom(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    side: BorderSide(color: Colors.grey.shade300),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                  child: const Text(
+                    'Cancel',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 120,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFF4B63D),
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    textStyle: const TextStyle(fontWeight: FontWeight.w700),
+                    elevation: 0,
+                  ),
+                  child: const Text('Hide'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+    if (result == true) {
+      await FirebaseFirestore.instance
+          .collection('payments')
+          .doc(paymentId)
+          .set({'hidden': true}, SetOptions(merge: true));
+    }
+    return result ?? false;
+  }
+
   Widget _buildDeleteBackground(VoidCallback onDelete) {
     return Material(
       color: Colors.transparent,
@@ -1189,17 +1719,22 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
         onTap: onDelete,
         borderRadius: _historyCardBorderRadius,
         child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
           decoration: BoxDecoration(
             color: Colors.red.shade600,
             borderRadius: _historyCardBorderRadius,
-            border: Border.all(color: _cardBorderColor),
-            boxShadow: [_historyCardShadow],
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.08),
+                blurRadius: 8,
+                offset: const Offset(0, 4),
+              ),
+            ],
           ),
           padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.start,
             children: const [
-              SizedBox(width: 6),
               Icon(Icons.delete_outline, color: Colors.white, size: 20),
               SizedBox(width: 10),
               Text(
@@ -1351,8 +1886,8 @@ class _HistoryNoticeCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-          children: [
-            Icon(icon, color: iconColor),
+            children: [
+              Icon(icon, color: iconColor),
               const SizedBox(width: 10),
               Text(
                 statusLabel,
@@ -1366,10 +1901,7 @@ class _HistoryNoticeCard extends StatelessWidget {
           const SizedBox(height: 8),
           Text(
             message,
-            style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-            ),
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
           ),
           if (dateLabel != null) ...[
             const SizedBox(height: 6),
@@ -1384,36 +1916,58 @@ class _HistoryNoticeCard extends StatelessWidget {
   }
 }
 
+class _CountPill extends StatelessWidget {
+  const _CountPill({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+      decoration: BoxDecoration(
+        color: _segmentIndicatorColor,
+        borderRadius: BorderRadius.circular(24),
+      ),
+      child: Text(
+        count > 99 ? '99+' : count.toString(),
+        style: const TextStyle(
+          fontSize: 11,
+          color: Colors.white,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+}
+
 class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.bookingStatus, required this.paymentStatus});
+  const _StatusChip({required this.bookingStatus});
 
   final String bookingStatus;
-  final String paymentStatus;
 
   String get _normalizedBooking => bookingStatus.trim().toLowerCase();
-  String get _normalizedPayment => paymentStatus.trim().toLowerCase();
 
   bool get _isCancelled => _normalizedBooking.contains('cancel');
-  bool get _isRefundRequested => _normalizedPayment == 'refund_requested';
 
   Color get _dotColor {
     if (_isCancelled) return _statusCancelled;
-    if (_isRefundRequested) return _statusPending;
-    return switch (_normalizedPayment) {
-      'paid' || 'success' => _statusPaid,
-      'failed' => _statusCancelled,
-      'pending' => _statusPending,
+    return switch (_normalizedBooking) {
+      'completed' || 'done' || 'finished' => _statusPaid,
+      'ongoing' || 'in_progress' || 'assigned' => _statusPending,
+      'pending' || 'scheduled' => _statusPending,
       _ => Colors.grey.shade600,
     };
   }
 
   String get _label {
     if (_isCancelled) return 'Cancelled';
-    if (_isRefundRequested) return 'Refund requested';
-    return switch (_normalizedPayment) {
-      'paid' || 'success' => 'Success',
-      'failed' => 'Failed',
+    return switch (_normalizedBooking) {
+      'completed' || 'done' || 'finished' => 'Completed',
+      'ongoing' || 'in_progress' => 'Ongoing',
+      'assigned' => 'Assigned',
       'pending' => 'Pending',
+      'scheduled' => 'Scheduled',
       var other => _formatLabel(other),
     };
   }
@@ -1464,6 +2018,34 @@ class _StatusChip extends StatelessWidget {
     );
   }
 }
+
+class _PaymentStatusChip extends StatelessWidget {
+  const _PaymentStatusChip({required this.label, required this.color});
+
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: color,
+        ),
+      ),
+    );
+  }
+}
+
 Widget _buildEmptyReminder({
   required IconData icon,
   required String headline,

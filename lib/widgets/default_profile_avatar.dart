@@ -19,6 +19,17 @@ class DefaultProfileAvatar extends StatelessWidget {
   final Color backgroundColor;
   final Color accentColor;
 
+  Widget _fallbackText(String displayChar) {
+    return Text(
+      displayChar,
+      style: TextStyle(
+        fontWeight: FontWeight.w700,
+        color: accentColor,
+        fontSize: radius * 0.8,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final trimmedUrl = photoUrl?.trim();
@@ -26,20 +37,31 @@ class DefaultProfileAvatar extends StatelessWidget {
     final displayChar = label?.trim().isNotEmpty == true
         ? label!.trim()[0].toUpperCase()
         : '?';
+    final double size = radius * 2;
     return CircleAvatar(
       radius: radius,
-      backgroundColor: backgroundColor.withOpacity(0.18),
-      backgroundImage: hasImage ? NetworkImage(trimmedUrl!) : null,
-      child: hasImage
-          ? null
-          : Text(
-              displayChar,
-              style: TextStyle(
-                fontWeight: FontWeight.w700,
-                color: accentColor,
-                fontSize: radius * 0.8,
-              ),
-            ),
+      backgroundColor: backgroundColor.withValues(alpha: 0.18),
+      child: ClipOval(
+        child: SizedBox(
+          width: size,
+          height: size,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Center(child: _fallbackText(displayChar)),
+              if (hasImage)
+                Image.network(
+                  trimmedUrl!,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                  errorBuilder: (context, error, stackTrace) {
+                    return const SizedBox.shrink();
+                  },
+                ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
