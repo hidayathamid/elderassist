@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' as ui;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter/services.dart';
 
 import '../../../utils/map_styles.dart';
 import '../../../widgets/default_profile_avatar.dart';
@@ -32,17 +35,23 @@ class TrackCaregiverScreen extends StatefulWidget {
     super.key,
     required this.bookingId,
     required this.caregiverName,
+    this.caregiverId,
+    this.personId,
+    this.showStatusUpdateButton = false,
   });
 
   final String bookingId;
   final String caregiverName;
+  final String? caregiverId;
+  final String? personId;
+  final bool showStatusUpdateButton;
 
   @override
   State<TrackCaregiverScreen> createState() => _TrackCaregiverScreenState();
 }
 
 class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
-  static const double _minSheetSize = 0.32;
+  static const double _minSheetSize = 0.40;
   static const double _maxSheetSize = 0.85;
 
   static const String _mapsApiKey = String.fromEnvironment(
@@ -58,14 +67,20 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
   String _routeKey = '';
   int _routeSeq = 0;
   int? _routeEtaSeconds;
+  int? _routeDistanceMeters;
   bool _pendingCameraUpdate = false;
   LatLng? _latestCaregiverPos;
   LatLng? _latestDestinationPos;
+  List<LatLng> _latestRoutePoints = const <LatLng>[];
   String _mapUpdateScheduledKey = '';
   String _mapUpdateAppliedKey = '';
   String _markerAppliedKey = '';
   double _currentSheetExtent = _minSheetSize;
   double _backdropOpacity = 0.0;
+  int _markerRequestSeq = 0;
+  final Map<String, BitmapDescriptor> _markerCache = {};
+  final Map<String, ui.Image> _avatarImageCache = {};
+  bool _updatingStatus = false;
 
   @override
   void dispose() {
@@ -139,17 +154,33 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
   String _mapUpdateSignature({
     required LatLng? caregiverPos,
     required LatLng? destinationPos,
+    required String? caregiverLabel,
+    required String? caregiverPhotoUrl,
+    required String? destinationLabel,
+    required String? destinationPhotoUrl,
   }) {
-    return '${_latLngKey(caregiverPos)}|${_latLngKey(destinationPos)}';
+    final safeCaregiverLabel = (caregiverLabel ?? '').trim();
+    final safeCaregiverPhoto = (caregiverPhotoUrl ?? '').trim();
+    final safeDestinationLabel = (destinationLabel ?? '').trim();
+    final safeDestinationPhoto = (destinationPhotoUrl ?? '').trim();
+    return '${_latLngKey(caregiverPos)}|${_latLngKey(destinationPos)}|$safeCaregiverLabel|$safeCaregiverPhoto|$safeDestinationLabel|$safeDestinationPhoto';
   }
 
   void _scheduleMapUpdate({
     required LatLng? caregiverPos,
     required LatLng? destinationPos,
+    required String? caregiverLabel,
+    required String? caregiverPhotoUrl,
+    required String? destinationLabel,
+    required String? destinationPhotoUrl,
   }) {
     final signature = _mapUpdateSignature(
       caregiverPos: caregiverPos,
       destinationPos: destinationPos,
+      caregiverLabel: caregiverLabel,
+      caregiverPhotoUrl: caregiverPhotoUrl,
+      destinationLabel: destinationLabel,
+      destinationPhotoUrl: destinationPhotoUrl,
     );
     if (signature == _mapUpdateScheduledKey) return;
     _mapUpdateScheduledKey = signature;
@@ -157,17 +188,32 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (signature != _mapUpdateScheduledKey) return;
-      _applyMapUpdate(caregiverPos: caregiverPos, destinationPos: destinationPos);
+      _applyMapUpdate(
+        caregiverPos: caregiverPos,
+        destinationPos: destinationPos,
+        caregiverLabel: caregiverLabel,
+        caregiverPhotoUrl: caregiverPhotoUrl,
+        destinationLabel: destinationLabel,
+        destinationPhotoUrl: destinationPhotoUrl,
+      );
     });
   }
 
   void _applyMapUpdate({
     required LatLng? caregiverPos,
     required LatLng? destinationPos,
+    required String? caregiverLabel,
+    required String? caregiverPhotoUrl,
+    required String? destinationLabel,
+    required String? destinationPhotoUrl,
   }) {
     final signature = _mapUpdateSignature(
       caregiverPos: caregiverPos,
       destinationPos: destinationPos,
+      caregiverLabel: caregiverLabel,
+      caregiverPhotoUrl: caregiverPhotoUrl,
+      destinationLabel: destinationLabel,
+      destinationPhotoUrl: destinationPhotoUrl,
     );
     if (signature == _mapUpdateAppliedKey) {
       _latestCaregiverPos = caregiverPos;
@@ -178,52 +224,302 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
     _latestCaregiverPos = caregiverPos;
     _latestDestinationPos = destinationPos;
 
-    _updateMarkers(caregiverPos: caregiverPos, destinationPos: destinationPos);
-    _scheduleCameraFit(caregiverPos: caregiverPos, destinationPos: destinationPos);
-    _scheduleRouteFetch(caregiverPos: caregiverPos, destinationPos: destinationPos);
+    _updateMarkers(
+      caregiverPos: caregiverPos,
+      destinationPos: destinationPos,
+      caregiverLabel: caregiverLabel,
+      caregiverPhotoUrl: caregiverPhotoUrl,
+      destinationLabel: destinationLabel,
+      destinationPhotoUrl: destinationPhotoUrl,
+    );
+    _scheduleCameraFit(
+      caregiverPos: caregiverPos,
+      destinationPos: destinationPos,
+    );
+    _scheduleRouteFetch(
+      caregiverPos: caregiverPos,
+      destinationPos: destinationPos,
+    );
   }
 
   void _updateMarkers({
     required LatLng? caregiverPos,
     required LatLng? destinationPos,
+    required String? caregiverLabel,
+    required String? caregiverPhotoUrl,
+    required String? destinationLabel,
+    required String? destinationPhotoUrl,
   }) {
-    final markerKey = '${_latLngKey(caregiverPos)}|${_latLngKey(destinationPos)}';
+    final markerKey =
+        '${_latLngKey(caregiverPos)}|${_latLngKey(destinationPos)}|${(caregiverPhotoUrl ?? '').trim()}|${(destinationPhotoUrl ?? '').trim()}|${(caregiverLabel ?? '').trim()}|${(destinationLabel ?? '').trim()}';
     if (markerKey == _markerAppliedKey) return;
     _markerAppliedKey = markerKey;
+    _updateMarkersAsync(
+      caregiverPos: caregiverPos,
+      destinationPos: destinationPos,
+      caregiverLabel: caregiverLabel,
+      caregiverPhotoUrl: caregiverPhotoUrl,
+      destinationLabel: destinationLabel,
+      destinationPhotoUrl: destinationPhotoUrl,
+    );
+  }
 
+  String _avatarLabel(String? name, {String fallback = 'C'}) {
+    final trimmed = name?.trim();
+    if (trimmed != null && trimmed.isNotEmpty) {
+      return trimmed[0].toUpperCase();
+    }
+    return fallback;
+  }
+
+  Future<ui.Image?> _loadAvatarImage(String? url) async {
+    if (url == null || url.trim().isEmpty) return null;
+    final cached = _avatarImageCache[url];
+    if (cached != null) return cached;
+    try {
+      final uri = Uri.parse(url);
+      final ByteData data = await NetworkAssetBundle(uri).load('');
+      final Uint8List bytes = data.buffer.asUint8List();
+      final ui.Codec codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: 120,
+        targetHeight: 120,
+      );
+      final ui.FrameInfo frame = await codec.getNextFrame();
+      _avatarImageCache[url] = frame.image;
+      return frame.image;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<BitmapDescriptor> _cachedAvatarMarker(
+    String key, {
+    required Color fillColor,
+    required Color outlineColor,
+    String? label,
+    String? photoUrl,
+    double size = 92,
+  }) async {
+    final cached = _markerCache[key];
+    if (cached != null) return cached;
+    final ui.Image? avatar = await _loadAvatarImage(photoUrl);
+    final descriptor = await _buildAvatarMarker(
+      fillColor: fillColor,
+      outlineColor: outlineColor,
+      label: label,
+      size: size,
+      avatar: avatar,
+    );
+    _markerCache[key] = descriptor;
+    return descriptor;
+  }
+
+  Future<BitmapDescriptor> _buildAvatarMarker({
+    required Color fillColor,
+    required Color outlineColor,
+    String? label,
+    double size = 92,
+    ui.Image? avatar,
+  }) async {
+    final ui.PictureRecorder recorder = ui.PictureRecorder();
+    final Canvas canvas = Canvas(recorder);
+    final double radius = size / 2;
+    final double circleRadius = size * 0.45;
+    final double circleCenterY = radius;
+    final double outlineWidth = size * 0.04;
+    final double outlineRadius = circleRadius + outlineWidth / 2;
+    final double innerRadius = (circleRadius - outlineWidth / 2).clamp(
+      4.0,
+      circleRadius,
+    );
+
+    final Paint outlinePaint = Paint()
+      ..color = outlineColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = outlineWidth;
+
+    if (avatar == null) {
+      final Paint backgroundPaint = Paint()..color = fillColor;
+      canvas.drawCircle(
+        Offset(radius, circleCenterY),
+        circleRadius,
+        backgroundPaint,
+      );
+      canvas.drawCircle(
+        Offset(radius, circleCenterY),
+        outlineRadius,
+        outlinePaint,
+      );
+
+      if (label != null && label.isNotEmpty) {
+        final TextPainter textPainter = TextPainter(
+          text: TextSpan(
+            text: label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 22,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        final Offset offset = Offset(
+          radius - textPainter.width / 2,
+          circleCenterY - textPainter.height / 2,
+        );
+        textPainter.paint(canvas, offset);
+      }
+    } else {
+      canvas.drawCircle(
+        Offset(radius, circleCenterY),
+        outlineRadius,
+        outlinePaint,
+      );
+      final Rect src = Rect.fromLTWH(
+        0,
+        0,
+        avatar.width.toDouble(),
+        avatar.height.toDouble(),
+      );
+      final Rect dst = Rect.fromCircle(
+        center: Offset(radius, circleCenterY),
+        radius: innerRadius,
+      );
+      final Path clip = Path()..addOval(dst);
+      canvas.save();
+      canvas.clipPath(clip);
+      canvas.drawImageRect(avatar, src, dst, Paint());
+      canvas.restore();
+    }
+
+    final ui.Picture picture = recorder.endRecording();
+    final ui.Image image = await picture.toImage(size.toInt(), size.toInt());
+    final ByteData? byteData = await image.toByteData(
+      format: ui.ImageByteFormat.png,
+    );
+    if (byteData == null || byteData.lengthInBytes == 0) {
+      debugPrint('Avatar marker drawing failed; using default marker');
+      return BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure);
+    }
+    return BitmapDescriptor.fromBytes(byteData.buffer.asUint8List());
+  }
+
+  Future<void> _updateMarkersAsync({
+    required LatLng? caregiverPos,
+    required LatLng? destinationPos,
+    required String? caregiverLabel,
+    required String? caregiverPhotoUrl,
+    required String? destinationLabel,
+    required String? destinationPhotoUrl,
+  }) async {
+    final int requestSeq = ++_markerRequestSeq;
     final nextMarkers = <Marker>{};
+
     if (destinationPos != null) {
+      final label = _avatarLabel(destinationLabel, fallback: 'P');
+      final icon = await _cachedAvatarMarker(
+        'person_${label}_${(destinationPhotoUrl ?? '').trim()}_${_cardRadius.toInt()}',
+        fillColor: _routeColor,
+        outlineColor: Colors.yellow.shade700,
+        label: label,
+        photoUrl: destinationPhotoUrl,
+        size: 92,
+      );
+      if (!mounted || requestSeq != _markerRequestSeq) return;
       nextMarkers.add(
         Marker(
           markerId: const MarkerId('destination'),
           position: destinationPos,
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
-          infoWindow: const InfoWindow(title: 'Client'),
+          icon: icon,
         ),
       );
     }
+
     if (caregiverPos != null) {
+      final label = _avatarLabel(
+        caregiverLabel ?? widget.caregiverName,
+        fallback: 'C',
+      );
+      final icon = await _cachedAvatarMarker(
+        'caregiver_${label}_${(caregiverPhotoUrl ?? '').trim()}_${_cardRadius.toInt()}',
+        fillColor: _routeColor,
+        outlineColor: Colors.yellow.shade700,
+        label: label,
+        photoUrl: caregiverPhotoUrl,
+        size: 92,
+      );
+      if (!mounted || requestSeq != _markerRequestSeq) return;
       nextMarkers.add(
         Marker(
           markerId: const MarkerId('caregiver'),
           position: caregiverPos,
-          icon: BitmapDescriptor.defaultMarkerWithHue(40),
-          infoWindow: const InfoWindow(title: 'Caregiver'),
+          icon: icon,
         ),
       );
     }
+
+    if (!mounted || requestSeq != _markerRequestSeq) return;
     setState(() => _markers = nextMarkers);
   }
 
-  LatLngBounds _expandedBounds(LatLng a, LatLng b) {
-    final latMin = a.latitude < b.latitude ? a.latitude : b.latitude;
-    final latMax = a.latitude > b.latitude ? a.latitude : b.latitude;
-    final lngMin = a.longitude < b.longitude ? a.longitude : b.longitude;
-    final lngMax = a.longitude > b.longitude ? a.longitude : b.longitude;
+  LatLngBounds _boundsFromPoints(
+    LatLng a,
+    LatLng b, {
+    List<LatLng>? extraPoints,
+  }) {
+    double latMin = a.latitude < b.latitude ? a.latitude : b.latitude;
+    double latMax = a.latitude > b.latitude ? a.latitude : b.latitude;
+    double lngMin = a.longitude < b.longitude ? a.longitude : b.longitude;
+    double lngMax = a.longitude > b.longitude ? a.longitude : b.longitude;
+    if (extraPoints != null && extraPoints.isNotEmpty) {
+      for (final p in extraPoints) {
+        if (p.latitude < latMin) latMin = p.latitude;
+        if (p.latitude > latMax) latMax = p.latitude;
+        if (p.longitude < lngMin) lngMin = p.longitude;
+        if (p.longitude > lngMax) lngMax = p.longitude;
+      }
+    }
+    final latDelta = (latMax - latMin).abs() * 0.18 + 0.0015;
+    final lngDelta = (lngMax - lngMin).abs() * 0.18 + 0.0015;
     return LatLngBounds(
-      southwest: LatLng(latMin - 0.001, lngMin - 0.001),
-      northeast: LatLng(latMax + 0.001, lngMax + 0.001),
+      southwest: LatLng(latMin - latDelta, lngMin - lngDelta),
+      northeast: LatLng(latMax + latDelta, lngMax + lngDelta),
     );
+  }
+
+  LatLng _midpoint(LatLng a, LatLng b) {
+    return LatLng(
+      (a.latitude + b.latitude) / 2,
+      (a.longitude + b.longitude) / 2,
+    );
+  }
+
+  Future<void> _fitMapToPins(
+    LatLng a,
+    LatLng b, {
+    List<LatLng>? routePoints,
+  }) async {
+    if (_mapController == null) return;
+    final LatLngBounds bounds = _boundsFromPoints(
+      a,
+      b,
+      extraPoints: routePoints,
+    );
+    try {
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLngBounds(bounds, _mapPadding),
+      );
+      await Future.delayed(const Duration(milliseconds: 200));
+      if (!mounted || _mapController == null) return;
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLngBounds(bounds, _mapPadding),
+      );
+    } catch (_) {
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLng(_midpoint(a, b)),
+      );
+    }
   }
 
   void _scheduleCameraFit({
@@ -231,7 +527,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
     required LatLng? destinationPos,
   }) {
     _cameraDebounce?.cancel();
-    _cameraDebounce = Timer(const Duration(milliseconds: 120), () {
+    _cameraDebounce = Timer(const Duration(milliseconds: 120), () async {
       if (!mounted) return;
       final controller = _mapController;
       if (controller == null) {
@@ -241,11 +537,10 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
       _pendingCameraUpdate = false;
       if (caregiverPos == null && destinationPos == null) return;
       if (caregiverPos != null && destinationPos != null) {
-        controller.animateCamera(
-          CameraUpdate.newLatLngBounds(
-            _expandedBounds(caregiverPos, destinationPos),
-            _mapPadding,
-          ),
+        await _fitMapToPins(
+          caregiverPos,
+          destinationPos,
+          routePoints: _latestRoutePoints,
         );
         return;
       }
@@ -262,6 +557,12 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
     if (caregiverPos == null || destinationPos == null) {
       if (_polylines.isNotEmpty) setState(() => _polylines = const {});
       if (_routeEtaSeconds != null) setState(() => _routeEtaSeconds = null);
+      if (_routeDistanceMeters != null) {
+        setState(() => _routeDistanceMeters = null);
+      }
+      if (_latestRoutePoints.isNotEmpty) {
+        setState(() => _latestRoutePoints = const <LatLng>[]);
+      }
       return;
     }
     final nextKey =
@@ -278,15 +579,24 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
 
       final points = route?.points ?? const <LatLng>[];
       final etaSeconds = route?.durationSeconds;
+      final distanceMeters = route?.distanceMeters;
       if (points.isEmpty) {
         setState(() {
           _polylines = const {};
           _routeEtaSeconds = etaSeconds;
+          _routeDistanceMeters = distanceMeters;
+          _latestRoutePoints = const <LatLng>[];
         });
+        await _fitMapToPins(caregiverPos, destinationPos);
         return;
       }
+      final trimmedPoints = points.length > 120
+          ? points.sublist(0, 120)
+          : points;
       setState(() {
         _routeEtaSeconds = etaSeconds;
+        _routeDistanceMeters = distanceMeters;
+        _latestRoutePoints = trimmedPoints;
         _polylines = {
           Polyline(
             polylineId: const PolylineId('route'),
@@ -296,11 +606,74 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
             endCap: Cap.roundCap,
             jointType: JointType.round,
             geodesic: true,
-            points: points.length > 120 ? points.sublist(0, 120) : points,
+            points: trimmedPoints,
           ),
         };
       });
+      await _fitMapToPins(
+        caregiverPos,
+        destinationPos,
+        routePoints: trimmedPoints,
+      );
     });
+  }
+
+  String? _nextBookingStatus(String normalizedStatus) {
+    final raw = normalizedStatus.trim().toUpperCase();
+    final normalized = raw
+        .replaceAll(' ', '_')
+        .replaceAll('-', '_')
+        .replaceAll('__', '_');
+    const flow = <String>[
+      'PENDING',
+      'ASSIGNED',
+      'NOTIFY',
+      'ONGOING',
+      'HANDLE_CLIENT',
+      'COMPLETED',
+    ];
+    final key = normalized == 'IN_PROGRESS' ? 'ONGOING' : normalized;
+    final idx = flow.indexOf(key);
+    if (idx == -1) return flow.first;
+    if (idx >= flow.length - 1) return null;
+    return flow[idx + 1];
+  }
+
+  String _statusLabel(String normalized) {
+    switch (normalized.trim().toUpperCase()) {
+      case 'HANDLE_CLIENT':
+        return 'HANDLE CLIENT';
+      case 'ONGOING':
+        return 'ON GOING';
+      case 'IN_PROGRESS':
+        return 'ON GOING';
+      default:
+        return normalized.trim().toUpperCase();
+    }
+  }
+
+  Future<void> _advanceBookingStatus(String currentStatus) async {
+    if (_updatingStatus) return;
+    final next = _nextBookingStatus(currentStatus);
+    if (next == null) return;
+    setState(() => _updatingStatus = true);
+    try {
+      await FirebaseFirestore.instance
+          .collection('bookings')
+          .doc(widget.bookingId)
+          .set({'status': next}, SetOptions(merge: true));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Status updated to ${_statusLabel(next)}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to update status: $e')));
+    } finally {
+      if (mounted) setState(() => _updatingStatus = false);
+    }
   }
 
   Future<_DirectionsRouteResult?> _fetchDirectionsRoute(
@@ -308,7 +681,13 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
     LatLng end,
   ) async {
     final apiKey = _mapsApiKey.trim();
-    if (apiKey.isEmpty) return null;
+    if (apiKey.isEmpty) {
+      return _DirectionsRouteResult(
+        points: _buildCurvedRoutePoints(start, end),
+        durationSeconds: null,
+        distanceMeters: null,
+      );
+    }
     final uri = Uri.https('maps.googleapis.com', '/maps/api/directions/json', {
       'origin': '${start.latitude},${start.longitude}',
       'destination': '${end.latitude},${end.longitude}',
@@ -316,23 +695,53 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
       'key': apiKey,
     });
     try {
-      final response = await http
-          .get(uri)
-          .timeout(const Duration(seconds: 8));
-      if (response.statusCode != 200) return null;
+      final response = await http.get(uri).timeout(const Duration(seconds: 8));
+      if (response.statusCode != 200) {
+        return _DirectionsRouteResult(
+          points: _buildCurvedRoutePoints(start, end),
+          durationSeconds: null,
+          distanceMeters: null,
+        );
+      }
       final decoded = jsonDecode(response.body);
-      if (decoded is! Map<String, dynamic>) return null;
-      if (decoded['status'] != 'OK') return null;
+      if (decoded is! Map<String, dynamic>) {
+        return _DirectionsRouteResult(
+          points: _buildCurvedRoutePoints(start, end),
+          durationSeconds: null,
+          distanceMeters: null,
+        );
+      }
+      if (decoded['status'] != 'OK') {
+        return _DirectionsRouteResult(
+          points: _buildCurvedRoutePoints(start, end),
+          durationSeconds: null,
+          distanceMeters: null,
+        );
+      }
       final routes = decoded['routes'];
-      if (routes is! List || routes.isEmpty) return null;
+      if (routes is! List || routes.isEmpty) {
+        return _DirectionsRouteResult(
+          points: _buildCurvedRoutePoints(start, end),
+          durationSeconds: null,
+          distanceMeters: null,
+        );
+      }
       final firstRoute = routes.first;
-      if (firstRoute is! Map) return null;
+      if (firstRoute is! Map) {
+        return _DirectionsRouteResult(
+          points: _buildCurvedRoutePoints(start, end),
+          durationSeconds: null,
+          distanceMeters: null,
+        );
+      }
 
       final overview = firstRoute['overview_polyline'];
-      final polyline =
-          (overview is Map) ? overview['points']?.toString() : null;
+      final polyline = (overview is Map)
+          ? overview['points']?.toString()
+          : null;
 
       int? durationSeconds;
+      int? distanceMeters;
       final legs = firstRoute['legs'];
       if (legs is List && legs.isNotEmpty) {
         final firstLeg = legs.first;
@@ -340,13 +749,17 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
           final duration = firstLeg['duration'];
           final value = (duration is Map) ? duration['value'] : null;
           if (value is num) durationSeconds = value.toInt();
+          final distance = firstLeg['distance'];
+          final distValue = (distance is Map) ? distance['value'] : null;
+          if (distValue is num) distanceMeters = distValue.toInt();
         }
       }
 
       if (polyline == null || polyline.trim().isEmpty) {
         return _DirectionsRouteResult(
-          points: const [],
+          points: _buildCurvedRoutePoints(start, end),
           durationSeconds: durationSeconds,
+          distanceMeters: distanceMeters,
         );
       }
       final decodedPoints = PolylinePoints().decodePolyline(polyline.trim());
@@ -356,75 +769,47 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
       return _DirectionsRouteResult(
         points: points,
         durationSeconds: durationSeconds,
+        distanceMeters: distanceMeters,
       );
     } catch (_) {
-      return null;
+      return _DirectionsRouteResult(
+        points: _buildCurvedRoutePoints(start, end),
+        durationSeconds: null,
+        distanceMeters: null,
+      );
     }
   }
 
+  List<LatLng> _buildCurvedRoutePoints(LatLng start, LatLng end) {
+    final double latOffset = (end.latitude - start.latitude);
+    final double lngOffset = (end.longitude - start.longitude);
+    final double base = (latOffset.abs() + lngOffset.abs() + 1);
+    final double curveScale = 0.02 * base;
+    final LatLng control1 = LatLng(
+      start.latitude + latOffset * 0.35 - lngOffset.sign * curveScale * 0.6,
+      start.longitude + lngOffset * 0.35 + latOffset.sign * curveScale * 0.6,
+    );
+    final LatLng control2 = LatLng(
+      start.latitude + latOffset * 0.7 - lngOffset.sign * curveScale * 0.4,
+      start.longitude + lngOffset * 0.7 + latOffset.sign * curveScale * 0.4,
+    );
+    return [start, control1, control2, end];
+  }
+
   String _etaTextFromSeconds(int? seconds) {
-    if (seconds == null || seconds <= 0) return '—';
+    if (seconds == null || seconds <= 0) return '-';
     final minutes = (seconds / 60).round().clamp(1, 9999);
     final minMinutes = (minutes * 0.8).round().clamp(1, 9999);
     final maxMinutes = (minutes * 1.2).round().clamp(minMinutes, 9999);
     if (minMinutes == maxMinutes) return '$minMinutes mins';
-    return '$minMinutes–$maxMinutes mins';
+    return '$minMinutes-$maxMinutes mins';
   }
 
-  Widget _buildTrackingRow(TimelineEvent event, bool isLast) {
-    final timeLabel = formatTimelineTime(event.timestamp);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Column(
-          children: [
-            Container(
-              width: 12,
-              height: 12,
-              decoration: const BoxDecoration(
-                color: _accentGreen,
-                shape: BoxShape.circle,
-              ),
-            ),
-            if (!isLast)
-              Container(
-                width: 2,
-                height: 36,
-                color: _cardBorder,
-              ),
-          ],
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (timeLabel.isNotEmpty)
-                Text(
-                  timeLabel,
-                  style: const TextStyle(fontSize: 11, color: Colors.grey),
-                ),
-              Text(
-                event.title,
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: _profileDarkText,
-                ),
-              ),
-              if (event.description != null && event.description!.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(
-                    event.description!,
-                    style: const TextStyle(fontSize: 12, color: Colors.black54),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ],
-    );
+  String _distanceTextFromMeters(int? meters) {
+    if (meters == null || meters <= 0) return '-';
+    if (meters < 1000) return '${meters}m';
+    final km = meters / 1000.0;
+    return '${km.toStringAsFixed(km < 10 ? 1 : 0)} km';
   }
 
   @override
@@ -449,8 +834,12 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
           }
 
           final booking = snapshot.data!.data() ?? const <String, dynamic>{};
-          final caregiverId = (booking['caregiverId'] as String?)?.trim() ?? '';
-          final userId = (booking['userId'] as String?)?.trim() ?? '';
+          final caregiverId =
+              (normalizeString(booking['caregiverId']) ??
+                      widget.caregiverId ??
+                      '')
+                  .trim();
+          final userId = (normalizeString(booking['userId']) ?? '').trim();
           final service = normalizeString(booking['service']) ?? 'Home care';
           final personName =
               normalizeString(booking['personName']) ?? 'Your loved one';
@@ -458,11 +847,8 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
               normalizeString(booking['personAddress']) ??
               normalizeString(booking['addressLabel']) ??
               'Location not provided';
-          final date = normalizeString(booking['date']) ?? '';
-          final time = normalizeString(booking['time']) ?? '';
-          final status =
-              (normalizeString(booking['status']) ?? 'PENDING').toUpperCase();
-          final timeline = buildTimelineEvents(booking);
+          final status = (normalizeString(booking['status']) ?? 'PENDING')
+              .toUpperCase();
 
           final destinationFromBooking = _latLngFromBooking(booking);
           final caregiverStream = caregiverId.isEmpty
@@ -486,7 +872,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
             child: Container(
               decoration: BoxDecoration(
                 color: Colors.white,
-                border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
+                border: Border.all(
+                  color: Colors.black12.withValues(alpha: 0.08),
+                ),
                 borderRadius: BorderRadius.circular(18),
                 boxShadow: [
                   BoxShadow(
@@ -607,8 +995,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
                                     width: 42,
                                     height: 4,
                                     decoration: BoxDecoration(
-                                      color:
-                                          Colors.black.withValues(alpha: 0.12),
+                                      color: Colors.black.withValues(
+                                        alpha: 0.12,
+                                      ),
                                       borderRadius: BorderRadius.circular(999),
                                     ),
                                   ),
@@ -619,176 +1008,246 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen> {
                                 >(
                                   stream: caregiverStream,
                                   builder: (context, caregiverSnapshot) {
+                                    final caregiverData = caregiverSnapshot.data
+                                        ?.data();
                                     final caregiverPos = _latLngFromDoc(
-                                      caregiverSnapshot.data?.data(),
+                                      caregiverData,
                                     );
+                                    final caregiverNameLive =
+                                        normalizeString(
+                                          caregiverData?['name'],
+                                        ) ??
+                                        widget.caregiverName;
+                                    final caregiverPhotoUrl =
+                                        normalizeString(
+                                          caregiverData?['photoUrl'],
+                                        ) ??
+                                        normalizeString(
+                                          caregiverData?['avatarUrl'],
+                                        ) ??
+                                        normalizeString(
+                                          booking['caregiverPhoto'],
+                                        );
                                     return StreamBuilder<
                                       DocumentSnapshot<Map<String, dynamic>>
                                     >(
                                       stream: userStream,
                                       builder: (context, userSnapshot) {
+                                        final destinationData = userSnapshot
+                                            .data
+                                            ?.data();
                                         final destinationPos =
                                             destinationFromBooking ??
-                                            _latLngFromDoc(
-                                              userSnapshot.data?.data(),
+                                            _latLngFromDoc(destinationData);
+                                        final destinationPhotoUrl =
+                                            normalizeString(
+                                              booking['personPhotoUrl'],
+                                            ) ??
+                                            normalizeString(
+                                              booking['personPhoto'],
+                                            ) ??
+                                            normalizeString(
+                                              destinationData?['photoUrl'],
                                             );
                                         _scheduleMapUpdate(
                                           caregiverPos: caregiverPos,
                                           destinationPos: destinationPos,
+                                          caregiverLabel: caregiverNameLive,
+                                          caregiverPhotoUrl: caregiverPhotoUrl,
+                                          destinationLabel: personName,
+                                          destinationPhotoUrl:
+                                              destinationPhotoUrl,
                                         );
-                                        return _EtaCard(
-                                          etaText: _etaTextFromSeconds(
-                                            _routeEtaSeconds,
-                                          ),
-                                          title: status,
-                                          subtitle: 'Estimated arrival time',
-                                          photoUrl: normalizeString(
-                                            booking['caregiverPhoto'],
-                                          ),
-                                          fallbackName: widget.caregiverName,
+                                        return Column(
+                                          children: [
+                                            _EtaCard(
+                                              etaText: _etaTextFromSeconds(
+                                                _routeEtaSeconds,
+                                              ),
+                                              distanceText:
+                                                  _distanceTextFromMeters(
+                                                    _routeDistanceMeters,
+                                                  ),
+                                              title: status,
+                                              subtitle:
+                                                  'Estimated arrival time',
+                                              photoUrl: caregiverPhotoUrl,
+                                              fallbackName: caregiverNameLive,
+                                            ),
+                                            const SizedBox(height: 12),
+                                            _Card(
+                                              child: Row(
+                                                children: [
+                                                  DefaultProfileAvatar(
+                                                    radius: 22,
+                                                    photoUrl: caregiverPhotoUrl,
+                                                    label: caregiverNameLive,
+                                                  ),
+                                                  const SizedBox(width: 12),
+                                                  Expanded(
+                                                    child: Column(
+                                                      crossAxisAlignment:
+                                                          CrossAxisAlignment
+                                                              .start,
+                                                      children: [
+                                                        Text(
+                                                          caregiverNameLive,
+                                                          style: const TextStyle(
+                                                            fontSize: 14,
+                                                            fontWeight:
+                                                                FontWeight.w800,
+                                                            color:
+                                                                _profileDarkText,
+                                                          ),
+                                                          overflow: TextOverflow
+                                                              .ellipsis,
+                                                        ),
+                                                        const SizedBox(
+                                                          height: 2,
+                                                        ),
+                                                        Text(
+                                                          service,
+                                                          style:
+                                                              const TextStyle(
+                                                                fontSize: 12,
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w600,
+                                                                color: Colors
+                                                                    .black54,
+                                                              ),
+                                                          overflow: TextOverflow
+                                                              .ellipsis,
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                  _StatusChip(label: status),
+                                                ],
+                                              ),
+                                            ),
+                                            const SizedBox(height: 12),
+                                            _Card(
+                                              child: Row(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  DefaultProfileAvatar(
+                                                    radius: 22,
+                                                    photoUrl:
+                                                        destinationPhotoUrl,
+                                                    label: personName,
+                                                  ),
+                                                  const SizedBox(width: 12),
+                                                  Expanded(
+                                                    child: Column(
+                                                      crossAxisAlignment:
+                                                          CrossAxisAlignment
+                                                              .start,
+                                                      children: [
+                                                        Text(
+                                                          personName,
+                                                          style: const TextStyle(
+                                                            fontSize: 13,
+                                                            fontWeight:
+                                                                FontWeight.w800,
+                                                            color:
+                                                                _profileDarkText,
+                                                          ),
+                                                          overflow: TextOverflow
+                                                              .ellipsis,
+                                                        ),
+                                                        const SizedBox(
+                                                          height: 6,
+                                                        ),
+                                                        Row(
+                                                          crossAxisAlignment:
+                                                              CrossAxisAlignment
+                                                                  .start,
+                                                          children: [
+                                                            const Icon(
+                                                              Icons.location_on,
+                                                              size: 16,
+                                                              color:
+                                                                  _accentGreen,
+                                                            ),
+                                                            const SizedBox(
+                                                              width: 6,
+                                                            ),
+                                                            Expanded(
+                                                              child: Text(
+                                                                location,
+                                                                style: const TextStyle(
+                                                                  fontSize: 12,
+                                                                  color: Colors
+                                                                      .black54,
+                                                                ),
+                                                              ),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ],
                                         );
                                       },
                                     );
                                   },
                                 ),
-                                const SizedBox(height: 12),
-                                _Card(
-                                  child: Row(
-                                    children: [
-                                      DefaultProfileAvatar(
-                                        radius: 22,
-                                        photoUrl: normalizeString(
-                                          booking['caregiverPhoto'],
-                                        ),
-                                        label: widget.caregiverName,
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              widget.caregiverName,
-                                              style: const TextStyle(
-                                                fontSize: 14,
-                                                fontWeight: FontWeight.w800,
-                                                color: _profileDarkText,
-                                              ),
-                                              overflow: TextOverflow.ellipsis,
+                                if (widget.showStatusUpdateButton) ...[
+                                  const SizedBox(height: 12),
+                                  SizedBox(
+                                    width: double.infinity,
+                                    child: Builder(
+                                      builder: (context) {
+                                        final nextStatus = _nextBookingStatus(
+                                          status,
+                                        );
+                                        final isCompleted =
+                                            status.trim().toUpperCase() ==
+                                            'COMPLETED';
+                                        final canAdvance =
+                                            nextStatus != null &&
+                                            !_updatingStatus;
+                                        final label = _updatingStatus
+                                            ? 'Updating...'
+                                            : (isCompleted
+                                                  ? 'Completed'
+                                                  : 'Update status → ${_statusLabel(nextStatus!)}');
+                                        return ElevatedButton(
+                                          onPressed: canAdvance
+                                              ? () => _advanceBookingStatus(
+                                                  status,
+                                                )
+                                              : null,
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor: canAdvance
+                                                ? _routeColor
+                                                : const Color(0xFFCDD1D6),
+                                            foregroundColor: canAdvance
+                                                ? Colors.black
+                                                : Colors.white70,
+                                            padding: const EdgeInsets.symmetric(
+                                              vertical: 10,
                                             ),
-                                            const SizedBox(height: 2),
-                                            Text(
-                                              service,
-                                              style: const TextStyle(
-                                                fontSize: 12,
-                                                fontWeight: FontWeight.w600,
-                                                color: Colors.black54,
-                                              ),
-                                              overflow: TextOverflow.ellipsis,
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(18),
                                             ),
-                                          ],
-                                        ),
-                                      ),
-                                      _StatusChip(label: status),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                _Card(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.stretch,
-                                    children: [
-                                      Row(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.spaceBetween,
-                                        children: [
-                                          Text(
-                                            personName,
-                                            style: const TextStyle(
-                                              fontSize: 13,
+                                            textStyle: const TextStyle(
                                               fontWeight: FontWeight.w700,
-                                              color: _profileDarkText,
+                                              fontSize: 14,
                                             ),
                                           ),
-                                          _StatusChip(label: status),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Row(
-                                        children: [
-                                          const Icon(
-                                            Icons.calendar_month,
-                                            size: 16,
-                                            color: _accentGreen,
-                                          ),
-                                          const SizedBox(width: 6),
-                                          Expanded(
-                                            child: Text(
-                                              date.isNotEmpty ? date : '—',
-                                              style: const TextStyle(
-                                                fontSize: 12,
-                                                color: Colors.black54,
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(width: 16),
-                                          const Icon(
-                                            Icons.access_time,
-                                            size: 16,
-                                            color: _accentGreen,
-                                          ),
-                                          const SizedBox(width: 6),
-                                          Text(
-                                            time.isNotEmpty ? time : '—',
-                                            style: const TextStyle(
-                                              fontSize: 12,
-                                              color: Colors.black54,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Row(
-                                        children: [
-                                          const Icon(
-                                            Icons.location_on,
-                                            size: 16,
-                                            color: _accentGreen,
-                                          ),
-                                          const SizedBox(width: 6),
-                                          Expanded(
-                                            child: Text(
-                                              location,
-                                              style: const TextStyle(
-                                                fontSize: 12,
-                                                color: Colors.black54,
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ],
+                                          child: Text(label),
+                                        );
+                                      },
+                                    ),
                                   ),
-                                ),
-                                const SizedBox(height: 16),
-                                const Text(
-                                  'Live updates',
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w800,
-                                    color: _profileDarkText,
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                                for (var i = 0; i < timeline.length; i++) ...[
-                                  _buildTrackingRow(
-                                    timeline[i],
-                                    i == timeline.length - 1,
-                                  ),
-                                  if (i != timeline.length - 1)
-                                    const SizedBox(height: 12),
                                 ],
                               ],
                             ),
@@ -811,10 +1270,12 @@ class _DirectionsRouteResult {
   const _DirectionsRouteResult({
     required this.points,
     required this.durationSeconds,
+    required this.distanceMeters,
   });
 
   final List<LatLng> points;
   final int? durationSeconds;
+  final int? distanceMeters;
 }
 
 class _Card extends StatelessWidget {
@@ -840,6 +1301,7 @@ class _Card extends StatelessWidget {
 class _EtaCard extends StatelessWidget {
   const _EtaCard({
     required this.etaText,
+    required this.distanceText,
     required this.title,
     required this.subtitle,
     required this.photoUrl,
@@ -847,6 +1309,7 @@ class _EtaCard extends StatelessWidget {
   });
 
   final String etaText;
+  final String distanceText;
   final String title;
   final String subtitle;
   final String? photoUrl;
@@ -868,6 +1331,15 @@ class _EtaCard extends StatelessWidget {
                     fontWeight: FontWeight.w900,
                     color: _profileDarkText,
                     height: 1.05,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  distanceText,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.black54,
                   ),
                 ),
                 const SizedBox(height: 4),
@@ -922,6 +1394,7 @@ class _StatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final normalized = label.toUpperCase();
+    final display = normalized.replaceAll('_', ' ');
     var color = _accentGreen;
     if (normalized == 'COMPLETED') color = Colors.green;
     if (normalized.startsWith('CANCEL')) color = Colors.red;
@@ -932,7 +1405,7 @@ class _StatusChip extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
       ),
       child: Text(
-        normalized,
+        display,
         style: TextStyle(
           fontSize: 10,
           fontWeight: FontWeight.w700,

@@ -220,8 +220,9 @@ class _ProfileAddressesScreenState extends State<ProfileAddressesScreen> {
                           ? () {
                               setState(() {
                                 _selectedAddressId = id;
-                                _selectedAddress =
-                                    Map<String, dynamic>.from(entry);
+                                _selectedAddress = Map<String, dynamic>.from(
+                                  entry,
+                                );
                               });
                             }
                           : null,
@@ -317,10 +318,7 @@ class _DashedAddCard extends StatelessWidget {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: Colors.grey.shade300,
-            width: 1.1,
-          ),
+          border: Border.all(color: Colors.grey.shade300, width: 1.1),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -390,10 +388,7 @@ class _AddressCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: cardColor,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: borderColor,
-          width: borderWidth,
-        ),
+        border: Border.all(color: borderColor, width: borderWidth),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.07),
@@ -484,20 +479,20 @@ class _AddressCard extends StatelessWidget {
               ],
             ),
           ),
-          Padding(
-            padding: EdgeInsets.symmetric(vertical: dividerPadding),
-            child: Align(
-              alignment: Alignment.center,
-              child: FractionallySizedBox(
-                widthFactor: 0.85,
-                child: Container(
-                  height: 1.2,
-                  color: Colors.black.withAlpha(20),
+          if (showActions) ...[
+            Padding(
+              padding: EdgeInsets.symmetric(vertical: dividerPadding),
+              child: Align(
+                alignment: Alignment.center,
+                child: FractionallySizedBox(
+                  widthFactor: 0.85,
+                  child: Container(
+                    height: 1.2,
+                    color: Colors.black.withAlpha(20),
+                  ),
                 ),
               ),
             ),
-          ),
-          if (showActions)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               child: Row(
@@ -538,6 +533,7 @@ class _AddressCard extends StatelessWidget {
                 ],
               ),
             ),
+          ],
         ],
       ),
     );

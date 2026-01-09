@@ -160,6 +160,17 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   static const Color _accentBlue = Color(0xFF00B8C6);
   static const Color _disabledColor = Color(0xFFE5E5E5);
   static const Color _pageBackground = Color(0xFFF7F8FA);
+  static const Color _noteFieldTextColor = Color(0xFF1B1D29);
+  static const TextStyle _noteFieldTextStyle = TextStyle(
+    fontSize: 12,
+    fontWeight: FontWeight.w800,
+    color: _noteFieldTextColor,
+  );
+  static final TextStyle _noteFieldHintStyle = TextStyle(
+    fontSize: 12,
+    fontWeight: FontWeight.w800,
+    color: _noteFieldTextColor.withValues(alpha: 0.45),
+  );
   static const double _defaultCameraZoom = 14;
   static const double _defaultCameraTilt = 0;
   static const double _defaultCameraBearing = 0;
@@ -214,6 +225,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   int _locationRequestSeq = 0;
   int _markerRequestSeq = 0;
   String? _selectedMarkerKey;
+  bool _didApplyInitialYouSelection = false;
 
   AnimationController? _entryController;
   Animation<double>? _entryFade;
@@ -233,6 +245,13 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       if (controller == null || pending == null) return;
       controller.animateCamera(_cameraUpdate(pending));
     });
+  }
+
+  void _flushPendingMapMove() {
+    final controller = _mapController;
+    final pending = _pendingMapLatLng;
+    if (controller == null || pending == null) return;
+    controller.animateCamera(_cameraUpdate(pending));
   }
 
   void _syncMapToSelected(AddressItem item, {bool debounceCamera = true}) {
@@ -321,7 +340,6 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     )..addListener(_updatePanelVisuals);
     _addressScrollController.addListener(_handleAddressScroll);
     _updatePanelVisuals();
-    _autoDetectLocation();
     _fetchAddresses();
 
     _wasActive =
@@ -356,6 +374,25 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     final isActive = currentIndex == widget.tabIndex;
     if (isActive && !_wasActive) {
       _entryController?.forward(from: 0);
+      // When returning to this tab, always default the selection back to "You"
+      // (current location) and keep the map + blue band in sync.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        // Re-apply initial "You" selection on tab revisit.
+        _didApplyInitialYouSelection = false;
+        if (_hasLocation) {
+          setState(() {
+            _selected = _currentAddressItem();
+            _currentScrollIndex = 0;
+            _pendingScrollIndex = 0;
+          });
+          _updateSelectedPersonMarkerIcon();
+          _scrollAfterPanelReady(0);
+          _syncMapToSelected(_selected!, debounceCamera: false);
+        } else {
+          _autoDetectLocation();
+        }
+      });
     }
     _wasActive = isActive;
   }
@@ -385,10 +422,6 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
           _panelController.value,
         )! *
         MediaQuery.of(context).size.height;
-  }
-
-  double _minSheetHeightPx(BuildContext context) {
-    return _minSheetSize * MediaQuery.of(context).size.height;
   }
 
   TickerFuture _animatePanelTo(double target, {double velocity = 0}) {
@@ -501,15 +534,35 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       );
       final latLng = LatLng(pos.latitude, pos.longitude);
       if (!mounted || seq != _locationRequestSeq) return;
+      final applyInitialYou = !_didApplyInitialYouSelection;
       final selected = _selected;
       final bool shouldAnimate =
-          selected == null || _isCurrentLocationItem(selected);
+          applyInitialYou || selected == null || _isCurrentLocationItem(selected);
+      final wasShowingLocationRow = _hasLocation;
       setState(() {
         _currentLatLng = latLng;
         _hasLocation = true;
-        _selected ??= _currentAddressItem();
+        if (applyInitialYou) {
+          _didApplyInitialYouSelection = true;
+          _selected = _currentAddressItem();
+          _currentScrollIndex = 0;
+          _pendingScrollIndex = 0;
+        } else {
+          _selected ??= _currentAddressItem();
+        }
+
+        if (!wasShowingLocationRow &&
+            _selected != null &&
+            !_isCurrentLocationItem(_selected!)) {
+          final idx = _selectedIndexInVisible();
+          if (idx != null) _currentScrollIndex = idx;
+        }
       });
       _updateSelectedPersonMarkerIcon();
+      if (applyInitialYou) {
+        // Make sure the first row ("You") is highlighted/snapped without a tap.
+        _scrollAfterPanelReady(0);
+      }
       if (shouldAnimate) {
         _mapController?.animateCamera(_cameraUpdate(latLng));
       }
@@ -664,11 +717,16 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       _clearAddressList();
       return;
     }
+    final previousSelected = _selected;
+    final shouldAutoFocusFirstAddress =
+        previousSelected == null || _isCurrentLocationItem(previousSelected);
     final parsed = source.map(AddressItem.fromMap).toList();
     _addressData = source;
     _addresses = parsed;
     AddressItem? nextSelected;
-    if (_selected != null) {
+    if (_selected != null && _isCurrentLocationItem(_selected!)) {
+      nextSelected = _currentAddressItem();
+    } else if (_selected != null) {
       for (final item in parsed) {
         if (_isSameAddress(item, _selected!)) {
           nextSelected = item;
@@ -683,6 +741,20 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       setState(() {});
     }
     _updateSelectedPersonMarkerIcon();
+
+    if (shouldAutoFocusFirstAddress && mounted && _selected != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final idx = _selectedIndexInVisible();
+        if (idx == null) return;
+        setState(() {
+          _currentScrollIndex = idx;
+          _pendingScrollIndex = idx;
+        });
+        _syncMapToSelected(_selected!, debounceCamera: true);
+        _scrollAfterPanelReady(idx);
+      });
+    }
   }
 
   void _clearAddressList() {
@@ -970,22 +1042,15 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         child: AnimatedBuilder(
           animation: _noteSheetController,
           builder: (context, child) {
-            final overlayOpacity = (_noteSheetController.value * 0.35).clamp(
-              0.0,
-              0.35,
-            );
+            final t = _noteSheetController.value.clamp(0.0, 1.0);
+            final scrimOpacity = 0.54 * t; // match showModalBottomSheet default
             return Stack(
               children: [
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: _hideNoteSheet,
                   child: Container(
-                    color: Color.fromRGBO(
-                      0,
-                      0,
-                      0,
-                      (0.15 * overlayOpacity).clamp(0.0, 1.0).toDouble(),
-                    ),
+                    color: Colors.black.withValues(alpha: scrimOpacity),
                   ),
                 ),
                 Positioned(
@@ -994,7 +1059,27 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                   bottom: 0,
                   child: SlideTransition(
                     position: _noteSheetOffset,
-                    child: _buildNotePanelContent(),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IgnorePointer(
+                          child: Container(
+                            height: 22,
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [
+                                  Colors.transparent,
+                                  Colors.black.withValues(alpha: 0.14),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        _buildNotePanelContent(),
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -1009,196 +1094,208 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     final charCount = _noteFieldController.text.length;
     final canSave = _noteFieldController.text.trim().isNotEmpty;
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
-    return Material(
-      color: Colors.white,
-      elevation: 12,
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
-      child: AnimatedPadding(
-        duration: const Duration(milliseconds: 180),
-        curve: Curves.easeOut,
-        padding: EdgeInsets.fromLTRB(16, 8, 16, 14 + bottomInset),
-        child: SafeArea(
-          top: false,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              GestureDetector(
-                onVerticalDragUpdate: _onNotePanelDragUpdate,
-                onVerticalDragEnd: _onNotePanelDragEnd,
-                behavior: HitTestBehavior.opaque,
-                child: SizedBox(
-                  height: 40,
-                  width: double.infinity,
-                  child: Center(
-                    child: Container(
-                      width: 36,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.16),
-                        borderRadius: BorderRadius.circular(24),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(6),
+    final content = AnimatedPadding(
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+      padding: EdgeInsets.fromLTRB(16, 8, 16, 14 + bottomInset),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            GestureDetector(
+              onVerticalDragUpdate: _onNotePanelDragUpdate,
+              onVerticalDragEnd: _onNotePanelDragEnd,
+              behavior: HitTestBehavior.opaque,
+              child: SizedBox(
+                height: 40,
+                width: double.infinity,
+                child: Center(
+                  child: Container(
+                    width: 36,
+                    height: 4,
                     decoration: BoxDecoration(
-                      color: _accentBlue.withValues(alpha: 0.10),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(
-                      Icons.sticky_note_2_outlined,
-                      size: 16,
-                      color: _accentBlue,
+                      color: Colors.black.withValues(alpha: 0.16),
+                      borderRadius: BorderRadius.circular(24),
                     ),
                   ),
-                  const SizedBox(width: 10),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Note to caregiver',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w800,
-                            fontSize: 15,
-                            color: Colors.black87,
-                          ),
-                        ),
-                        SizedBox(height: 1),
-                        Text(
-                          'Optional. Add helpful details (allergies, meds, mobility).',
-                          style: TextStyle(
-                            color: Colors.black54,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w500,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'Close',
-                    onPressed: _hideNoteSheet,
-                    icon: const Icon(Icons.close_rounded),
-                    splashRadius: 18,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: _noteFieldController,
-                maxLength: 150,
-                maxLines: 3,
-                autofocus: false,
-                textInputAction: TextInputAction.done,
-                decoration: InputDecoration(
-                  hintText: 'Example: allergies, medication, mobility needs',
-                  isDense: true,
-                  filled: true,
-                  fillColor: const Color(0xFFF7F8FA),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(14),
-                    borderSide: BorderSide(color: Colors.grey.shade200),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(14),
-                    borderSide: BorderSide(color: Colors.grey.shade200),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(14),
-                    borderSide: const BorderSide(
-                      color: _accentBlue,
-                      width: 1.5,
-                    ),
-                  ),
-                  counterText: '',
-                  contentPadding: const EdgeInsets.fromLTRB(12, 11, 12, 11),
                 ),
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
+              ),
+            ),
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: _accentBlue.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(
+                    Icons.sticky_note_2_outlined,
+                    size: 16,
+                    color: _accentBlue,
+                  ),
                 ),
-                onChanged: (_) => setState(() {}),
-                onSubmitted: (_) {
-                  if (canSave) _confirmNoteSheet();
-                },
-              ),
-              const SizedBox(height: 6),
-              Row(
-                children: [
-                  Text(
-                    '$charCount/150',
-                    style: const TextStyle(
-                      color: Colors.black54,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const Spacer(),
-                  if (canSave)
-                    const Icon(
-                      Icons.check_circle_rounded,
-                      size: 16,
-                      color: _accentBlue,
-                    ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextButton(
-                      onPressed: () {
-                        FocusScope.of(context).unfocus();
-                        setState(() => _noteFieldController.clear());
-                      },
-                      style: TextButton.styleFrom(
-                        foregroundColor: Colors.black87,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        textStyle: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 14,
-                        ),
-                      ),
-                      child: const Text('Clear'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: canSave ? _confirmNoteSheet : null,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: canSave
-                            ? _primaryColor
-                            : _disabledColor,
-                        foregroundColor: canSave
-                            ? Colors.black
-                            : Colors.white70,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        textStyle: const TextStyle(
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Note to caregiver',
+                        style: TextStyle(
                           fontWeight: FontWeight.w800,
-                          fontSize: 14,
+                          fontSize: 15,
+                          color: Colors.black87,
                         ),
                       ),
-                      child: const Text('Save'),
-                    ),
+                      SizedBox(height: 1),
+                      Text(
+                        'Optional. Add helpful details.',
+                        style: TextStyle(
+                          color: Colors.black54,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w800,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
                   ),
-                ],
+                ),
+                IconButton(
+                  tooltip: 'Close',
+                  onPressed: _hideNoteSheet,
+                  icon: const Icon(Icons.close_rounded),
+                  splashRadius: 18,
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _noteFieldController,
+              maxLength: 150,
+              maxLines: 3,
+              autofocus: false,
+              textInputAction: TextInputAction.done,
+              decoration: InputDecoration(
+                hintText: 'Allergies, medication, mobility needs',
+                hintStyle: _noteFieldHintStyle,
+                isDense: true,
+                filled: true,
+                fillColor: Colors.white,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: BorderSide(
+                    color: Colors.grey.shade300,
+                    width: 1.3,
+                  ),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: BorderSide(
+                    color: Colors.grey.shade300,
+                    width: 1.3,
+                  ),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: const BorderSide(color: _accentBlue, width: 1.5),
+                ),
+                counterText: '',
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
               ),
-            ],
-          ),
+              style: _noteFieldTextStyle,
+              onChanged: (_) => setState(() {}),
+              onSubmitted: (_) {
+                if (canSave) _confirmNoteSheet();
+              },
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Text(
+                  '$charCount/150',
+                  style: const TextStyle(
+                    color: Colors.black54,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const Spacer(),
+                if (canSave)
+                  const Icon(
+                    Icons.check_circle_rounded,
+                    size: 16,
+                    color: _accentBlue,
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () {
+                      FocusScope.of(context).unfocus();
+                      setState(() => _noteFieldController.clear());
+                    },
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.black87,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      textStyle: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 14,
+                      ),
+                      side: BorderSide(
+                        color: Colors.black.withValues(alpha: 0.28),
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                    child: const Text('Clear'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: canSave ? _confirmNoteSheet : null,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: canSave ? _primaryColor : _disabledColor,
+                      foregroundColor: canSave ? Colors.black : Colors.white70,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      textStyle: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 14,
+                      ),
+                    ),
+                    child: const Text('Save'),
+                  ),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
+    );
+
+    return Material(
+      color: Colors.white,
+      elevation: 16,
+      shadowColor: Colors.black.withValues(alpha: 0.28),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: content,
     );
   }
 
@@ -1456,11 +1553,16 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         final entryFade = _entryFade ?? const AlwaysStoppedAnimation<double>(1);
         final entrySlide =
             _entrySlide ?? const AlwaysStoppedAnimation<Offset>(Offset.zero);
+        final mediaPadding = MediaQuery.of(context).padding;
+        final mapTopPadding = mediaPadding.top + kToolbarHeight + 8;
+        // Keep Google attribution/logo above the sheet.
+        final mapBottomPadding = panelHeight + mediaPadding.bottom + 1;
 
         return Scaffold(
           backgroundColor: _pageBackground,
+          extendBodyBehindAppBar: true,
           appBar: AppBar(
-            backgroundColor: Colors.white,
+            backgroundColor: Colors.transparent,
             elevation: 0,
             automaticallyImplyLeading: false,
             centerTitle: true,
@@ -1479,16 +1581,21 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                     onPressed: () => Navigator.of(context).pop(),
                   )
                 : null,
-            flexibleSpace: Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.08),
-                    blurRadius: 8,
-                    offset: const Offset(0, 4),
+            flexibleSpace: ClipRect(
+              child: BackdropFilter(
+                filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.86),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.08),
+                        blurRadius: 8,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
             title: const Text(
@@ -1504,289 +1611,325 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
             opacity: entryFade,
             child: SlideTransition(
               position: entrySlide,
-              child: SafeArea(
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    border: Border.all(
-                      color: Colors.black12.withValues(alpha: 0.08),
-                    ),
-                    borderRadius: BorderRadius.circular(18),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.10),
-                        blurRadius: 18,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
-                  ),
-                  clipBehavior: Clip.hardEdge,
-                  child: Stack(
-                    children: [
-                      Positioned(
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        bottom: _minSheetHeightPx(context),
-                        child: GoogleMap(
-                          initialCameraPosition: _cameraPosition(
-                            _currentLatLng,
-                          ),
-                          style: boldMapStyle,
-                          zoomControlsEnabled: false,
-                          myLocationButtonEnabled: false,
-                          myLocationEnabled: false,
-                          markers: {_buildMarker()},
-                          onMapCreated: (c) {
-                            _mapController = c;
-                            _autoDetectLocation();
-                          },
+              child: Stack(
+                children: [
+                  SafeArea(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        border: Border.all(
+                          color: Colors.black12.withValues(alpha: 0.08),
                         ),
-                      ),
-                      IgnorePointer(
-                        ignoring: true,
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 180),
-                          color: Colors.black.withValues(
-                            alpha: _backdropOpacity,
+                        borderRadius: BorderRadius.zero,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.10),
+                            blurRadius: 18,
+                            offset: const Offset(0, 8),
                           ),
-                        ),
+                        ],
                       ),
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        height: panelHeight,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: const BorderRadius.vertical(
-                              top: Radius.circular(18),
-                            ),
-                            border: Border.all(
-                              color: Colors.black12.withValues(alpha: 0.08),
-                              width: 1,
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.10),
-                                blurRadius: 18,
-                                offset: const Offset(0, -6),
+                      child: Stack(
+                        children: [
+                          Positioned(
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            child: GoogleMap(
+                              initialCameraPosition: _cameraPosition(
+                                _currentLatLng,
                               ),
-                            ],
+                              style: boldMapStyle,
+                              mapToolbarEnabled: false,
+                              padding: EdgeInsets.fromLTRB(
+                                0,
+                                mapTopPadding,
+                                0,
+                                mapBottomPadding,
+                              ),
+                              zoomControlsEnabled: false,
+                              myLocationButtonEnabled: false,
+                              myLocationEnabled: false,
+                              key: const ValueKey('booking_person_map'),
+                              markers: {_buildMarker()},
+                              onMapCreated: (c) {
+                                if (_mapController != null) return;
+                                _mapController = c;
+                                _flushPendingMapMove();
+                                final selected = _selected;
+                                if (selected != null &&
+                                    !_isCurrentLocationItem(selected)) {
+                                  _syncMapToSelected(
+                                    selected,
+                                    debounceCamera: false,
+                                  );
+                                }
+                                _autoDetectLocation();
+                              },
+                            ),
                           ),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.max,
-                            children: [
-                              GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                dragStartBehavior: DragStartBehavior.down,
-                                onVerticalDragStart: _onHandleDragStart,
-                                onVerticalDragUpdate: _onHandleDragUpdate,
-                                onVerticalDragEnd: _onHandleDragEnd,
-                                child: SizedBox(
-                                  height: 44,
-                                  width: double.infinity,
-                                  child: Center(
-                                    child: Container(
-                                      width: 36,
-                                      height: 4,
-                                      decoration: BoxDecoration(
-                                        color: Colors.black.withValues(
-                                          alpha: 0.16,
-                                        ),
-                                        borderRadius: BorderRadius.circular(24),
-                                      ),
-                                    ),
+                          IgnorePointer(
+                            ignoring: true,
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 180),
+                              color: Colors.black.withValues(
+                                alpha: _backdropOpacity,
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            height: panelHeight,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: const BorderRadius.vertical(
+                                  top: Radius.circular(18),
+                                ),
+                                border: Border.all(
+                                  color: Colors.black12.withValues(alpha: 0.08),
+                                  width: 1,
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.10),
+                                    blurRadius: 18,
+                                    offset: const Offset(0, -6),
                                   ),
-                                ),
-                              ),
-                              const Divider(height: 1),
-                              Expanded(
-                                child: Stack(
-                                  children: [
-                                    NotificationListener<ScrollNotification>(
-                                      onNotification: (notification) {
-                                        if (notification
-                                                is ScrollEndNotification ||
-                                            (notification
-                                                    is UserScrollNotification &&
-                                                notification.direction ==
-                                                    ScrollDirection.idle)) {
-                                          _snapToNearest();
-                                        }
-                                        return false;
-                                      },
-                                      child: ListView.builder(
-                                        controller: _addressScrollController,
-                                        physics: isEmpty
-                                            ? const ClampingScrollPhysics()
-                                            : const _ItemSnapScrollPhysics(
-                                                itemExtent: _itemExtent,
-                                              ),
-                                        padding: EdgeInsets.only(
-                                          left: 12,
-                                          right: 12,
-                                          top: 0,
-                                          bottom:
-                                              MediaQuery.of(
-                                                context,
-                                              ).padding.bottom +
-                                              120,
-                                        ),
-                                        itemExtent: isEmpty
-                                            ? null
-                                            : _itemExtent,
-                                        itemCount: isEmpty
-                                            ? 1
-                                            : filteredVisibleList.length,
-                                        itemBuilder: (context, index) {
-                                          if (isEmpty) {
-                                            return Padding(
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal: 8,
-                                                    vertical: 6,
-                                                  ),
-                                              child: _emptyState(context),
-                                            );
-                                          }
-                                          final item =
-                                              filteredVisibleList[index];
-                                          final bool isActive =
-                                              index == _currentScrollIndex;
-                                          final bool isCurrent =
-                                              _hasLocation && index == 0;
-                                          return _addressTile(
-                                            item,
-                                            isActive: isActive,
-                                            showEdit: !isCurrent,
-                                            isCurrent: isCurrent,
-                                            onTap: () =>
-                                                _onAddressSelected(item, index),
-                                            onEdit: () => _openEditAddress(
-                                              _hasLocation ? index - 1 : index,
-                                            ),
-                                          );
-                                        },
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      AnimatedPositioned(
-                        duration: const Duration(milliseconds: 340),
-                        curve: Curves.easeOut,
-                        left: 6,
-                        right: 6,
-                        bottom: _hideFrontPanel ? -110 : 4,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            border: Border.all(
-                              color: Colors.black12.withValues(alpha: 0.08),
-                            ),
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                          child: Material(
-                            color: Colors.white,
-                            elevation: 10,
-                            shadowColor: Colors.black.withValues(alpha: 0.22),
-                            borderRadius: BorderRadius.circular(16),
-                            child: Padding(
-                              padding: const EdgeInsets.fromLTRB(
-                                12,
-                                10,
-                                12,
-                                14,
+                                ],
                               ),
                               child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.max,
                                 children: [
-                                  if (isEmpty) const SizedBox(height: 4),
-                                  Row(
-                                    children: [
-                                      Expanded(
-                                        child: Text(
-                                          _note?.isNotEmpty == true
-                                              ? _note!
-                                              : 'Add person details (e.g. allergies, medical conditions)',
-                                          style: const TextStyle(
-                                            color: _accentBlue,
-                                            fontWeight: FontWeight.w600,
-                                            fontSize: 12,
-                                          ),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      InkWell(
-                                        onTap: _openNoteSheet,
-                                        borderRadius: BorderRadius.circular(16),
+                                  GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    dragStartBehavior: DragStartBehavior.down,
+                                    onVerticalDragStart: _onHandleDragStart,
+                                    onVerticalDragUpdate: _onHandleDragUpdate,
+                                    onVerticalDragEnd: _onHandleDragEnd,
+                                    child: SizedBox(
+                                      height: 44,
+                                      width: double.infinity,
+                                      child: Center(
                                         child: Container(
-                                          padding: const EdgeInsets.all(3.5),
-                                          decoration: const BoxDecoration(
-                                            color: Color(0xFF00B8C6),
-                                            shape: BoxShape.circle,
-                                          ),
-                                          child: const Icon(
-                                            Icons.add,
-                                            color: Colors.white,
-                                            size: 11,
+                                          width: 36,
+                                          height: 4,
+                                          decoration: BoxDecoration(
+                                            color: Colors.black.withValues(
+                                              alpha: 0.16,
+                                            ),
+                                            borderRadius: BorderRadius.circular(
+                                              24,
+                                            ),
                                           ),
                                         ),
                                       ),
-                                    ],
+                                    ),
                                   ),
-                                  const SizedBox(height: 6),
-                                  SizedBox(
-                                    width: double.infinity,
-                                    child: ElevatedButton(
-                                      onPressed: canChoose
-                                          ? _openCaregiverScreen
-                                          : null,
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor: canChoose
-                                            ? _primaryColor
-                                            : _disabledColor,
-                                        foregroundColor: canChoose
-                                            ? Colors.black
-                                            : Colors.white70,
-                                        padding: const EdgeInsets.symmetric(
-                                          vertical: 10,
-                                        ),
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            18,
+                                  const Divider(height: 1),
+                                  Expanded(
+                                    child: Stack(
+                                      children: [
+                                        NotificationListener<
+                                          ScrollNotification
+                                        >(
+                                          onNotification: (notification) {
+                                            if (notification
+                                                    is ScrollEndNotification ||
+                                                (notification
+                                                        is UserScrollNotification &&
+                                                    notification.direction ==
+                                                        ScrollDirection.idle)) {
+                                              _snapToNearest();
+                                            }
+                                            return false;
+                                          },
+                                          child: ListView.builder(
+                                            controller:
+                                                _addressScrollController,
+                                            physics: isEmpty
+                                                ? const ClampingScrollPhysics()
+                                                : const _ItemSnapScrollPhysics(
+                                                    itemExtent: _itemExtent,
+                                                  ),
+                                            padding: EdgeInsets.only(
+                                              left: 12,
+                                              right: 12,
+                                              top: 0,
+                                              bottom:
+                                                  MediaQuery.of(
+                                                    context,
+                                                  ).padding.bottom +
+                                                  120,
+                                            ),
+                                            itemExtent: isEmpty
+                                                ? null
+                                                : _itemExtent,
+                                            itemCount: isEmpty
+                                                ? 1
+                                                : filteredVisibleList.length,
+                                            itemBuilder: (context, index) {
+                                              if (isEmpty) {
+                                                return Padding(
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 8,
+                                                        vertical: 6,
+                                                      ),
+                                                  child: _emptyState(context),
+                                                );
+                                              }
+                                              final item =
+                                                  filteredVisibleList[index];
+                                              final bool isActive =
+                                                  index == _currentScrollIndex;
+                                              final bool isCurrent =
+                                                  _hasLocation && index == 0;
+                                              return _addressTile(
+                                                item,
+                                                isActive: isActive,
+                                                showEdit: !isCurrent,
+                                                isCurrent: isCurrent,
+                                                onTap: () => _onAddressSelected(
+                                                  item,
+                                                  index,
+                                                ),
+                                                onEdit: () => _openEditAddress(
+                                                  _hasLocation
+                                                      ? index - 1
+                                                      : index,
+                                                ),
+                                              );
+                                            },
                                           ),
                                         ),
-                                        textStyle: const TextStyle(
-                                          fontWeight: FontWeight.w700,
-                                          fontSize: 14,
-                                        ),
-                                      ),
-                                      child: Text(
-                                        isBlockedSelection
-                                            ? 'Currently in active booking'
-                                            : 'Choose this person',
-                                      ),
+                                      ],
                                     ),
                                   ),
                                 ],
                               ),
                             ),
                           ),
-                        ),
+                          AnimatedPositioned(
+                            duration: const Duration(milliseconds: 340),
+                            curve: Curves.easeOut,
+                            left: 6,
+                            right: 6,
+                            bottom: _hideFrontPanel ? -110 : 4,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                border: Border.all(
+                                  color: Colors.black12.withValues(alpha: 0.08),
+                                ),
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              child: Material(
+                                color: Colors.white,
+                                elevation: 10,
+                                shadowColor: Colors.black.withValues(
+                                  alpha: 0.22,
+                                ),
+                                borderRadius: BorderRadius.circular(16),
+                                child: Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    12,
+                                    10,
+                                    12,
+                                    14,
+                                  ),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      if (isEmpty) const SizedBox(height: 4),
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              _note?.isNotEmpty == true
+                                                  ? _note!
+                                                  : 'Add person details (e.g. allergies, medical conditions)',
+                                              style: const TextStyle(
+                                                color: _accentBlue,
+                                                fontWeight: FontWeight.w600,
+                                                fontSize: 12,
+                                              ),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          InkWell(
+                                            onTap: _openNoteSheet,
+                                            borderRadius: BorderRadius.circular(
+                                              16,
+                                            ),
+                                            child: Container(
+                                              padding: const EdgeInsets.all(
+                                                3.5,
+                                              ),
+                                              decoration: const BoxDecoration(
+                                                color: Color(0xFF00B8C6),
+                                                shape: BoxShape.circle,
+                                              ),
+                                              child: const Icon(
+                                                Icons.add,
+                                                color: Colors.white,
+                                                size: 11,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 6),
+                                      SizedBox(
+                                        width: double.infinity,
+                                        child: ElevatedButton(
+                                          onPressed: canChoose
+                                              ? _openCaregiverScreen
+                                              : null,
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor: canChoose
+                                                ? _primaryColor
+                                                : _disabledColor,
+                                            foregroundColor: canChoose
+                                                ? Colors.black
+                                                : Colors.white70,
+                                            padding: const EdgeInsets.symmetric(
+                                              vertical: 10,
+                                            ),
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(18),
+                                            ),
+                                            textStyle: const TextStyle(
+                                              fontWeight: FontWeight.w700,
+                                              fontSize: 14,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            isBlockedSelection
+                                                ? 'Currently in active booking'
+                                                : 'Choose this person',
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      if (_noteSheetVisible) _buildNotePanelOverlay(),
-                    ],
+                    ),
                   ),
-                ),
+                  _buildNotePanelOverlay(),
+                ],
               ),
             ),
           ),
@@ -2228,6 +2371,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
 
   int? _selectedIndexInVisible() {
     if (_selected == null) return null;
+    if (_hasLocation && _isCurrentLocationItem(_selected!)) return 0;
     final list = _visibleAddresses();
     final matchIndex = list.indexWhere((a) => _isSameAddress(a, _selected!));
     return matchIndex >= 0 ? matchIndex : null;

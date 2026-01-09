@@ -15,6 +15,7 @@ import '../../../models/chat_message_model.dart';
 import '../../../services/auth_service.dart';
 import '../../../services/chat_service.dart';
 import '../../../widgets/default_profile_avatar.dart';
+import '../../../widgets/safe_network_image.dart';
 
 const Color _profileTextColor = Color(0xFF1B1D29);
 const Color _profileBorderColor = Color(0xFFE0E0E0);
@@ -319,11 +320,24 @@ class _UserChatScreenState extends State<UserChatScreen> {
         children: [
           ClipRRect(
             borderRadius: BorderRadius.circular(14),
-            child: Image.network(
-              message.imageUrl!,
+            child: SafeNetworkImage(
+              message.imageUrl!.trim(),
               width: MediaQuery.of(context).size.width * 0.6,
               height: 220,
               fit: BoxFit.cover,
+              placeholder: Container(
+                color: Colors.black12,
+                alignment: Alignment.center,
+                child: const Icon(Icons.image_outlined, color: Colors.black38),
+              ),
+              errorWidget: Container(
+                color: Colors.black12,
+                alignment: Alignment.center,
+                child: const Icon(
+                  Icons.broken_image_outlined,
+                  color: Colors.black38,
+                ),
+              ),
             ),
           ),
           if (message.text.trim().isNotEmpty) ...[

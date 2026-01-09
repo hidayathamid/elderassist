@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'safe_network_image.dart';
+
 const Color _defaultAvatarAccent = Color(0xFF00A8A7);
 const Color _defaultAvatarFill = Color.fromARGB(255, 181, 212, 212);
 
@@ -50,13 +52,11 @@ class DefaultProfileAvatar extends StatelessWidget {
             children: [
               Center(child: _fallbackText(displayChar)),
               if (hasImage)
-                Image.network(
+                SafeNetworkImage(
                   trimmedUrl!,
                   fit: BoxFit.cover,
-                  gaplessPlayback: true,
-                  errorBuilder: (context, error, stackTrace) {
-                    return const SizedBox.shrink();
-                  },
+                  placeholder: const SizedBox.shrink(),
+                  errorWidget: const SizedBox.shrink(),
                 ),
             ],
           ),

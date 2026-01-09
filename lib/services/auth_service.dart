@@ -89,7 +89,7 @@ class AuthService {
   }
 
   /// LOGIN
-  Future<dynamic> loginUser({
+  Future<LoginResult> loginUser({
     required String email,
     required String password,
   }) async {
@@ -102,36 +102,85 @@ class AuthService {
       final uid = cred.user!.uid;
       debugPrint('loginUser: signed in uid=$uid');
 
-      // Check CAREGIVER
-      final cgDoc = await _firestore.collection("caregivers").doc(uid).get();
-      debugPrint('loginUser: caregiverDoc.exists=${cgDoc.exists} uid=$uid');
-      if (cgDoc.exists) {
-        return CaregiverModel.safeFromMap(uid, cgDoc.data());
-      }
+      try {
+        // Check CAREGIVER
+        final cgDoc = await _firestore.collection("caregivers").doc(uid).get();
+        debugPrint('loginUser: caregiverDoc.exists=${cgDoc.exists} uid=$uid');
+        if (cgDoc.exists) {
+          return LoginResult.success(CaregiverModel.safeFromMap(uid, cgDoc.data()));
+        }
 
-      // Check USER
-      final userDoc = await _firestore.collection("users").doc(uid).get();
-      debugPrint('loginUser: userDoc.exists=${userDoc.exists} uid=$uid');
-      if (userDoc.exists) {
-        return UserModel.fromMap(userDoc.data()!);
-      }
-      debugPrint('loginUser: caregiverDoc.exists=${cgDoc.exists} uid=$uid');
-      if (cgDoc.exists) {
-        return CaregiverModel.safeFromMap(uid, cgDoc.data());
+        // Check USER
+        final userDoc = await _firestore.collection("users").doc(uid).get();
+        debugPrint('loginUser: userDoc.exists=${userDoc.exists} uid=$uid');
+        if (userDoc.exists) {
+          return LoginResult.success(UserModel.fromMap(userDoc.data()!));
+        }
+      } catch (e, st) {
+        debugPrint('loginUser: role lookup failed after sign-in: $e');
+        debugPrint(st.toString());
+        return LoginResult.signedInButRoleUnknown(
+          errorCode: 'role-lookup-failed',
+          errorMessage: e.toString(),
+        );
       }
 
       debugPrint('loginUser: no user or caregiver doc for uid=$uid');
-      return null;
+      return const LoginResult.signedInButRoleUnknown(errorCode: 'no-role');
     } on FirebaseAuthException catch (e, st) {
-      debugPrint('loginUser: FirebaseAuthException ${e.message}');
+      debugPrint('loginUser: FirebaseAuthException code=${e.code} message=${e.message}');
       debugPrint(st.toString());
-      return null;
+      return LoginResult.failure(errorCode: e.code, errorMessage: e.message);
     } catch (e, st) {
       debugPrint('loginUser: unexpected error $e');
       debugPrint(st.toString());
-      return null;
+      return LoginResult.failure(errorCode: 'unknown', errorMessage: e.toString());
     }
   }
 
   Future<void> signOut() async => await _auth.signOut();
+}
+
+class LoginResult {
+  const LoginResult._({
+    required this.signedIn,
+    required this.profile,
+    this.errorCode,
+    this.errorMessage,
+  });
+
+  final bool signedIn;
+  final dynamic profile;
+  final String? errorCode;
+  final String? errorMessage;
+
+  bool get hasProfile => profile != null;
+
+  factory LoginResult.success(dynamic profile) => LoginResult._(
+        signedIn: true,
+        profile: profile,
+      );
+
+  const factory LoginResult.signedInButRoleUnknown({
+    String? errorCode,
+    String? errorMessage,
+  }) = _LoginSignedInButRoleUnknown;
+
+  factory LoginResult.failure({
+    required String errorCode,
+    String? errorMessage,
+  }) =>
+      LoginResult._(
+        signedIn: false,
+        profile: null,
+        errorCode: errorCode,
+        errorMessage: errorMessage,
+      );
+}
+
+class _LoginSignedInButRoleUnknown extends LoginResult {
+  const _LoginSignedInButRoleUnknown({
+    super.errorCode,
+    super.errorMessage,
+  }) : super._(signedIn: true, profile: null);
 }

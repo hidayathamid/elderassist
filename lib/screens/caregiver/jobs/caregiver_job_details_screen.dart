@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -38,6 +40,7 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
   bool _isLoading = true;
   String? _error;
   Map<String, dynamic>? _job;
+  String? _clientDefaultAddress;
   final TextEditingController _notesController = TextEditingController();
   bool _isUpdating = false;
 
@@ -83,11 +86,54 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
         _job = data;
         _isLoading = false;
       });
+
+      final userId = (data['userId'] as String?)?.trim() ?? '';
+      if (userId.isNotEmpty) {
+        unawaited(_fetchClientDefaultAddress(userId));
+      }
     } catch (e) {
       setState(() {
         _error = e.toString();
         _isLoading = false;
       });
+    }
+  }
+
+  String? _stringOrNull(Object? raw) {
+    if (raw is String) {
+      final trimmed = raw.trim();
+      return trimmed.isEmpty ? null : trimmed;
+    }
+    return null;
+  }
+
+  String? _defaultAddressText(Object? raw) {
+    final direct = _stringOrNull(raw);
+    if (direct != null) return direct;
+    if (raw is Map) {
+      final map = Map<String, dynamic>.from(raw);
+      final line = _stringOrNull(map['address']) ??
+          _stringOrNull(map['addressLine']) ??
+          _stringOrNull(map['fullAddress']) ??
+          _stringOrNull(map['line1']) ??
+          _stringOrNull(map['subtitle']);
+      return line;
+    }
+    return null;
+  }
+
+  Future<void> _fetchClientDefaultAddress(String userId) async {
+    try {
+      final snap =
+          await FirebaseFirestore.instance.collection('users').doc(userId).get();
+      final data = snap.data();
+      if (data == null) return;
+      final address = _defaultAddressText(data['defaultAddress']);
+      if (!mounted) return;
+      if (address == null) return;
+      setState(() => _clientDefaultAddress = address);
+    } catch (_) {
+      // Keep silent; fallback to booking address.
     }
   }
 
@@ -236,7 +282,10 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
     final rawServiceLabel = extractServiceLabelFromFirestore(job);
     final service = rawServiceLabel.isNotEmpty ? rawServiceLabel : 'Home care';
     final price = (job['price'] as Object?)?.toString() ?? 'RM 0';
-    final location = (job['address'] as String?) ?? '';
+    final location =
+        _clientDefaultAddress?.trim().isNotEmpty == true
+            ? _clientDefaultAddress!.trim()
+            : (job['address'] as String?) ?? '';
     final timeLabel = _formatTimeLabel(startTime, endTime);
 
     return Scaffold(

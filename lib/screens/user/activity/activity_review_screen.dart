@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../../models/activity_booking.dart';
 import '../../../widgets/layout_constants.dart';
+import '../../../widgets/safe_network_image.dart';
 import '../../../widgets/standard_app_bar.dart';
 
 const Color _reviewAccent = Color(0xFFF4B63D);
@@ -229,21 +230,36 @@ class _ActivityReviewScreenState extends State<ActivityReviewScreen> {
       children: [
         CircleAvatar(
           radius: 25,
-          backgroundImage: _caregiverPhoto != null
-              ? NetworkImage(_caregiverPhoto!)
-              : null,
           backgroundColor: Colors.grey.shade100,
-          child: _caregiverPhoto != null
-              ? null
-              : Text(
-                  _caregiverName.isNotEmpty
-                      ? _caregiverName[0].toUpperCase()
-                      : '?',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    color: Colors.black54,
+          child: ClipOval(
+            child: SizedBox(
+              width: 50,
+              height: 50,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Center(
+                    child: Text(
+                      _caregiverName.isNotEmpty
+                          ? _caregiverName[0].toUpperCase()
+                          : '?',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black54,
+                      ),
+                    ),
                   ),
-                ),
+                  if (_caregiverPhoto?.trim().isNotEmpty == true)
+                    SafeNetworkImage(
+                      _caregiverPhoto!.trim(),
+                      fit: BoxFit.cover,
+                      placeholder: const SizedBox.shrink(),
+                      errorWidget: const SizedBox.shrink(),
+                    ),
+                ],
+              ),
+            ),
+          ),
         ),
         const SizedBox(height: 8),
         Text(

@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -12,7 +14,6 @@ import 'sos/caregiver_sos_alerts_screen.dart';
 
 const Color _caregiverNavActiveBlue = Color(0xFF00A8A7);
 const Color _caregiverChatBadgeColor = Color(0xFF00A8A7);
-const Color _caregiverNavShadowColor = Color(0x14000000);
 const Color _caregiverNavBarBackground = Colors.white;
 const Color _caregiverIdleSosBackground = _caregiverNavBarBackground;
 
@@ -77,84 +78,117 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
         : Stream<int>.value(0);
     return Scaffold(
       backgroundColor: Colors.grey[50],
+      extendBody: true,
       body: IndexedStack(index: _selectedIndex, children: _pages),
-      bottomNavigationBar: Container(
-        decoration: BoxDecoration(
-          color: _caregiverNavBarBackground,
-          boxShadow: [
-            BoxShadow(
-              color: _caregiverNavShadowColor,
-              blurRadius: 8,
-              offset: const Offset(0, -1),
-            ),
-          ],
-        ),
-        padding: EdgeInsets.only(
-          left: 6,
-          right: 6,
-          top: 6,
-          bottom: bottomInset > 0 ? bottomInset : 8,
-        ),
-        child: Row(
-          children: [
-            _CaregiverNavBubbleItem(
-              icon: Icons.home_filled,
-              label: 'Home',
-              index: 0,
-              isActive: _selectedIndex == 0,
-              activeColor: _caregiverNavActiveBlue,
-              onTap: () => _onTabSelected(0),
-            ),
-            StreamBuilder<int>(
-              stream: jobBadgeStream,
-              builder: (context, snapshot) {
-                final badgeCount = snapshot.data ?? 0;
-                return _CaregiverNavBubbleItem(
-                  icon: Icons.list_alt,
-                  label: 'Jobs',
-                  index: 1,
-                  isActive: _selectedIndex == 1,
-                  activeColor: _caregiverNavActiveBlue,
-                  onTap: () => _onTabSelected(1),
-                  badgeCount: badgeCount,
-                );
-              },
-            ),
-            _CaregiverNavBubbleItem(
-              icon: Icons.sos_rounded,
-            label: 'Emergency',
-            index: 2,
-            isActive: _selectedIndex == 2,
-            isSos: true,
-            activeColor: _caregiverNavActiveBlue,
-              onTap: () => _onTabSelected(2),
-            ),
-            StreamBuilder<int>(
-              stream: chatBadgeStream,
-              builder: (context, snapshot) {
-                final badgeCount = snapshot.data ?? 0;
-                return _CaregiverNavBubbleItem(
-                  icon: Icons.chat_bubble_outline,
-                  label: 'Chat',
-                  index: 3,
-                  isActive: _selectedIndex == 3,
-                  activeColor: _caregiverNavActiveBlue,
-                  onTap: () => _onTabSelected(3),
-                  badgeCount: badgeCount,
-                );
-              },
-            ),
-            _CaregiverNavBubbleItem(
-              icon: Icons.person,
-              label: 'Account',
-              index: 4,
-              isActive: _selectedIndex == 4,
-              activeColor: _caregiverNavActiveBlue,
-              onTap: () => _onTabSelected(4),
-            ),
-          ],
-        ),
+      bottomNavigationBar: _buildBottomNav(
+        bottomInset: bottomInset,
+        caregiverId: caregiverId,
+        jobBadgeStream: jobBadgeStream,
+        chatBadgeStream: chatBadgeStream,
       ),
+    );
+  }
+
+  Widget _buildBottomNav({
+    required double bottomInset,
+    required String caregiverId,
+    required Stream<int> jobBadgeStream,
+    required Stream<int> chatBadgeStream,
+  }) {
+    final padding = EdgeInsets.only(
+      left: 6,
+      right: 6,
+      top: 6,
+      bottom: bottomInset > 0 ? bottomInset : 8,
+    );
+
+    // Same concept as user root: blurred/translucent bar so it doesn't look like
+    // a solid container blocking the content behind it, and do not clip the SOS
+    // bubble which overflows upward.
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Positioned.fill(
+          child: ClipRect(
+            child: BackdropFilter(
+              filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: _caregiverNavBarBackground.withValues(alpha: 0.82),
+                  border: Border(
+                    top: BorderSide(
+                      color: Colors.black.withValues(alpha: 0.14),
+                      width: 1.25,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        Padding(
+          padding: padding,
+          child: Row(
+            children: [
+              _CaregiverNavBubbleItem(
+                icon: Icons.home_filled,
+                label: 'Home',
+                index: 0,
+                isActive: _selectedIndex == 0,
+                activeColor: _caregiverNavActiveBlue,
+                onTap: () => _onTabSelected(0),
+              ),
+              StreamBuilder<int>(
+                stream: jobBadgeStream,
+                builder: (context, snapshot) {
+                  final badgeCount = snapshot.data ?? 0;
+                  return _CaregiverNavBubbleItem(
+                    icon: Icons.list_alt,
+                    label: 'Jobs',
+                    index: 1,
+                    isActive: _selectedIndex == 1,
+                    activeColor: _caregiverNavActiveBlue,
+                    onTap: () => _onTabSelected(1),
+                    badgeCount: badgeCount,
+                  );
+                },
+              ),
+              _CaregiverNavBubbleItem(
+                icon: Icons.sos_rounded,
+                label: 'Emergency',
+                index: 2,
+                isActive: _selectedIndex == 2,
+                isSos: true,
+                activeColor: _caregiverNavActiveBlue,
+                onTap: () => _onTabSelected(2),
+              ),
+              StreamBuilder<int>(
+                stream: chatBadgeStream,
+                builder: (context, snapshot) {
+                  final badgeCount = snapshot.data ?? 0;
+                  return _CaregiverNavBubbleItem(
+                    icon: Icons.chat_bubble_outline,
+                    label: 'Chat',
+                    index: 3,
+                    isActive: _selectedIndex == 3,
+                    activeColor: _caregiverNavActiveBlue,
+                    onTap: () => _onTabSelected(3),
+                    badgeCount: badgeCount,
+                  );
+                },
+              ),
+              _CaregiverNavBubbleItem(
+                icon: Icons.person,
+                label: 'Account',
+                index: 4,
+                isActive: _selectedIndex == 4,
+                activeColor: _caregiverNavActiveBlue,
+                onTap: () => _onTabSelected(4),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 

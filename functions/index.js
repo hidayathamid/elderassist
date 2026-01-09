@@ -887,6 +887,10 @@ exports.createBookingAndPay = functions
     const serviceLabel = servicePreferences.join(", ");
 
     const bookingId = db.collection("bookings").doc().id;
+    const startTime = String(data.startTime || "").trim();
+    const endTime = String(data.endTime || "").trim();
+    const time = String(data.time || "").trim();
+    const hasTimeRange = Boolean(startTime && endTime);
     const bookingPayload = {
       caregiverId: data.caregiverId || "",
       caregiverName: data.caregiverName || "",
@@ -899,7 +903,7 @@ exports.createBookingAndPay = functions
       addressId: data.addressId || "",
       addressLabel: data.addressLabel || "",
       date: data.date || "",
-      time: data.time || "",
+      ...(hasTimeRange ? { startTime, endTime } : { time }),
       notes: data.notes || "",
       servicePrice: Number(data.servicePrice) || 0,
     };
@@ -1025,6 +1029,9 @@ exports.toyyibpayCallback = functions
       if (status === 1) {
         const computedStatus = derivePaidBookingStatus(bookingPayload);
         const bookingRef = db.collection("bookings").doc(bookingId || undefined);
+        const hasTimeRange = Boolean(
+          bookingPayload.startTime && bookingPayload.endTime,
+        );
         const bookingData = {
           bookingId: bookingRef.id,
           userId,
@@ -1039,7 +1046,12 @@ exports.toyyibpayCallback = functions
           addressId: bookingPayload.addressId || "",
           addressLabel: bookingPayload.addressLabel || "",
           date: bookingPayload.date || "",
-          time: bookingPayload.time || "",
+          ...(hasTimeRange
+            ? {
+                startTime: bookingPayload.startTime || "",
+                endTime: bookingPayload.endTime || "",
+              }
+            : { time: bookingPayload.time || "" }),
           paymentMethod,
           servicePrice: Number(bookingPayload.servicePrice) || amountValue,
           notes: bookingPayload.notes || "",
@@ -1098,7 +1110,7 @@ exports.toyyibpayCallback = functions
 
 function derivePaidBookingStatus(bookingData) {
   const date = String(bookingData.date || "").trim(); // expected yyyy-MM-dd
-  const time = String(bookingData.time || "").trim(); // expected HH:mm
+  const time = String(bookingData.startTime || bookingData.time || "").trim(); // expected HH:mm
 
   const nowEpoch = Date.now();
   const scheduledEpoch = parseMalaysiaEpoch(date, time);

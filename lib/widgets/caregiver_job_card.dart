@@ -8,6 +8,8 @@ import 'package:emergencies_disability_assistance_app/screens/caregiver/jobs/car
 import 'package:emergencies_disability_assistance_app/screens/user/chat/user_chat_screen.dart';
 import 'package:emergencies_disability_assistance_app/services/chat_service.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
+import 'package:emergencies_disability_assistance_app/widgets/safe_network_image.dart';
+import 'package:emergencies_disability_assistance_app/widgets/service_tag_chip.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_screen.dart';
 
 /// Reusable card that mirrors the card design from the jobs screen.
@@ -17,11 +19,20 @@ class CaregiverJobCard extends StatelessWidget {
     required this.job,
     required this.onView,
     this.onTrack,
+    this.matchHomeStyle = false,
   });
 
   final CaregiverJob job;
   final VoidCallback onView;
   final VoidCallback? onTrack;
+  final bool matchHomeStyle;
+
+  int _alphaFromOpacity(double opacity) {
+    final value = (opacity * 255).round();
+    if (value < 0) return 0;
+    if (value > 255) return 255;
+    return value;
+  }
 
   String get _timeLabel {
     final time = job.time.trim();
@@ -241,138 +252,377 @@ class CaregiverJobCard extends StatelessWidget {
             personLabelFromUser ??
             (job.personLabel.isNotEmpty ? job.personLabel : null);
 
+        if (!matchHomeStyle) {
+          return Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: _caregiverCardRadius,
+              border: Border.all(color: _caregiverCardBorderColor),
+              boxShadow: [_caregiverCardShadow],
+            ),
+            clipBehavior: Clip.hardEdge,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 22,
+                        backgroundColor: Colors.grey[200],
+                        child: ClipOval(
+                          child: SizedBox(
+                            width: 44,
+                            height: 44,
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                Center(
+                                  child: Text(
+                                    userName.isNotEmpty
+                                        ? userName[0].toUpperCase()
+                                        : '?',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 12,
+                                      color: Colors.black54,
+                                    ),
+                                  ),
+                                ),
+                                if (hasPhoto)
+                                  SafeNetworkImage(
+                                    userPhoto!.trim(),
+                                    fit: BoxFit.cover,
+                                    placeholder: const SizedBox.shrink(),
+                                    errorWidget: const SizedBox.shrink(),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              userName,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13,
+                                color: activityPrimaryTextColor,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              serviceLabel,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w500,
+                                color: Colors.black54,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [_StatusChip(status: job.status)],
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.calendar_month,
+                        size: 12,
+                        color: activityPrimaryTextColor,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        dateLabel,
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: activityPrimaryTextColor,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Icon(
+                        Icons.access_time,
+                        size: 12,
+                        color: activityPrimaryTextColor,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        _timeLabel,
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: activityPrimaryTextColor,
+                        ),
+                      ),
+                      if (isCancelledStatus && cancellationReason.isNotEmpty) ...[
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            'Reason: $cancellationReason',
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.red.shade700,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[100],
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Row(
+                      children: [
+                        DefaultProfileAvatar(
+                          radius: 14,
+                          photoUrl: userPhoto?.trim().isNotEmpty == true
+                              ? userPhoto!.trim()
+                              : null,
+                          label: personName,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                personName,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 11,
+                                ),
+                              ),
+                              if (personLabel?.isNotEmpty == true) ...[
+                                const SizedBox(height: 2),
+                                Text(
+                                  personLabel!,
+                                  style: const TextStyle(
+                                    fontSize: 9,
+                                    color: Colors.black54,
+                                  ),
+                                ),
+                              ],
+                              const SizedBox(height: 2),
+                              Text(
+                                personAddress,
+                                style: const TextStyle(
+                                  fontSize: 9,
+                                  color: Colors.black54,
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (job.notes.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Text(
+                        job.notes,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.black87,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  const Divider(height: 0),
+                  const SizedBox(height: 12),
+                  _buildActionRow(actions),
+                ],
+              ),
+            ),
+          );
+        }
+
+        final metaColor = activityPrimaryTextColor.withAlpha(
+          _alphaFromOpacity(0.6),
+        );
+        final trimmedPersonTag = personLabel?.trim();
+
         return Container(
           decoration: BoxDecoration(
             color: Colors.white,
-            borderRadius: _caregiverCardRadius,
-            border: Border.all(color: _caregiverCardBorderColor),
-            boxShadow: [_caregiverCardShadow],
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: const Color(0xFFD7DCE3)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withAlpha(_alphaFromOpacity(0.1)),
+                blurRadius: 20,
+                offset: const Offset(0, 10),
+              ),
+            ],
           ),
           clipBehavior: Clip.hardEdge,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    CircleAvatar(
-                      radius: 22,
-                      backgroundImage:
-                          hasPhoto ? NetworkImage(userPhoto!) : null,
-                      backgroundColor: Colors.grey[200],
-                      child: hasPhoto
-                          ? null
-                          : Text(
-                              userName.isNotEmpty
-                                  ? userName[0].toUpperCase()
-                                  : '?',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                                fontSize: 12,
-                                color: Colors.black54,
-                              ),
-                            ),
+                    Container(
+                      width: 52,
+                      height: 52,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white,
+                        border: Border.all(color: const Color(0xFFEEF1F4)),
+                      ),
+                      child: ClipOval(
+                        child: hasPhoto
+                            ? SafeNetworkImage(
+                                userPhoto!.trim(),
+                                fit: BoxFit.cover,
+                                placeholder: const Icon(
+                                  Icons.person,
+                                  color: Colors.grey,
+                                ),
+                                errorWidget: const Icon(
+                                  Icons.person,
+                                  color: Colors.grey,
+                                ),
+                              )
+                            : const Icon(Icons.person, color: Colors.grey),
+                      ),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            userName,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w700,
-                              fontSize: 13,
-                              color: activityPrimaryTextColor,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  userName,
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w800,
+                                    color: activityPrimaryTextColor,
+                                    letterSpacing: -0.1,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              _StatusChip(status: job.status),
+                            ],
                           ),
-                          const SizedBox(height: 2),
-                          Text(
-                            serviceLabel,
-                            style: const TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w500,
-                              color: Colors.black54,
+                          const SizedBox(height: 4),
+                          SizedBox(
+                            height: 20,
+                            child: SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              physics: const BouncingScrollPhysics(),
+                              child: Row(
+                                children: [
+                                  ServiceTagChip(label: serviceLabel),
+                                  if (trimmedPersonTag?.isNotEmpty == true) ...[
+                                    const SizedBox(width: 4),
+                                    ServiceTagChip(label: trimmedPersonTag!),
+                                  ],
+                                ],
+                              ),
                             ),
+                          ),
+                          const SizedBox(height: 6),
+                          Row(
+                            children: [
+                              Icon(Icons.calendar_month, size: 13, color: metaColor),
+                              const SizedBox(width: 4),
+                              Flexible(
+                                child: Text(
+                                  dateLabel,
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    color: metaColor,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Icon(Icons.access_time, size: 13, color: metaColor),
+                              const SizedBox(width: 4),
+                              Text(
+                                _timeLabel,
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  color: metaColor,
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [_StatusChip(status: job.status)],
-                    ),
                   ],
                 ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Icon(
-                      Icons.calendar_month,
-                      size: 12,
-                      color: activityPrimaryTextColor,
+                if (isCancelledStatus && cancellationReason.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    'Reason: $cancellationReason',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.red.shade700,
                     ),
-                    const SizedBox(width: 4),
-                    Text(
-                      dateLabel,
-                      style: const TextStyle(
-                        fontSize: 10,
-                        color: activityPrimaryTextColor,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Icon(
-                      Icons.access_time,
-                      size: 12,
-                      color: activityPrimaryTextColor,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      _timeLabel,
-                      style: const TextStyle(
-                        fontSize: 10,
-                        color: activityPrimaryTextColor,
-                      ),
-                    ),
-                    if (isCancelledStatus && cancellationReason.isNotEmpty) ...[
-                      const SizedBox(width: 6),
-                      Flexible(
-                        child: Text(
-                          'Reason: $cancellationReason',
-                          style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.red.shade700,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
                 const SizedBox(height: 10),
                 Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                   decoration: BoxDecoration(
-                    color: Colors.grey[100],
-                    borderRadius: BorderRadius.circular(14),
+                    color: const Color(0xFFF9FAFB),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: Colors.black.withAlpha(_alphaFromOpacity(0.06)),
+                    ),
                   ),
                   child: Row(
                     children: [
                       DefaultProfileAvatar(
-                        radius: 14,
-                        photoUrl: userPhoto?.trim().isNotEmpty == true
-                            ? userPhoto!.trim()
-                            : null,
-                        label: personName,
+                        radius: 18,
+                        photoUrl:
+                            userPhoto?.trim().isNotEmpty == true ? userPhoto!.trim() : null,
+                        label: personName.isNotEmpty ? personName : userName,
                       ),
                       const SizedBox(width: 8),
                       Expanded(
@@ -382,25 +632,32 @@ class CaregiverJobCard extends StatelessWidget {
                             Text(
                               personName,
                               style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 12,
+                                color: activityPrimaryTextColor,
+                                letterSpacing: -0.1,
                               ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
-                            if (personLabel?.isNotEmpty == true) ...[
+                            if (trimmedPersonTag?.isNotEmpty == true) ...[
                               const SizedBox(height: 2),
                               Text(
-                                personLabel!,
+                                trimmedPersonTag!,
                                 style: const TextStyle(
-                                  fontSize: 9,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w600,
                                   color: Colors.black54,
                                 ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                               ),
                             ],
-                            const SizedBox(height: 2),
+                            const SizedBox(height: 4),
                             Text(
                               personAddress,
                               style: const TextStyle(
-                                fontSize: 9,
+                                fontSize: 11,
                                 color: Colors.black54,
                               ),
                               maxLines: 2,
@@ -660,7 +917,7 @@ class _StatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2.5),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(12),
@@ -671,16 +928,16 @@ class _StatusChip extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Container(
-            width: 5,
-            height: 5,
+            width: 4,
+            height: 4,
             decoration: BoxDecoration(color: _dotColor, shape: BoxShape.circle),
           ),
           const SizedBox(width: 4),
           Text(
             _label,
             style: const TextStyle(
-              fontWeight: FontWeight.w600,
-              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              fontSize: 8.5,
               color: Colors.black87,
             ),
           ),

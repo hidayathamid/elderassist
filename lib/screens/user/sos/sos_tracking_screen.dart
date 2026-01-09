@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:emergencies_disability_assistance_app/widgets/layout_constants.dart';
+import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.dart';
 
 import '../activity/activity_tracking_helpers.dart';
@@ -227,9 +228,10 @@ class _SosTrackingScreenState extends State<SosTrackingScreen> {
             borderRadius: BorderRadius.circular(16),
           ),
           child: ListTile(
-            leading: CircleAvatar(
-              backgroundImage: NetworkImage(avatar),
+            leading: DefaultProfileAvatar(
               radius: 22,
+              photoUrl: avatar,
+              label: name,
             ),
             title: Text(
               name,

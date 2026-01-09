@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'package:emergencies_disability_assistance_app/models/caregiver_model.dart';
+import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_booking_details_screen.dart';
+import 'package:emergencies_disability_assistance_app/screens/user/booking/booking_caregiver_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/booking/booking_person_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/profile/profile_addresses_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/profile/profile_emergency_screen.dart';
@@ -16,6 +18,8 @@ import 'package:emergencies_disability_assistance_app/screens/user/profile/profi
 import 'package:emergencies_disability_assistance_app/services/booking_service.dart';
 import 'package:emergencies_disability_assistance_app/services/caregiver_service.dart';
 import 'package:emergencies_disability_assistance_app/services/location_service.dart';
+import 'package:emergencies_disability_assistance_app/screens/user/home/all_caregiver_screen.dart';
+import 'package:emergencies_disability_assistance_app/widgets/safe_network_image.dart';
 import 'package:emergencies_disability_assistance_app/widgets/service_tag_chip.dart';
 
 class UserHomeScreen extends StatefulWidget {
@@ -23,10 +27,12 @@ class UserHomeScreen extends StatefulWidget {
     super.key,
     this.tabIndexListenable,
     this.tabIndex = 0,
+    this.addressPickerOpener,
   });
 
   final ValueListenable<int>? tabIndexListenable;
   final int tabIndex;
+  final ValueNotifier<VoidCallback?>? addressPickerOpener;
 
   @override
   State<UserHomeScreen> createState() => _UserHomeScreenState();
@@ -54,6 +60,7 @@ int _alphaFromOpacity(double opacity) =>
     (opacity * 255).clamp(0.0, 255.0).round();
 
 enum _CaregiverSectionType { previous, nearby, recommended, activeBookings }
+
 enum _ActiveBookingStatus { ongoing, assigned, scheduled }
 
 class _HomeAddressItem {
@@ -61,6 +68,7 @@ class _HomeAddressItem {
     required this.name,
     required this.label,
     required this.address,
+    this.photoUrl,
     this.lat,
     this.lng,
   });
@@ -68,6 +76,7 @@ class _HomeAddressItem {
   final String name;
   final String label;
   final String address;
+  final String? photoUrl;
   final double? lat;
   final double? lng;
 
@@ -85,6 +94,9 @@ class _HomeAddressItem {
         _safeDouble(map['long']) ??
         _safeDouble(map['lng']) ??
         _safeDouble(map['longitude']);
+    final photoUrl =
+        (map['photoUrl'] ?? map['avatarUrl'] ?? map['imageUrl'] ?? map['image'])
+            ?.toString();
     final nameValue =
         map['forWho'] ?? map['name'] ?? map['title'] ?? map['label'] ?? '';
     final labelValue =
@@ -100,6 +112,7 @@ class _HomeAddressItem {
       name: '$nameValue'.trim().isNotEmpty ? '$nameValue'.trim() : 'Person',
       label: '$labelValue'.trim(),
       address: '$addressValue'.trim(),
+      photoUrl: photoUrl?.trim().isNotEmpty == true ? photoUrl!.trim() : null,
       lat: lat,
       lng: lng,
     );
@@ -219,23 +232,28 @@ class _HomeAddressPickerSheetState extends State<_HomeAddressPickerSheet> {
                   IgnorePointer(
                     child: FractionallySizedBox(
                       widthFactor: _viewportFraction,
-                      child: Container(
-                        height: _cardHeight,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: _primaryBlue.withAlpha(_alphaFromOpacity(0.9)),
-                            width: 1.5,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        child: Container(
+                          height: _cardHeight,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
                               color: _primaryBlue.withAlpha(
-                                _alphaFromOpacity(0.12),
+                                _alphaFromOpacity(0.9),
                               ),
-                              blurRadius: 14,
-                              offset: const Offset(0, 6),
+                              width: 1.5,
                             ),
-                          ],
+                            boxShadow: [
+                              BoxShadow(
+                                color: _primaryBlue.withAlpha(
+                                  _alphaFromOpacity(0.12),
+                                ),
+                                blurRadius: 14,
+                                offset: const Offset(0, 6),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -274,6 +292,37 @@ class _HomeAddressCard extends StatelessWidget {
   final String phoneNumber;
   final VoidCallback onEditPressed;
 
+  Widget _buildPersonAvatar() {
+    final url = item.photoUrl;
+    const size = 24.0;
+    const icon = Icon(Icons.person_outline, size: 16, color: _primaryBlue);
+
+    if (url == null || url.isEmpty) {
+      return const SizedBox(
+        width: size,
+        height: size,
+        child: Center(child: icon),
+      );
+    }
+
+    return ClipOval(
+      child: SafeNetworkImage(
+        url,
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        placeholder: const ColoredBox(
+          color: Color(0x1100A8A7),
+          child: Center(child: icon),
+        ),
+        errorWidget: const ColoredBox(
+          color: Color(0x1100A8A7),
+          child: Center(child: icon),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final label = item.label.trim();
@@ -282,12 +331,12 @@ class _HomeAddressCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.shade200),
+        border: Border.all(color: Colors.grey.shade300, width: 1.2),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withAlpha(_alphaFromOpacity(0.06)),
-            blurRadius: 12,
-            offset: const Offset(0, 5),
+            color: Colors.black.withAlpha(_alphaFromOpacity(0.08)),
+            blurRadius: 14,
+            offset: const Offset(0, 6),
           ),
         ],
       ),
@@ -296,7 +345,7 @@ class _HomeAddressCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(Icons.person_outline, size: 16, color: _primaryBlue),
+              _buildPersonAvatar(),
               const SizedBox(width: 7),
               Expanded(
                 child: Text(
@@ -308,12 +357,14 @@ class _HomeAddressCard extends StatelessWidget {
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  ),
                 ),
+              ),
               if (label.isNotEmpty)
                 Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 7,
+                    vertical: 3,
+                  ),
                   decoration: BoxDecoration(
                     color: _primaryBlue.withAlpha(_alphaFromOpacity(0.12)),
                     borderRadius: BorderRadius.circular(999),
@@ -408,14 +459,107 @@ class _UserHomeScreenState extends State<UserHomeScreen>
   String _headerDisplayName = 'User';
   String? _headerPhotoUrl;
   bool _hasFinishedBooking = false;
+  bool _modalSheetScrimVisible = false;
   double _currentSheetExtent = _sheetInitialExtent;
   final _collapsedSections = <_CaregiverSectionType>{};
   String _currentGreeting = '';
   Timer? _greetingTimer;
 
+  ({PersonProfile person, AddressItem address})? _selectedBookingContext() {
+    final userId = _auth.currentUser?.uid ?? '';
+    if (userId.isEmpty) return null;
+    if (_homeAddresses.isEmpty) return null;
+
+    final index = _selectedHomeAddressIndex.clamp(0, _homeAddresses.length - 1);
+    final item = _homeAddresses[index];
+
+    final address = AddressItem(
+      title: item.name,
+      subtitle: item.address,
+      addressLine: item.address,
+      label: item.label.trim().isNotEmpty ? item.label.trim() : null,
+      forWho: item.name.trim().isNotEmpty ? item.name.trim() : null,
+      lat: item.lat,
+      long: item.lng,
+      avatarUrl: item.photoUrl,
+      photoUrl: item.photoUrl,
+    );
+
+    final person = PersonProfile(
+      id: userId,
+      name: item.name.trim().isNotEmpty ? item.name.trim() : 'Person',
+      age: 0,
+      address: item.address,
+      conditions: const [],
+      photoUrl: item.photoUrl ?? '',
+      label: item.label.trim().isNotEmpty ? item.label.trim() : null,
+      phone: _userPhoneNumber ?? '',
+      notes: '',
+      latitude: item.lat,
+      longitude: item.lng,
+    );
+
+    return (person: person, address: address);
+  }
+
+  void _openBookingCaregiverScreenFromHome() {
+    final ctx = _selectedBookingContext();
+    if (ctx == null) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => BookingCaregiverScreen(
+          person: ctx.person,
+          selectedAddress: ctx.address,
+        ),
+      ),
+    );
+  }
+
+  void _openAllCaregiversScreen({required AllCaregiverCategory initialCategory}) {
+    final ctx = _selectedBookingContext();
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => AllCaregiverScreen(
+          person: ctx?.person,
+          selectedAddress: ctx?.address,
+          originLat: _currentPosition?.latitude,
+          originLng: _currentPosition?.longitude,
+          userPreferences: _userServicePreferences,
+          initialCategory: initialCategory,
+        ),
+      ),
+    );
+  }
+
+  void _openBookingDetailsForCaregiverTile(CaregiverProfile caregiver) {
+    final bookingId = caregiver.bookingId?.trim() ?? '';
+    if (bookingId.isNotEmpty) {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder:
+              (_) => ActivityBookingDetailsScreen(
+                bookingId: bookingId,
+                hideBookingDetailsTab: true,
+              ),
+        ),
+      );
+      return;
+    }
+    _openBookingCaregiverScreenFromHome();
+  }
+
+  Widget _buildSectionDivider({double spacing = _sheetSectionSpacing}) {
+    return SizedBox(height: spacing);
+  }
+
+  void _registerAddressPickerOpener() {
+    widget.addressPickerOpener?.value = _openHomeAddressSheet;
+  }
+
   @override
   void initState() {
     super.initState();
+    _registerAddressPickerOpener();
     final entryController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 220),
@@ -424,15 +568,10 @@ class _UserHomeScreenState extends State<UserHomeScreen>
       parent: entryController,
       curve: Curves.easeOutCubic,
     );
-    final entrySlide = Tween<Offset>(
-      begin: const Offset(0, 0.02),
-      end: Offset.zero,
-    ).animate(
-      CurvedAnimation(
-        parent: entryController,
-        curve: Curves.easeOutCubic,
-      ),
-    );
+    final entrySlide =
+        Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero).animate(
+          CurvedAnimation(parent: entryController, curve: Curves.easeOutCubic),
+        );
     _entryController = entryController;
     _entryFade = entryFade;
     _entrySlide = entrySlide;
@@ -443,7 +582,8 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     _subscribeToUserDocStream();
     _updateGreeting();
 
-    _wasActive = (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+    _wasActive =
+        (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
         widget.tabIndex;
     widget.tabIndexListenable?.addListener(_handleTabChange);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -473,10 +613,15 @@ class _UserHomeScreenState extends State<UserHomeScreen>
   @override
   void didUpdateWidget(covariant UserHomeScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.addressPickerOpener != widget.addressPickerOpener) {
+      oldWidget.addressPickerOpener?.value = null;
+      _registerAddressPickerOpener();
+    }
     if (oldWidget.tabIndexListenable != widget.tabIndexListenable) {
       oldWidget.tabIndexListenable?.removeListener(_handleTabChange);
       widget.tabIndexListenable?.addListener(_handleTabChange);
-      _wasActive = (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+      _wasActive =
+          (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
           widget.tabIndex;
     }
   }
@@ -631,12 +776,14 @@ class _UserHomeScreenState extends State<UserHomeScreen>
       );
       if (caregiver == null) continue;
       final distanceMeters = _distanceToCaregiver(caregiver);
-      final distance =
-          distanceMeters == null ? null : _formatDistance(distanceMeters);
+      final distance = distanceMeters == null
+          ? null
+          : _formatDistance(distanceMeters);
       final eta = distanceMeters == null ? null : _estimateEta(distanceMeters);
       caregivers.add(
         _mapModelToProfile(
           caregiver,
+          bookingId: booking.bookingId,
           specializationOverride: booking.notes.isNotEmpty
               ? booking.notes
               : null,
@@ -656,62 +803,74 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     return caregivers;
   }
 
-  void _openHomeAddressSheet() {
+  void _openHomeAddressSheet() async {
     if (!mounted) return;
     if (_homeAddresses.isEmpty) {
-      Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => const ProfileAddressesScreen()),
-      );
+      Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const ProfileAddressesScreen()));
       return;
     }
 
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (_) {
-        return _HomeAddressPickerSheet(
-          items: _homeAddresses,
-          initialIndex: _selectedHomeAddressIndex,
-          phoneNumber: _userPhoneNumber ?? '',
-          onIndexChanged: (index) {
-            if (!mounted) return;
-            final item = _homeAddresses[index];
-            final lat = item.lat;
-            final lng = item.lng;
-            if (lat != null && lng != null) {
-              _manualLocationLock = true;
-              setState(() {
-                _selectedHomeAddressIndex = index;
-                _currentPosition = Position(
-                  longitude: lng,
-                  latitude: lat,
-                  timestamp: DateTime.now(),
-                  accuracy: 10,
-                  altitude: 0,
-                  heading: 0,
-                  speed: 0,
-                  speedAccuracy: 0,
-                  altitudeAccuracy: 0,
-                  headingAccuracy: 0,
+    setState(() => _modalSheetScrimVisible = true);
+    try {
+      await showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        barrierColor: Colors.transparent,
+        backgroundColor: Colors.transparent,
+        builder: (ctx) {
+          return Material(
+            color: Colors.white,
+            shape: const RoundedRectangleBorder(
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: _HomeAddressPickerSheet(
+              items: _homeAddresses,
+              initialIndex: _selectedHomeAddressIndex,
+              phoneNumber: _userPhoneNumber ?? '',
+              onIndexChanged: (index) {
+                if (!mounted) return;
+                final item = _homeAddresses[index];
+                final lat = item.lat;
+                final lng = item.lng;
+                if (lat != null && lng != null) {
+                  _manualLocationLock = true;
+                  setState(() {
+                    _selectedHomeAddressIndex = index;
+                    _currentPosition = Position(
+                      longitude: lng,
+                      latitude: lat,
+                      timestamp: DateTime.now(),
+                      accuracy: 10,
+                      altitude: 0,
+                      heading: 0,
+                      speed: 0,
+                      speedAccuracy: 0,
+                      altitudeAccuracy: 0,
+                      headingAccuracy: 0,
+                    );
+                    _previousCaregiversFuture = _loadPreviousCaregivers();
+                  });
+                } else {
+                  setState(() => _selectedHomeAddressIndex = index);
+                }
+              },
+              onEditPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const ProfileAddressesScreen(),
+                  ),
                 );
-                _previousCaregiversFuture = _loadPreviousCaregivers();
-              });
-            } else {
-              setState(() => _selectedHomeAddressIndex = index);
-            }
-          },
-          onEditPressed: () {
-            Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const ProfileAddressesScreen()),
-            );
-          },
-        );
-      },
-    );
+              },
+            ),
+          );
+        },
+      );
+    } finally {
+      if (mounted) setState(() => _modalSheetScrimVisible = false);
+    }
   }
 
   Future<List<CaregiverModel>> _loadRecommendedCaregivers() async {
@@ -763,6 +922,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     int matchedPreferences = 0,
     String? statusLabel,
     bool statusIsActive = false,
+    String? bookingId,
   }) {
     final specialization =
         specializationOverride ??
@@ -785,6 +945,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
       matchedPreferences: matchedPreferences,
       statusLabel: statusLabel,
       statusIsActive: statusIsActive,
+      bookingId: bookingId,
     );
   }
 
@@ -826,8 +987,12 @@ class _UserHomeScreenState extends State<UserHomeScreen>
           if (distanceMeters != null && distanceMeters > _nearbyRadiusMeters) {
             continue;
           }
-          final distance = distanceMeters != null ? _formatDistance(distanceMeters) : null;
-          final eta = distanceMeters != null ? _estimateEta(distanceMeters) : null;
+          final distance = distanceMeters != null
+              ? _formatDistance(distanceMeters)
+              : null;
+          final eta = distanceMeters != null
+              ? _estimateEta(distanceMeters)
+              : null;
           ranked.add((
             profile: _mapModelToProfile(model, distance: distance, eta: eta),
             meters: distanceMeters ?? double.infinity,
@@ -842,6 +1007,10 @@ class _UserHomeScreenState extends State<UserHomeScreen>
           trailing: _SectionInfoIcon(
             message: 'Within 15 km of your selected location.',
           ),
+          onViewAll: () => _openAllCaregiversScreen(
+            initialCategory: AllCaregiverCategory.nearby,
+          ),
+          onCaregiverTap: _openBookingDetailsForCaregiverTile,
           isCollapsed: _collapsedSections.contains(
             _CaregiverSectionType.nearby,
           ),
@@ -867,39 +1036,42 @@ class _UserHomeScreenState extends State<UserHomeScreen>
             .toSet();
 
         if (_currentPosition == null) {
-          final list = models
-              .map((model) {
+          final list =
+              models.map((model) {
                 final matchedCount = prefs.isEmpty
                     ? 0
                     : model.services
-                        .where((s) => prefs.contains(s.toLowerCase().trim()))
-                        .length;
+                          .where((s) => prefs.contains(s.toLowerCase().trim()))
+                          .length;
                 return _mapModelToProfile(
                   model,
                   isMatch: true,
                   matchedPreferences: matchedCount,
                 );
-              })
-              .toList()
-            ..sort((a, b) {
-              final matchCmp =
-                  b.matchedPreferences.compareTo(a.matchedPreferences);
-              if (matchCmp != 0) return matchCmp;
-              final ratingCmp = b.rating.compareTo(a.rating);
-              if (ratingCmp != 0) return ratingCmp;
-              return 0;
-            });
+              }).toList()..sort((a, b) {
+                final matchCmp = b.matchedPreferences.compareTo(
+                  a.matchedPreferences,
+                );
+                if (matchCmp != 0) return matchCmp;
+                final ratingCmp = b.rating.compareTo(a.rating);
+                if (ratingCmp != 0) return ratingCmp;
+                return 0;
+              });
           final caregivers = list.take(4).toList();
-          return _CaregiverSection(
-            title: 'Recommended For You',
-            caregivers: caregivers,
-            trailing: _SectionInfoIcon(
-              message: 'Matches your selected service preferences.',
-            ),
-            emptyMessage: caregivers.isEmpty ? 'No caregiver near you' : null,
-            onHide: caregivers.isEmpty
-                ? () => _collapseSection(_CaregiverSectionType.recommended)
-                : null,
+           return _CaregiverSection(
+             title: 'Recommended For You',
+             caregivers: caregivers,
+             trailing: _SectionInfoIcon(
+               message: 'Matches your selected service preferences.',
+             ),
+             onViewAll: () => _openAllCaregiversScreen(
+               initialCategory: AllCaregiverCategory.recommended,
+             ),
+             onCaregiverTap: _openBookingDetailsForCaregiverTile,
+             emptyMessage: caregivers.isEmpty ? 'No caregiver near you' : null,
+             onHide: caregivers.isEmpty
+                 ? () => _collapseSection(_CaregiverSectionType.recommended)
+                 : null,
             isCollapsed: _collapsedSections.contains(
               _CaregiverSectionType.recommended,
             ),
@@ -951,8 +1123,8 @@ class _UserHomeScreenState extends State<UserHomeScreen>
           final matchedCount = prefs.isEmpty
               ? 0
               : model.services
-                  .where((s) => prefs.contains(s.toLowerCase().trim()))
-                  .length;
+                    .where((s) => prefs.contains(s.toLowerCase().trim()))
+                    .length;
           final distance = _formatDistance(distanceMeters);
           final eta = _estimateEta(distanceMeters);
           ranked.add((
@@ -974,8 +1146,9 @@ class _UserHomeScreenState extends State<UserHomeScreen>
         }
 
         ranked.sort((a, b) {
-          final matchCmp =
-              b.profile.matchedPreferences.compareTo(a.profile.matchedPreferences);
+          final matchCmp = b.profile.matchedPreferences.compareTo(
+            a.profile.matchedPreferences,
+          );
           if (matchCmp != 0) return matchCmp;
           final ratingCmp = b.profile.rating.compareTo(a.profile.rating);
           if (ratingCmp != 0) return ratingCmp;
@@ -984,8 +1157,9 @@ class _UserHomeScreenState extends State<UserHomeScreen>
           return b.score.compareTo(a.score);
         });
 
-        final recommended =
-            ranked.where((e) => e.score >= recommendationScoreThreshold).toList();
+        final recommended = ranked
+            .where((e) => e.score >= recommendationScoreThreshold)
+            .toList();
         final pool = recommended.isNotEmpty ? recommended : ranked;
         final caregivers = pool.take(4).map((e) => e.profile).toList();
         return _CaregiverSection(
@@ -994,8 +1168,11 @@ class _UserHomeScreenState extends State<UserHomeScreen>
           trailing: _SectionInfoIcon(
             message: 'Matches your selected service preferences.',
           ),
-          emptyMessage:
-              caregivers.isEmpty ? 'No caregiver near you' : null,
+          onViewAll: () => _openAllCaregiversScreen(
+            initialCategory: AllCaregiverCategory.recommended,
+          ),
+          onCaregiverTap: _openBookingDetailsForCaregiverTile,
+          emptyMessage: caregivers.isEmpty ? 'No caregiver near you' : null,
           onHide: caregivers.isEmpty
               ? () => _collapseSection(_CaregiverSectionType.recommended)
               : null,
@@ -1159,8 +1336,16 @@ class _UserHomeScreenState extends State<UserHomeScreen>
   }
 
   _ActiveBookingStatus? _activeBookingStatusFromRaw(String raw) {
-    final normalized = raw.trim().toUpperCase();
-    if (normalized == 'ONGOING' || normalized == 'IN_PROGRESS') {
+    final normalized = raw
+        .trim()
+        .toUpperCase()
+        .replaceAll(' ', '_')
+        .replaceAll('-', '_')
+        .replaceAll('__', '_');
+    if (normalized == 'ONGOING' ||
+        normalized == 'IN_PROGRESS' ||
+        normalized == 'NOTIFY' ||
+        normalized == 'HANDLE_CLIENT') {
       return _ActiveBookingStatus.ongoing;
     }
     if (normalized == 'ASSIGNED') return _ActiveBookingStatus.assigned;
@@ -1192,9 +1377,10 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     }
   }
 
-  Widget _buildActiveBookingsSection(double sectionSpacing) {
-    final isCollapsed =
-        _collapsedSections.contains(_CaregiverSectionType.activeBookings);
+  Widget _buildActiveBookingsSection() {
+    final isCollapsed = _collapsedSections.contains(
+      _CaregiverSectionType.activeBookings,
+    );
     final userId = _auth.currentUser?.uid;
     if (userId == null || userId.isEmpty) return const SizedBox.shrink();
 
@@ -1209,7 +1395,14 @@ class _UserHomeScreenState extends State<UserHomeScreen>
       builder: (context, snapshot) {
         final docs = snapshot.data?.docs ?? [];
         final entries =
-            <({String caregiverId, _ActiveBookingStatus status, int createdMs})>[];
+            <
+              ({
+                String caregiverId,
+                String bookingId,
+                _ActiveBookingStatus status,
+                int createdMs,
+              })
+            >[];
         for (final doc in docs) {
           final data = doc.data();
           final caregiverId = (data['caregiverId'] as String?) ?? '';
@@ -1219,14 +1412,16 @@ class _UserHomeScreenState extends State<UserHomeScreen>
           final createdAt = data['createdAt'] as Timestamp?;
           entries.add((
             caregiverId: caregiverId,
+            bookingId: doc.id,
             status: status,
             createdMs: createdAt?.millisecondsSinceEpoch ?? 0,
           ));
         }
 
         entries.sort((a, b) {
-          final priorityCmp = _activeBookingPriority(a.status)
-              .compareTo(_activeBookingPriority(b.status));
+          final priorityCmp = _activeBookingPriority(
+            a.status,
+          ).compareTo(_activeBookingPriority(b.status));
           if (priorityCmp != 0) return priorityCmp;
           return b.createdMs.compareTo(a.createdMs);
         });
@@ -1246,19 +1441,21 @@ class _UserHomeScreenState extends State<UserHomeScreen>
                   trailing: _SectionInfoIcon(
                     message: 'Ongoing > assigned > scheduled.',
                   ),
-                  emptyMessage:
-                      caregivers.isEmpty ? 'No active bookings yet' : null,
+                  onCaregiverTap: _openBookingDetailsForCaregiverTile,
+                  emptyMessage: caregivers.isEmpty
+                      ? 'No active bookings yet'
+                      : null,
                   isCollapsed: isCollapsed,
                   onHide: caregivers.isEmpty && !isCollapsed
-                      ? () =>
-                            _collapseSection(_CaregiverSectionType.activeBookings)
+                      ? () => _collapseSection(
+                          _CaregiverSectionType.activeBookings,
+                        )
                       : null,
                   onUnhide: isCollapsed
                       ? () =>
                             _unhideSection(_CaregiverSectionType.activeBookings)
                       : null,
                 ),
-                SizedBox(height: sectionSpacing),
               ],
             );
           },
@@ -1268,7 +1465,15 @@ class _UserHomeScreenState extends State<UserHomeScreen>
   }
 
   Future<List<CaregiverProfile>> _buildActiveBookingProfiles(
-    List<({String caregiverId, _ActiveBookingStatus status, int createdMs})> entries,
+    List<
+      ({
+        String caregiverId,
+        String bookingId,
+        _ActiveBookingStatus status,
+        int createdMs,
+      })
+    >
+    entries,
   ) async {
     final profiles = <CaregiverProfile>[];
     for (final entry in entries) {
@@ -1278,11 +1483,14 @@ class _UserHomeScreenState extends State<UserHomeScreen>
       if (model == null) continue;
       _caregiverCache[caregiverId] = model;
       final distanceMeters = _distanceToCaregiver(model);
-      final distance = distanceMeters == null ? null : _formatDistance(distanceMeters);
+      final distance = distanceMeters == null
+          ? null
+          : _formatDistance(distanceMeters);
       final eta = distanceMeters == null ? null : _estimateEta(distanceMeters);
       profiles.add(
         _mapModelToProfile(
           model,
+          bookingId: entry.bookingId,
           specializationOverride: 'Active booking',
           distance: distance,
           eta: eta,
@@ -1297,6 +1505,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
 
   @override
   void dispose() {
+    widget.addressPickerOpener?.value = null;
     _greetingTimer?.cancel();
     _userDocSubscription?.cancel();
     widget.tabIndexListenable?.removeListener(_handleTabChange);
@@ -1313,7 +1522,8 @@ class _UserHomeScreenState extends State<UserHomeScreen>
         .max(_sheetInitialExtent, _sheetMinExtent)
         .clamp(_sheetMinExtent, _sheetMaxExtent);
     final entryFade = _entryFade ?? const AlwaysStoppedAnimation<double>(1);
-    final entrySlide = _entrySlide ?? const AlwaysStoppedAnimation<Offset>(Offset.zero);
+    final entrySlide =
+        _entrySlide ?? const AlwaysStoppedAnimation<Offset>(Offset.zero);
 
     final content = Stack(
       children: [
@@ -1329,12 +1539,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
           child: SafeArea(
             bottom: false,
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                16,
-                _headerTopPadding,
-                16,
-                0,
-              ),
+              padding: const EdgeInsets.fromLTRB(16, _headerTopPadding, 16, 0),
               child: Container(
                 key: _headerKey,
                 padding: const EdgeInsets.symmetric(vertical: 12),
@@ -1358,10 +1563,11 @@ class _UserHomeScreenState extends State<UserHomeScreen>
                         (1 - _sheetInitialExtent))
                     .clamp(0.0, 1.0);
             final collapsedSpacing = math.max(_sheetTopInset - 310.0, 0.0);
-            final interpolatedSpacing = lerpDouble(collapsedSpacing, 15.0, t) ??
-                8.0;
-            final topSpacing =
-                showAppBar ? kToolbarHeight + 8.0 : interpolatedSpacing;
+            final interpolatedSpacing =
+                lerpDouble(collapsedSpacing, 15.0, t) ?? 8.0;
+            final topSpacing = showAppBar
+                ? kToolbarHeight + 8.0
+                : interpolatedSpacing;
             return NotificationListener<DraggableScrollableNotification>(
               onNotification: (notification) {
                 _onSheetExtentChanged(notification.extent);
@@ -1385,30 +1591,45 @@ class _UserHomeScreenState extends State<UserHomeScreen>
                     ),
                   ],
                 ),
-                child: ListView(
-                  controller: scrollController,
-                  physics: const BouncingScrollPhysics(),
+                 child: ListView(
+                   controller: scrollController,
+                   physics: const BouncingScrollPhysics(),
+                   clipBehavior: Clip.none,
                    children: [
-                    SizedBox(height: topSpacing),
-                    _buildQuickActionRow(context),
-                    SizedBox(height: sectionSpacing),
-                     _buildActiveBookingsSection(sectionSpacing),
-                     if (_hasFinishedBooking) ...[
-                      // Keeps fetch/logic intact, but section sits later in the list.
-                     ],
-                     _buildNearbySection(),
-                     SizedBox(height: sectionSpacing),
-                     _buildRecommendedSection(),
-                     SizedBox(height: sectionSpacing),
+                     SizedBox(height: topSpacing),
+                     _buildQuickActionRow(context),
+                     _buildSectionDivider(spacing: sectionSpacing),
+                     _buildActiveBookingsSection(),
                     if (_hasFinishedBooking) ...[
-                      _buildPreviousSection(),
-                      SizedBox(height: sectionSpacing),
+                      // Keeps fetch/logic intact, but section sits later in the list.
                     ],
-                   ],
-                 ),
-               ),
-             );
-           },
+                    _buildSectionDivider(spacing: sectionSpacing),
+                    _buildNearbySection(),
+                    _buildSectionDivider(spacing: sectionSpacing),
+                    _buildRecommendedSection(),
+                    if (_hasFinishedBooking) ...[
+                      _buildSectionDivider(spacing: sectionSpacing),
+                      _buildPreviousSection(),
+                    ],
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            ignoring: true,
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 160),
+              curve: Curves.easeOut,
+              opacity: _modalSheetScrimVisible ? 1 : 0,
+              child: ColoredBox(
+                color: Colors.black.withAlpha(_alphaFromOpacity(0.54)),
+                child: SizedBox.expand(),
+              ),
+            ),
+          ),
         ),
         Positioned(
           top: 0,
@@ -1429,36 +1650,6 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     );
     return Scaffold(
       backgroundColor: Colors.white,
-      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
-      floatingActionButton: FadeTransition(
-        opacity: entryFade,
-        child: GestureDetector(
-          onTap: _openHomeAddressSheet,
-          child: Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: Colors.black.withAlpha(_alphaFromOpacity(0.08)),
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withAlpha(_alphaFromOpacity(0.18)),
-                  blurRadius: 10,
-                  offset: const Offset(0, 6),
-                ),
-              ],
-            ),
-            child: const Icon(
-              Icons.place_outlined,
-              color: _primaryBlue,
-              size: 20,
-            ),
-          ),
-        ),
-      ),
       body: FadeTransition(
         opacity: entryFade,
         child: SlideTransition(position: entrySlide, child: content),
@@ -1473,6 +1664,8 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     final displayName = _headerDisplayName;
     final photoUrl = _headerPhotoUrl;
     final avatarInitial = _deriveAvatarInitial(displayName);
+    final trimmedPhotoUrl = photoUrl?.trim();
+    final hasPhoto = trimmedPhotoUrl?.isNotEmpty == true;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1497,18 +1690,39 @@ class _UserHomeScreenState extends State<UserHomeScreen>
           child: Center(
             child: CircleAvatar(
               radius: 24,
-              backgroundColor: const Color.fromARGB(255, 181, 212, 212)
-                  .withAlpha(_alphaFromOpacity(0.1)),
-              backgroundImage: photoUrl != null ? NetworkImage(photoUrl) : null,
-              child: photoUrl == null
-                  ? Text(
-                      avatarInitial,
-                      style: const TextStyle(
-                        color: Color(0xFF00A8A7),
-                        fontWeight: FontWeight.w700,
+              backgroundColor: const Color.fromARGB(
+                255,
+                181,
+                212,
+                212,
+              ).withAlpha(_alphaFromOpacity(0.1)),
+              child: ClipOval(
+                child: SizedBox(
+                  width: 48,
+                  height: 48,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Center(
+                        child: Text(
+                          avatarInitial,
+                          style: const TextStyle(
+                            color: Color(0xFF00A8A7),
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
                       ),
-                    )
-                  : null,
+                      if (hasPhoto)
+                        SafeNetworkImage(
+                          trimmedPhotoUrl!,
+                          fit: BoxFit.cover,
+                          placeholder: const SizedBox.shrink(),
+                          errorWidget: const SizedBox.shrink(),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
             ),
           ),
         ),
@@ -1719,11 +1933,7 @@ class _SectionInfoIconState extends State<_SectionInfoIcon> {
                 color: Colors.black.withAlpha(_alphaFromOpacity(0.08)),
               ),
             ),
-            child: Icon(
-              Icons.info_outline,
-              size: 16,
-              color: _serviceTagBlue,
-            ),
+            child: Icon(Icons.info_outline, size: 16, color: _serviceTagBlue),
           ),
         ),
         if (_showHint)
@@ -1758,6 +1968,8 @@ class _CaregiverSection extends StatelessWidget {
     required this.caregivers,
     this.trailing,
     this.emptyMessage,
+    this.onViewAll,
+    this.onCaregiverTap,
     this.onHide,
     this.isCollapsed = false,
     this.onUnhide,
@@ -1767,6 +1979,8 @@ class _CaregiverSection extends StatelessWidget {
   final List<CaregiverProfile> caregivers;
   final Widget? trailing;
   final String? emptyMessage;
+  final VoidCallback? onViewAll;
+  final ValueChanged<CaregiverProfile>? onCaregiverTap;
   final VoidCallback? onHide;
   final bool isCollapsed;
   final VoidCallback? onUnhide;
@@ -1787,18 +2001,21 @@ class _CaregiverSection extends StatelessWidget {
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(999),
-            side: BorderSide(color: Colors.black.withAlpha(_alphaFromOpacity(0.08))),
+            side: BorderSide(
+              color: Colors.black.withAlpha(_alphaFromOpacity(0.08)),
+            ),
           ),
           backgroundColor: Colors.white,
-          textStyle: const TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w800,
-          ),
+          textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 14, color: Colors.black.withAlpha(_alphaFromOpacity(0.55))),
+            Icon(
+              icon,
+              size: 14,
+              color: Colors.black.withAlpha(_alphaFromOpacity(0.55)),
+            ),
             const SizedBox(width: 6),
             Text(label),
           ],
@@ -1811,6 +2028,14 @@ class _CaregiverSection extends StatelessWidget {
         Text(title, style: _sectionTitleStyle),
         if (trailing != null) ...[const SizedBox(width: 4), trailing!],
         const Spacer(),
+        if (onViewAll != null) ...[
+          buildSectionButton(
+            label: 'View all',
+            icon: Icons.arrow_forward_rounded,
+            onPressed: onViewAll!,
+          ),
+          const SizedBox(width: 8),
+        ],
         if (isCollapsed && onUnhide != null)
           buildSectionButton(
             label: 'Show',
@@ -1841,12 +2066,17 @@ class _CaregiverSection extends StatelessWidget {
         height: _caregiverTileHeight,
         child: ListView.separated(
           scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 2),
+          padding: EdgeInsets.zero,
+          clipBehavior: Clip.none,
           physics: const BouncingScrollPhysics(),
           itemCount: caregivers.length,
           separatorBuilder: (_, __) => const SizedBox(width: 10),
-          itemBuilder: (context, index) =>
-              _CaregiverTile(caregiver: caregivers[index]),
+          itemBuilder: (context, index) => _CaregiverTile(
+            caregiver: caregivers[index],
+            onTap: onCaregiverTap == null
+                ? null
+                : () => onCaregiverTap!(caregivers[index]),
+          ),
         ),
       );
     }
@@ -1868,7 +2098,9 @@ Widget _emptyCaregiverPlaceholder({
     decoration: BoxDecoration(
       color: const Color(0xFFF9FAFB),
       borderRadius: BorderRadius.circular(16),
-      border: Border.all(color: Colors.black.withAlpha(_alphaFromOpacity(0.06))),
+      border: Border.all(
+        color: Colors.black.withAlpha(_alphaFromOpacity(0.06)),
+      ),
     ),
     child: Column(
       mainAxisSize: MainAxisSize.min,
@@ -1911,13 +2143,14 @@ Widget _emptyCaregiverPlaceholder({
   );
 }
 
-const double _caregiverTileHeight = 128;
-const double _caregiverTileWidth = 250;
+const double _caregiverTileHeight = 232;
+const double _caregiverTileWidth = 176;
 
 class _CaregiverTile extends StatelessWidget {
-  const _CaregiverTile({required this.caregiver});
+  const _CaregiverTile({required this.caregiver, this.onTap});
 
   final CaregiverProfile caregiver;
+  final VoidCallback? onTap;
 
   List<String> get _serviceTags => caregiver.services.isNotEmpty
       ? caregiver.services
@@ -1945,166 +2178,162 @@ class _CaregiverTile extends StatelessWidget {
     final meta = _metaLine();
     final ratingLabel = caregiver.rating.toStringAsFixed(1);
     final summaryLabel = meta.isNotEmpty ? '$ratingLabel • $meta' : ratingLabel;
+    final statusText = caregiver.statusLabel?.trim().isNotEmpty == true
+        ? caregiver.statusLabel!.trim()
+        : (caregiver.availability ? 'Available' : 'Offline');
+    final statusIsActive = caregiver.statusLabel?.trim().isNotEmpty == true
+        ? caregiver.statusIsActive
+        : caregiver.availability;
     return SizedBox(
       width: _caregiverTileWidth,
       height: _caregiverTileHeight,
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: const Color(0xFFD7DCE3)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withAlpha(_alphaFromOpacity(0.1)),
-              blurRadius: 20,
-              offset: const Offset(0, 10),
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: const Color(0xFFD7DCE3)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withAlpha(_alphaFromOpacity(0.10)),
+                  blurRadius: 20,
+                  offset: const Offset(0, 10),
+                ),
+              ],
             ),
-          ],
-        ),
-        clipBehavior: Clip.hardEdge,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Container(
-                width: 52,
-                height: 52,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.white,
-                  border: Border.all(color: const Color(0xFFEEF1F4)),
-                ),
-                child: ClipOval(
-                  child: caregiver.imageUrl.isNotEmpty
-                      ? Image.network(
-                          caregiver.imageUrl,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => const Icon(
-                            Icons.person,
-                            color: Colors.grey,
-                          ),
-                        )
-                      : const Icon(Icons.person, color: Colors.grey),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            caregiver.name,
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w800,
-                              color: _homeHeadingTextColor,
-                              letterSpacing: -0.1,
-                            ),
-                            overflow: TextOverflow.ellipsis,
+            clipBehavior: Clip.hardEdge,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SizedBox(
+                  height: 118,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Container(
+                        color: const Color(0xFFF1F3F6),
+                        child: caregiver.imageUrl.trim().isNotEmpty
+                            ? SafeNetworkImage(
+                                caregiver.imageUrl.trim(),
+                                fit: BoxFit.cover,
+                                placeholder: const Icon(
+                                  Icons.person,
+                                  color: Colors.grey,
+                                ),
+                                errorWidget: const Icon(
+                                  Icons.person,
+                                  color: Colors.grey,
+                                ),
+                              )
+                            : const Icon(Icons.person, color: Colors.grey),
+                      ),
+                      Positioned(
+                        top: 10,
+                        right: 10,
+                        child: _AvailabilityStatusChip(
+                          status: statusText,
+                          isActive: statusIsActive,
+                        ),
+                      ),
+                      if (caregiver.matchedPreferences > 0)
+                        Positioned(
+                          bottom: 10,
+                          right: 10,
+                          child: _CompactTextChip(
+                            label: '${caregiver.matchedPreferences} prefs',
                           ),
                         ),
-                        if (caregiver.statusLabel?.isNotEmpty == true)
-                          _AvailabilityStatusChip(
-                            status: caregiver.statusLabel!,
-                            isActive: caregiver.statusIsActive,
-                          )
-                        else
-                          _AvailabilityStatusChip(
-                            status: caregiver.availability
-                                ? 'Available now'
-                                : 'Unavailable now',
-                            isActive: caregiver.availability,
-                          ),
-                      ],
-                    ),
-                    if (caregiver.bio?.trim().isNotEmpty == true) ...[
-                      const SizedBox(height: 4),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
                       Text(
-                        caregiver.bio!.trim(),
+                        caregiver.name,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                          color: _homeHeadingTextColor,
+                          letterSpacing: -0.1,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        caregiver.specialization,
                         style: theme.textTheme.bodySmall?.copyWith(
                           fontSize: 11,
                           fontWeight: FontWeight.w600,
-                          color: _homeHeadingTextColor.withAlpha(
-                            _alphaFromOpacity(0.68),
-                          ),
+                          color: Colors.black54,
                           height: 1.15,
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
-                    ],
-                    const SizedBox(height: 6),
-                    SizedBox(
-                      height: 20,
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        physics: const BouncingScrollPhysics(),
-                        child: Row(
-                          children: [
-                            for (var i = 0;
-                                i < _visibleServiceTags.length;
-                                i++) ...[
-                              if (i != 0) const SizedBox(width: 4),
-                              ServiceTagChip(label: _visibleServiceTags[i]),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        height: 20,
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          physics: const BouncingScrollPhysics(),
+                          child: Row(
+                            children: [
+                              for (var i = 0; i < _visibleServiceTags.length; i++)
+                                ...[
+                                  if (i != 0) const SizedBox(width: 4),
+                                  ServiceTagChip(label: _visibleServiceTags[i]),
+                                ],
+                              if (_serviceTags.length > _visibleServiceTags.length)
+                                ...[
+                                  const SizedBox(width: 4),
+                                  ServiceTagChip(
+                                    label:
+                                        '+${_serviceTags.length - _visibleServiceTags.length}',
+                                  ),
+                                ],
                             ],
-                            if (_serviceTags.length > _visibleServiceTags.length)
-                              ...[
-                                const SizedBox(width: 4),
-                                ServiceTagChip(
-                                  label:
-                                      '+${_serviceTags.length - _visibleServiceTags.length}',
-                                ),
-                              ],
-                            if (caregiver.matchedPreferences > 0) ...[
-                              const SizedBox(width: 4),
-                              ServiceTagChip(
-                                label: '${caregiver.matchedPreferences} prefs',
-                                backgroundColor: _serviceTagBlue.withAlpha(
-                                  _alphaFromOpacity(0.18),
-                                ),
-                                foregroundColor: _serviceTagBlue,
-                                borderColor: _serviceTagBlue,
-                              ),
-                            ],
-                          ],
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 6),
-                    if (summaryLabel.isNotEmpty)
-                      Row(
-                        children: [
-                          const Icon(
-                            Icons.star_rounded,
-                            size: 13,
-                            color: Colors.amber,
-                          ),
-                          const SizedBox(width: 3),
-                          Expanded(
-                            child: Text(
-                              summaryLabel,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                                color: _homeHeadingTextColor.withAlpha(
-                                  _alphaFromOpacity(0.6),
-                                ),
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
+                      const SizedBox(height: 8),
+                      if (summaryLabel.isNotEmpty)
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.star_rounded,
+                              size: 14,
+                              color: Colors.amber,
                             ),
-                          ),
-                        ],
-                      ),
-                  ],
+                            const SizedBox(width: 3),
+                            Expanded(
+                              child: Text(
+                                summaryLabel,
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  color: _homeHeadingTextColor.withAlpha(
+                                    _alphaFromOpacity(0.6),
+                                  ),
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -2160,6 +2389,39 @@ class _AvailabilityStatusChip extends StatelessWidget {
   }
 }
 
+class _CompactTextChip extends StatelessWidget {
+  const _CompactTextChip({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade400),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withAlpha(_alphaFromOpacity(0.06)),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          fontWeight: FontWeight.w700,
+          fontSize: 8,
+          color: Colors.black87,
+        ),
+      ),
+    );
+  }
+}
+
 class CaregiverProfile {
   const CaregiverProfile({
     required this.id,
@@ -2180,6 +2442,7 @@ class CaregiverProfile {
     this.matchedPreferences = 0,
     this.statusLabel,
     this.statusIsActive = false,
+    this.bookingId,
   });
 
   final String id;
@@ -2200,4 +2463,5 @@ class CaregiverProfile {
   final List<String> services;
   final String? statusLabel;
   final bool statusIsActive;
+  final String? bookingId;
 }

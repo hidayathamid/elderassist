@@ -8,6 +8,7 @@ import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:intl/intl.dart' as intl;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
+import 'package:emergencies_disability_assistance_app/widgets/schedule_booking_telegram_sheet.dart';
 
 import 'booking_person_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/profile/profile_addresses_screen.dart';
@@ -94,11 +95,16 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
   bool _isLoading = false;
   String _selectedService = '';
   static const bool _forceToyyibTestAmount = true;
+  static const int _minMinutesBetweenStartEnd = 15;
+  TimeOfDay? _bookInAdvanceStartOverride;
+  TimeOfDay? _bookInAdvanceEndOverride;
+  StateSetter? _scheduleBookingSheetSetState;
   late DateTime _selectedDate;
   late DateTime _scheduleAnchorDate;
   late List<TimeOfDay> _timeOptions;
   late int _selectedTimeIndex;
   late bool _isBookInAdvance;
+  late final int _scheduledDurationMinutes;
   bool _showPaymentMethods = false;
   bool _showServicePreferences = false;
   String? _selectedPaymentMethod;
@@ -106,6 +112,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
   bool _awaitingPaymentResult = false;
   bool _paymentFailureDialogShown = false;
   bool _paymentSuccessDialogShown = false;
+  bool _modalSheetScrimVisible = false;
   late PersonProfile _currentPerson;
   late AddressItem _activeAddress;
   static const double _scheduleChipWidth = 52;
@@ -144,6 +151,10 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     WidgetsBinding.instance.addObserver(this);
     _currentPerson = widget.person;
     _activeAddress = widget.selectedAddress;
+    _scheduledDurationMinutes = _durationMinutes(
+      widget.startTime,
+      widget.endTime,
+    );
     final now = DateTime.now();
     _selectedDate = widget.showScheduleSection
         ? _clampToFuture(widget.scheduleDate)
@@ -202,7 +213,10 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
       final int? statusValue = rawStatus is num ? rawStatus.toInt() : null;
 
       final bool isPaid = statusValue == 1 || paymentStatus == 'PAID';
-      final bool isFailed = statusValue == 3 || paymentStatus == 'FAILED';
+      final bool isCancelled =
+          paymentStatus == 'CANCELLED' || paymentStatus == 'CANCELED';
+      final bool isFailed =
+          statusValue == 3 || paymentStatus == 'FAILED' || isCancelled;
 
       if (isPaid) {
         if (!mounted) return;
@@ -226,7 +240,11 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
           _awaitingPaymentResult = false;
           _pendingPaymentBillCode = null;
         });
-        await _showPaymentErrorDialog('Payment failed. Please try again.');
+        await _showPaymentErrorDialog(
+          isCancelled
+              ? 'Payment was cancelled. Please try again.'
+              : 'Payment failed. Please try again.',
+        );
       }
     } catch (_) {
       // ignore payment status polling errors on resume
@@ -278,6 +296,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
   }
 
   TimeOfDay get _selectedStartTimeValue {
+    if (_isBookInAdvance && _bookInAdvanceStartOverride != null) {
+      return _bookInAdvanceStartOverride!;
+    }
     if (_timeOptions.isNotEmpty &&
         _selectedTimeIndex >= 0 &&
         _selectedTimeIndex < _timeOptions.length) {
@@ -286,12 +307,50 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     return widget.startTime;
   }
 
+  TimeOfDay get _selectedEndTimeValue {
+    final start = _selectedStartTimeValue;
+    if (_isBookInAdvance && _bookInAdvanceEndOverride != null) {
+      return _bookInAdvanceEndOverride!;
+    }
+    if (!_isBookInAdvance) return widget.endTime;
+
+    final range = _weeklyTimeRanges[_selectedDate.weekday];
+    final startMin = _toMinutes(start);
+    final minEndMin = startMin + _minMinutesBetweenStartEnd;
+    int endMin = startMin + _scheduledDurationMinutes;
+
+    if (range != null) {
+      final maxMin = _toMinutes(range.end);
+      if (endMin > maxMin) endMin = maxMin;
+      if (endMin < minEndMin) endMin = minEndMin.clamp(0, maxMin);
+    } else {
+      if (endMin < minEndMin) endMin = minEndMin;
+      endMin = endMin.clamp(0, 24 * 60 - 1);
+    }
+
+    return _fromMinutes(endMin);
+  }
+
+  int _toMinutes(TimeOfDay t) => (t.hour * 60) + t.minute;
+
+  TimeOfDay _fromMinutes(int minutes) {
+    final clamped = minutes.clamp(0, 24 * 60 - 1);
+    return TimeOfDay(hour: clamped ~/ 60, minute: clamped % 60);
+  }
+
+  int _durationMinutes(TimeOfDay start, TimeOfDay end) {
+    final diff = _toMinutes(end) - _toMinutes(start);
+    if (diff >= _minMinutesBetweenStartEnd) return diff;
+    // Fallback for invalid/negative durations (shouldn't happen normally).
+    return 120;
+  }
+
   void _syncTimeOptionsForDate(DateTime date) {
     if (!_isBookInAdvance) return;
     final next = _buildTimeOptionsForDate(date, _weeklyTimeRanges);
     if (next.isEmpty) {
       if (_timeOptions.isNotEmpty) {
-        setState(() {
+        _setStateAndRefreshScheduleSheet(() {
           _timeOptions = const <TimeOfDay>[];
           _selectedTimeIndex = 0;
           _timeAutoCentered = false;
@@ -331,7 +390,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
         });
     if (sameList && _selectedTimeIndex == newIndex) return;
 
-    setState(() {
+    _setStateAndRefreshScheduleSheet(() {
       _timeOptions = next;
       _selectedTimeIndex = newIndex.clamp(0, _timeOptions.length - 1);
       _timeAutoCentered = false;
@@ -368,7 +427,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     }
 
     if (equals(_weeklyTimeRanges, next)) return;
-    setState(() => _weeklyTimeRanges = Map<int, _WeeklyTimeRange>.from(next));
+    _setStateAndRefreshScheduleSheet(
+      () => _weeklyTimeRanges = Map<int, _WeeklyTimeRange>.from(next),
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _syncTimeOptionsForDate(_selectedDate);
@@ -398,7 +459,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     }
     final candidateDate = layoutDays[candidateIndex];
     if (!_isSameDay(candidateDate, _selectedDate)) {
-      setState(() => _selectedDate = candidateDate);
+      _setStateAndRefreshScheduleSheet(() => _selectedDate = candidateDate);
       _syncTimeOptionsForDate(candidateDate);
     }
     _scheduleLastSnappedIndex = candidateIndex;
@@ -428,7 +489,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     }
 
     if (candidateIndex != _selectedTimeIndex) {
-      setState(() => _selectedTimeIndex = candidateIndex);
+      _setStateAndRefreshScheduleSheet(
+        () => _selectedTimeIndex = candidateIndex,
+      );
     }
     _scrollToTimeIndex(candidateIndex);
   }
@@ -458,11 +521,16 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     if (_isSameDay(fallbackDate, _selectedDate)) {
       return _scrollToDateIndex(fallbackIndex, animate: animate);
     }
-    setState(() => _selectedDate = fallbackDate);
+    _setStateAndRefreshScheduleSheet(() => _selectedDate = fallbackDate);
     _syncTimeOptionsForDate(fallbackDate);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scrollToDateIndex(fallbackIndex!, animate: animate);
     });
+  }
+
+  void _setStateAndRefreshScheduleSheet(VoidCallback fn) {
+    setState(fn);
+    _scheduleBookingSheetSetState?.call(() {});
   }
 
   void _scrollToSelectedTimeIndex({bool animate = false}) {
@@ -601,33 +669,43 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
           : (widget.lockedService?.trim() ?? '');
       final pickupDetails = _currentPerson.notes.trim();
       final startTimeValue = _selectedStartTimeValue;
+      final endTimeValue = _selectedEndTimeValue;
       final personAddress =
           (_activeAddress.addressLine ?? _activeAddress.subtitle).trim();
       final billingAmount = _forceToyyibTestAmount ? 2.0 : widget.price;
       final formattedDate = _formatDate(_selectedDate);
       final formattedTime = _formatTimeOfDay(startTimeValue);
+      final formattedEndTime = _formatTimeOfDay(endTimeValue);
       final billName = 'Booking: $serviceLabel';
-      final billDescription =
-          'Care booking for $serviceLabel on ${intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate)} at $formattedTime';
+      final billDescription = _isBookInAdvance
+          ? 'Care booking for $serviceLabel on ${intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate)} from $formattedTime to $formattedEndTime'
+          : 'Care booking for $serviceLabel on ${intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate)} at $formattedTime';
+
+      final bookingInfo = <String, dynamic>{
+        'caregiverId': widget.caregiver.id,
+        'caregiverName': widget.caregiver.name,
+        'caregiverPhoto': widget.caregiver.photoUrl,
+        'servicePreferences': [serviceLabel],
+        'personId': _currentPerson.id,
+        'personName': _currentPerson.name,
+        'personAddress': personAddress,
+        'addressId': _activeAddress.id,
+        'addressLabel': _activeAddress.label ?? _currentPerson.label ?? '',
+        'date': formattedDate,
+        'paymentMethod': _selectedPaymentMethod!,
+        'servicePrice': widget.price,
+        'notes': pickupDetails,
+      };
+      if (_isBookInAdvance) {
+        bookingInfo['startTime'] = formattedTime;
+        bookingInfo['endTime'] = formattedEndTime;
+      } else {
+        bookingInfo['time'] = formattedTime;
+      }
       final checkout = await _createToyyibPayBill(
         serviceLabel: serviceLabel,
         billingAmount: billingAmount,
-        bookingInfo: {
-          'caregiverId': widget.caregiver.id,
-          'caregiverName': widget.caregiver.name,
-          'caregiverPhoto': widget.caregiver.photoUrl,
-          'servicePreferences': [serviceLabel],
-          'personId': _currentPerson.id,
-          'personName': _currentPerson.name,
-          'personAddress': personAddress,
-          'addressId': _activeAddress.id,
-          'addressLabel': _activeAddress.label ?? _currentPerson.label ?? '',
-          'date': formattedDate,
-          'time': formattedTime,
-          'paymentMethod': _selectedPaymentMethod!,
-          'servicePrice': widget.price,
-          'notes': pickupDetails,
-        },
+        bookingInfo: bookingInfo,
         billName: billName,
         billDescription: billDescription,
       );
@@ -666,11 +744,11 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     try {
       final navigator = Navigator.of(context);
       final startTimeValue = _selectedStartTimeValue;
+      final endTimeValue = _selectedEndTimeValue;
       final addressText =
           (_activeAddress.addressLine ?? _activeAddress.subtitle).trim();
       final updates = {
         'date': _formatDate(_selectedDate),
-        'time': _formatTimeOfDay(startTimeValue),
         'personName': _currentPerson.name,
         'personAddress': addressText,
         'personId': _currentPerson.id,
@@ -680,6 +758,15 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
         'addressId': _activeAddress.id,
         'updatedAt': FieldValue.serverTimestamp(),
       };
+      if (_isBookInAdvance) {
+        updates['startTime'] = _formatTimeOfDay(startTimeValue);
+        updates['endTime'] = _formatTimeOfDay(endTimeValue);
+        updates['time'] = FieldValue.delete();
+      } else {
+        updates['time'] = _formatTimeOfDay(startTimeValue);
+        updates['startTime'] = FieldValue.delete();
+        updates['endTime'] = FieldValue.delete();
+      }
       await FirebaseFirestore.instance
           .collection('bookings')
           .doc(widget.editingBookingId)
@@ -749,42 +836,24 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
           ),
         ),
       ),
-      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-        stream: FirebaseFirestore.instance
-            .collection('caregivers')
-            .doc(widget.caregiver.id)
-            .snapshots(),
-        builder: (context, snapshot) {
-          final data = snapshot.data?.data() ?? {};
-          final location = _buildLocation(data);
-          final defaultAddress =
-              (data['defaultAddress'] as String?)?.trim() ?? '';
-          final serviceOptions = _safeStringList(
-            data['servicePreferences'],
-          ).where((s) => s.trim().isNotEmpty).toList();
-          final services = serviceOptions.isNotEmpty
-              ? serviceOptions
-              : widget.caregiver.services;
-          return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      body: Stack(
+        children: [
+          StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
             stream: FirebaseFirestore.instance
-                .collection('availability')
+                .collection('caregivers')
                 .doc(widget.caregiver.id)
                 .snapshots(),
-            builder: (context, availabilitySnapshot) {
-              final availabilityData = availabilitySnapshot.data?.data() ?? {};
-              final blockedRanges = _parseBlockedDateRanges(
-                availabilityData['blockedDates'],
-              );
-              final disabledWeekdays = _parseUnavailableWeekdays(
-                availabilityData['weeklySchedule'],
-              );
-              final weeklyTimeRanges = _parseWeeklyTimeRanges(
-                availabilityData['weeklySchedule'],
-              );
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (!mounted) return;
-                _updateWeeklyTimeRanges(weeklyTimeRanges);
-              });
+            builder: (context, snapshot) {
+              final data = snapshot.data?.data() ?? {};
+              final location = _buildLocation(data);
+              final defaultAddress =
+                  (data['defaultAddress'] as String?)?.trim() ?? '';
+              final serviceOptions = _safeStringList(
+                data['servicePreferences'],
+              ).where((s) => s.trim().isNotEmpty).toList();
+              final services = serviceOptions.isNotEmpty
+                  ? serviceOptions
+                  : widget.caregiver.services;
               return Padding(
                 padding: const EdgeInsets.only(bottom: 90),
                 child: ListView(
@@ -804,20 +873,10 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
                     if (_isBookInAdvance) ...[
                       Align(
                         alignment: Alignment.centerLeft,
-                        child: _buildSectionTitle('Schedule'),
+                        child: _buildSectionTitle('Schedule Booking Time'),
                       ),
-                      const SizedBox(height: 8),
-                      _buildScheduleChips(
-                        blockedDateRanges: blockedRanges,
-                        disabledWeekdays: disabledWeekdays,
-                      ),
-                      const SizedBox(height: 12),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: _buildSectionTitle('Choose Time'),
-                      ),
-                      const SizedBox(height: 8),
-                      _buildTimeChips(),
+                      const SizedBox(height: 6),
+                      _buildScheduleBookingTimeCard(),
                       const SizedBox(height: 16),
                     ],
                     _buildSectionTitle('Service Preferences'),
@@ -846,8 +905,22 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
                 ),
               );
             },
-          );
-        },
+          ),
+          Positioned.fill(
+            child: IgnorePointer(
+              ignoring: true,
+              child: AnimatedOpacity(
+                duration: const Duration(milliseconds: 160),
+                curve: Curves.easeOut,
+                opacity: _modalSheetScrimVisible ? 1 : 0,
+                child: const ColoredBox(
+                  color: Color(0x8A000000),
+                  child: SizedBox.expand(),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
       bottomSheet: Container(
         decoration: BoxDecoration(
@@ -897,6 +970,54 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildScheduleBookingTimeCard() {
+    final dateLabel = intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate);
+    final startLabel = _formatTimeOfDay(_selectedStartTimeValue);
+    final endLabel = _formatTimeOfDay(_selectedEndTimeValue);
+    final bool canEdit = _isEditingBooking && _isBookInAdvance;
+
+    final content = Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildSummaryRow(label: 'Selected date', amount: dateLabel),
+              const Divider(height: 16, color: Color(0x1A000000)),
+              _buildSummaryRow(
+                label: 'Selected time',
+                amount: '$startLabel - $endLabel',
+              ),
+            ],
+          ),
+        ),
+        if (canEdit)
+          const Padding(
+            padding: EdgeInsets.only(left: 10),
+            child: Icon(Icons.chevron_right, size: 18, color: Colors.black26),
+          ),
+      ],
+    );
+
+    final card = Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
+      ),
+      child: content,
+    );
+
+    if (!canEdit) return card;
+    return InkWell(
+      onTap: _openScheduleBookingTimeSheet,
+      borderRadius: BorderRadius.circular(16),
+      child: card,
     );
   }
 
@@ -1097,33 +1218,6 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        if (labelText.isNotEmpty && !_isEditingBooking) ...[
-                          const SizedBox(width: 6),
-                          Flexible(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: _tealAccent.withValues(alpha: 0.10),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: Colors.black12.withValues(alpha: 0.08),
-                                ),
-                              ),
-                              child: Text(
-                                labelText,
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  color: Color(0xFF1B1D29),
-                                  fontWeight: FontWeight.w700,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ),
-                        ],
                       ],
                     ),
                     const SizedBox(height: 2),
@@ -1208,11 +1302,12 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
           (selectedMap['label'] ?? selectedMap['forWho'] ?? selectedItem.label)
               ?.toString();
       final selectedPhone = selectedMap['phone']?.toString();
-      final selectedPhoto = (selectedMap['photoUrl'] ??
-              selectedMap['avatarUrl'] ??
-              selectedMap['profilePhoto'] ??
-              selectedMap['profileImageUrl'])
-          ?.toString();
+      final selectedPhoto =
+          (selectedMap['photoUrl'] ??
+                  selectedMap['avatarUrl'] ??
+                  selectedMap['profilePhoto'] ??
+                  selectedMap['profileImageUrl'])
+              ?.toString();
       _currentPerson = PersonProfile(
         id: selectedMap['id']?.toString() ?? _currentPerson.id,
         name: (selectedName?.trim().isNotEmpty ?? false)
@@ -1236,6 +1331,40 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
         latitude: selectedItem.lat,
         longitude: selectedItem.long,
       );
+    });
+  }
+
+  Future<void> _openScheduleBookingTimeSheet() async {
+    if (!_isBookInAdvance) return;
+    if (!_isEditingBooking) return;
+
+    final initialStart = _bookInAdvanceStartOverride ?? _selectedStartTimeValue;
+    final initialEnd = _bookInAdvanceEndOverride ?? _selectedEndTimeValue;
+    setState(() => _modalSheetScrimVisible = true);
+    ScheduleBookingResult? result;
+    try {
+      result = await showScheduleBookingTelegramSheet(
+        context: context,
+        caregiverId: widget.caregiver.id,
+        initialDay: _normalizeDate(_selectedDate),
+        initialStart: initialStart,
+        initialEnd: initialEnd,
+        primaryColor: _actionGold,
+        excludeBookingId: widget.editingBookingId,
+        allowInitialDayEvenIfUnavailable: true,
+        barrierColor: Colors.transparent,
+      );
+    } finally {
+      if (mounted) setState(() => _modalSheetScrimVisible = false);
+    }
+    final confirmed = result;
+    if (confirmed == null) return;
+
+    _setStateAndRefreshScheduleSheet(() {
+      _selectedDate = confirmed.day;
+      _scheduleAnchorDate = _normalizeDate(confirmed.day);
+      _bookInAdvanceStartOverride = confirmed.start;
+      _bookInAdvanceEndOverride = confirmed.end;
     });
   }
 
@@ -1778,6 +1907,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
   Widget _buildBookingSummaryDetails() {
     final dateLabel = intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate);
     final timeLabel = _formatTimeOfDay(_selectedStartTimeValue);
+    final endTimeLabel = _formatTimeOfDay(_selectedEndTimeValue);
     final serviceLabel = _selectedService.isEmpty
         ? 'General care'
         : _selectedService;
@@ -1800,7 +1930,11 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _buildSummaryRow(label: 'Date', amount: dateLabel),
-          _buildSummaryRow(label: 'Time', amount: timeLabel),
+          if (_isBookInAdvance) ...[
+            _buildSummaryRow(label: 'Start time', amount: timeLabel),
+            _buildSummaryRow(label: 'End time', amount: endTimeLabel),
+          ] else
+            _buildSummaryRow(label: 'Time', amount: timeLabel),
           _buildSummaryRow(label: 'Service', amount: serviceLabel),
           const Divider(height: 1, color: Colors.grey),
           const SizedBox(height: 8),
@@ -1818,6 +1952,36 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSelectedScheduleSummaryCard() {
+    final dateLabel = intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
+      ),
+      child: _buildSummaryRow(label: 'Selected date', amount: dateLabel),
+    );
+  }
+
+  Widget _buildSelectedTimeSummaryCard() {
+    final startLabel = _formatTimeOfDay(_selectedStartTimeValue);
+    final endLabel = _formatTimeOfDay(_selectedEndTimeValue);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
+      ),
+      child: _buildSummaryRow(
+        label: 'Selected time',
+        amount: '$startLabel - $endLabel',
       ),
     );
   }
@@ -2409,19 +2573,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
   Future<void> _showPaymentErrorDialog(String message) async {
     if (_paymentSuccessDialogShown) return;
     if (!mounted) return;
-    await showDialog<void>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Payment Error'),
-        content: Text(message),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
+    await _showPaymentDialog(title: 'Payment failed', message: message);
   }
 
   Future<void> _showPaymentResultDialog({
@@ -2429,15 +2581,48 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     required String message,
   }) async {
     if (!mounted) return;
+    await _showPaymentDialog(title: title, message: message);
+  }
+
+  Future<void> _showPaymentDialog({
+    required String title,
+    required String message,
+  }) async {
+    if (!mounted) return;
     await showDialog<void>(
       context: context,
+      barrierDismissible: false,
       builder: (_) => AlertDialog(
-        title: Text(title),
-        content: Text(message),
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: Text(
+          title,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+        content: Text(
+          message,
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: Colors.black87),
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actionsPadding: const EdgeInsets.only(bottom: 12),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('OK'),
+          SizedBox(
+            width: 120,
+            child: ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _actionGold,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                textStyle: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              child: const Text('OK'),
+            ),
           ),
         ],
       ),

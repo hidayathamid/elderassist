@@ -10,11 +10,14 @@ import 'package:intl/intl.dart';
 
 import 'package:emergencies_disability_assistance_app/screens/caregiver/jobs/caregiver_job_details_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_booking_details_screen.dart';
+import 'package:emergencies_disability_assistance_app/screens/user/activity/track_caregiver_screen.dart';
 import 'package:emergencies_disability_assistance_app/models/caregiver_job.dart';
 import 'package:emergencies_disability_assistance_app/widgets/caregiver_job_card.dart';
+import 'package:emergencies_disability_assistance_app/widgets/safe_network_image.dart';
 
 import '../profile/profile_availability_schedule_screen.dart';
 import '../profile/profile_documents_screen.dart';
+import '../profile/profile_review_screen.dart';
 import 'package:emergencies_disability_assistance_app/models/payment_document_target.dart';
 import '../../user/profile/profile_payments_screen.dart';
 import '../../user/profile/profile_services_screen.dart';
@@ -315,6 +318,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                               child: ListView(
                                 controller: scrollController,
                                 physics: const BouncingScrollPhysics(),
+                                clipBehavior: Clip.none,
                                 children: [
                                   SizedBox(
                                     height: _calculateTopSpacing(showAppBar),
@@ -459,6 +463,8 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     required String greeting,
   }) {
     final avatarInitial = _deriveAvatarInitial(name);
+    final trimmedPhotoUrl = photoUrl?.trim();
+    final hasPhoto = trimmedPhotoUrl?.isNotEmpty == true;
     final theme = Theme.of(context);
     return Container(
       key: _headerKey,
@@ -497,18 +503,33 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                   212,
                   212,
                 ).withAlpha(40),
-                backgroundImage: photoUrl != null && photoUrl.isNotEmpty
-                    ? NetworkImage(photoUrl)
-                    : null,
-                child: photoUrl == null || photoUrl.isEmpty
-                    ? Text(
-                        avatarInitial,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          color: _primaryBlue,
+                child: ClipOval(
+                  child: SizedBox(
+                    width: 48,
+                    height: 48,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Center(
+                          child: Text(
+                            avatarInitial,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: _primaryBlue,
+                            ),
+                          ),
                         ),
-                      )
-                    : null,
+                        if (hasPhoto)
+                          SafeNetworkImage(
+                            trimmedPhotoUrl!,
+                            fit: BoxFit.cover,
+                            placeholder: const SizedBox.shrink(),
+                            errorWidget: const SizedBox.shrink(),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
@@ -550,15 +571,12 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
   }) {
     final actions = [
       _QuickActionButtonData(
-        icon: isAvailable ? Icons.pause_circle_filled : Icons.play_circle_fill,
-        label: isAvailable ? 'Available' : 'Start Day',
-        onTap: () => _onStartDayTap(
+        icon: Icons.rate_review_outlined,
+        label: 'Reviews',
+        onTap: () => Navigator.push(
           context,
-          caregiverRef,
-          hasAssignedBooking,
-          isAvailable,
+          MaterialPageRoute(builder: (_) => const ProfileReviewScreen()),
         ),
-        disabled: hasAssignedBooking,
       ),
       _QuickActionButtonData(
         icon: Icons.calendar_today,
@@ -590,6 +608,11 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
         ),
       ),
     ];
+
+    final startDayEnabled = !hasAssignedBooking;
+    final startDayLabel = isAvailable ? 'End Day' : 'Start Day';
+    final startDayIcon =
+        isAvailable ? Icons.pause_circle_filled : Icons.play_circle_fill;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -597,14 +620,72 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
           title: 'Quick Actions',
           hint: 'Shortcuts to commonly used caregiver workflows.',
         ),
-        const SizedBox(height: 6),
-        Row(
-          children: [
-            for (var i = 0; i < actions.length; i++) ...[
-              if (i != 0) const SizedBox(width: 8),
-              Expanded(child: _QuickActionButton(action: actions[i])),
+        const SizedBox(height: 12),
+        Container(
+          decoration: _premiumCardDecoration(radius: 20),
+          padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  for (var i = 0; i < actions.length; i++) ...[
+                    if (i != 0) const SizedBox(width: 8),
+                    Expanded(child: _QuickActionButton(action: actions[i])),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: startDayEnabled
+                      ? () => _onStartDayTap(
+                        context,
+                        caregiverRef,
+                        hasAssignedBooking,
+                        isAvailable,
+                      )
+                      : null,
+                  icon: Icon(startDayIcon, size: 18),
+                  label: Text(startDayLabel),
+                  style: ButtonStyle(
+                    backgroundColor: WidgetStateProperty.resolveWith<Color?>(
+                      (states) =>
+                          startDayEnabled ? _primaryBlue : Colors.grey.shade300,
+                    ),
+                    foregroundColor: WidgetStateProperty.resolveWith<Color?>(
+                      (states) =>
+                          startDayEnabled ? Colors.white : Colors.grey.shade600,
+                    ),
+                    elevation: WidgetStateProperty.all(startDayEnabled ? 1.0 : 0.0),
+                    padding: WidgetStateProperty.all(
+                      const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    shape: WidgetStateProperty.all(
+                      RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                    textStyle: WidgetStateProperty.all(
+                      const TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ),
+              ),
+              if (!startDayEnabled) ...[
+                const SizedBox(height: 6),
+                Text(
+                  'Start day disabled while you have an assigned booking.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.black.withValues(alpha: 0.55),
+                  ),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ],
     );
@@ -639,8 +720,8 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                 child: CaregiverJobCard(
                   job: job,
                   onView: () => _openBookingDetails(context, job.bookingId),
-                  onTrack: () =>
-                      _openCaregiverJobDetails(context, job.bookingId),
+                  onTrack: () => _openTrackJob(context, job),
+                  matchHomeStyle: true,
                 ),
               ),
             ),
@@ -685,10 +766,11 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                           context,
                           scheduledJobs[i].bookingId,
                         ),
-                        onTrack: () => _openCaregiverJobDetails(
+                        onTrack: () => _openTrackJob(
                           context,
-                          scheduledJobs[i].bookingId,
+                          scheduledJobs[i],
                         ),
+                        matchHomeStyle: true,
                       ),
                     ),
                   ],
@@ -1148,6 +1230,37 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
       context,
       MaterialPageRoute(
         builder: (_) => CaregiverJobDetailsScreen(bookingId: bookingId),
+      ),
+    );
+  }
+
+  Future<void> _openTrackJob(BuildContext context, CaregiverJob job) async {
+    final bookingId = job.bookingId.trim();
+    if (bookingId.isEmpty) return;
+    final caregiverId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (caregiverId.isEmpty) return;
+    String caregiverName = 'Caregiver';
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('caregivers')
+          .doc(caregiverId)
+          .get();
+      final data = doc.data();
+      final raw = data?['name'];
+      if (raw is String && raw.trim().isNotEmpty) caregiverName = raw.trim();
+    } catch (_) {}
+    if (!context.mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TrackCaregiverScreen(
+          bookingId: bookingId,
+          caregiverName: caregiverName,
+          caregiverId:
+              job.caregiverId.trim().isNotEmpty ? job.caregiverId.trim() : caregiverId,
+          personId: job.personId.trim().isNotEmpty ? job.personId.trim() : null,
+          showStatusUpdateButton: true,
+        ),
       ),
     );
   }

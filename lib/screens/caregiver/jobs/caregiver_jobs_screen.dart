@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_booking_details_screen.dart';
+import 'package:emergencies_disability_assistance_app/screens/user/activity/track_caregiver_screen.dart';
 import 'package:emergencies_disability_assistance_app/widgets/caregiver_job_card.dart';
 import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.dart';
 
@@ -220,6 +221,37 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
     );
   }
 
+  Future<void> _openTrackJob(BuildContext context, CaregiverJob job) async {
+    final bookingId = job.bookingId.trim();
+    if (bookingId.isEmpty) return;
+    final caregiverId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (caregiverId.isEmpty) return;
+    String caregiverName = 'Caregiver';
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('caregivers')
+          .doc(caregiverId)
+          .get();
+      final data = doc.data();
+      final raw = data?['name'];
+      if (raw is String && raw.trim().isNotEmpty) caregiverName = raw.trim();
+    } catch (_) {}
+    if (!context.mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TrackCaregiverScreen(
+          bookingId: bookingId,
+          caregiverName: caregiverName,
+          caregiverId:
+              job.caregiverId.trim().isNotEmpty ? job.caregiverId.trim() : caregiverId,
+          personId: job.personId.trim().isNotEmpty ? job.personId.trim() : null,
+          showStatusUpdateButton: true,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
@@ -357,6 +389,7 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
                   icon: Icons.bolt_rounded,
                   title: 'No active jobs yet',
                   subtitle: 'Bookings you are assigned to will show up here.',
+                  onTrack: (job) => _openTrackJob(context, job),
                 ),
                 _JobTabContent(
                   jobs: upcoming,
@@ -364,6 +397,7 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
                   title: 'No upcoming assignments yet',
                   subtitle:
                       'Once you receive a booking it will appear in this list.',
+                  onTrack: (job) => _openTrackJob(context, job),
                 ),
                 _buildHistoryTab(
                   history,
@@ -409,6 +443,7 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
               ),
             );
           },
+          onTrack: () => _openTrackJob(context, job),
         );
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 2),
@@ -564,12 +599,14 @@ class _JobTabContent extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.subtitle,
+    this.onTrack,
   });
 
   final List<CaregiverJob> jobs;
   final IconData icon;
   final String title;
   final String subtitle;
+  final void Function(CaregiverJob job)? onTrack;
 
   @override
   Widget build(BuildContext context) {
@@ -594,6 +631,7 @@ class _JobTabContent extends StatelessWidget {
               ),
             );
           },
+          onTrack: onTrack == null ? null : () => onTrack!(job),
         );
       },
     );

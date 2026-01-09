@@ -29,6 +29,7 @@ class ChatListScreen extends StatefulWidget {
     required this.stream,
     required this.userId,
     this.hideCallAction = false,
+    this.includeChat,
     this.onBack,
     this.actions,
   });
@@ -37,6 +38,7 @@ class ChatListScreen extends StatefulWidget {
   final Stream<QuerySnapshot<Map<String, dynamic>>> stream;
   final String userId;
   final bool hideCallAction;
+  final bool Function(QueryDocumentSnapshot<Map<String, dynamic>> doc)? includeChat;
   final VoidCallback? onBack;
   final List<Widget>? actions;
 
@@ -242,7 +244,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
   Widget _buildDeleteBackground(VoidCallback onDelete) {
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
+      margin: const EdgeInsets.symmetric(vertical: 1),
       decoration: BoxDecoration(
         color: Colors.red.shade600,
         borderRadius: BorderRadius.circular(_chatCardRadius),
@@ -297,7 +299,12 @@ class _ChatListScreenState extends State<ChatListScreen> {
               List<QueryDocumentSnapshot<Map<String, dynamic>>>.of(chats)
                 ..sort(_compareByTimestamp);
           final visibleChats = sortedChats.where((doc) {
-            return !_isChatDocHidden(doc) && !_hiddenChatIds.contains(doc.id);
+            if (_isChatDocHidden(doc) || _hiddenChatIds.contains(doc.id)) {
+              return false;
+            }
+            final filter = widget.includeChat;
+            if (filter != null && !filter(doc)) return false;
+            return true;
           }).toList();
           if (visibleChats.isEmpty) {
             return _buildEmptyGuidance(
@@ -322,12 +329,12 @@ class _ChatListScreenState extends State<ChatListScreen> {
                 Expanded(
                   child: ListView.separated(
                     padding: const EdgeInsets.symmetric(
-                      vertical: 2,
+                      vertical: 0,
                       horizontal: 12,
                     ),
                     physics: const BouncingScrollPhysics(),
                     itemCount: visibleChats.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 6),
+                    separatorBuilder: (_, __) => const SizedBox(height: 3),
                     itemBuilder: (context, index) {
                       final chatDoc = visibleChats[index];
                       final data = chatDoc.data();
@@ -346,7 +353,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
                       return Padding(
                         key: ValueKey(chatDoc.id),
-                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        padding: const EdgeInsets.symmetric(vertical: 1),
                         child: _ChatSwipeRevealCard(
                           id: chatDoc.id,
                           resetId: _resetSwipeFor,

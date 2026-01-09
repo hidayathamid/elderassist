@@ -206,9 +206,16 @@ class _ProfileOverviewContent extends StatelessWidget {
   }
 
   BookingStatus _profileBookingStatusFromString(String status) {
-    switch (status.toUpperCase()) {
+    final normalized = status
+        .toUpperCase()
+        .replaceAll(' ', '_')
+        .replaceAll('-', '_')
+        .replaceAll('__', '_');
+    switch (normalized) {
       case 'ONGOING':
       case 'IN_PROGRESS':
+      case 'NOTIFY':
+      case 'HANDLE_CLIENT':
         return BookingStatus.ongoing;
       case 'COMPLETED':
         return BookingStatus.completed;

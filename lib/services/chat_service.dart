@@ -377,9 +377,24 @@ class ChatService {
   }
 
   Future<void> markChatHidden(String chatId, String userId) async {
-    await _db.collection('chats').doc(chatId).set({
-      'hidden.$userId': true,
-    }, SetOptions(merge: true));
+    final trimmedChatId = chatId.trim();
+    final trimmedUserId = userId.trim();
+    if (trimmedChatId.isEmpty || trimmedUserId.isEmpty) return;
+
+    final ref = _db.collection('chats').doc(trimmedChatId);
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(ref);
+      final data = snap.data() ?? const <String, dynamic>{};
+
+      final hiddenValue = data['hidden'];
+      final Map<String, dynamic> nextHidden = {};
+      if (hiddenValue is Map) {
+        nextHidden.addAll(hiddenValue.cast<String, dynamic>());
+      }
+      nextHidden[trimmedUserId] = true;
+
+      tx.set(ref, {'hidden': nextHidden}, SetOptions(merge: true));
+    });
   }
 
   static int unreadFromDocument(

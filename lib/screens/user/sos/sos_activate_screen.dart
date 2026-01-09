@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:emergencies_disability_assistance_app/widgets/layout_constants.dart';
 import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 
 import 'sos_finding_screen.dart';
@@ -11,6 +12,10 @@ import 'sos_finding_screen.dart';
 const Color _sosHeadingColor = Color(0xFF1B1D29);
 const Color _sosSubTextColor = Color(0xFF4C4F65);
 const Color _accentGreen = Color(0xFF00A8A7);
+const Color _pageBackground = Color(0xFFF7F8FA);
+const Color _cardBorderColor = Color(0xFFD1D6DE);
+const double _cardRadius = 18;
+const double _contentMaxWidth = 520;
 const Color _reasonChipBorder = Color(0xFFCCCCCC);
 const TextStyle _reasonChipBaseStyle = TextStyle(
   fontSize: 10.5,
@@ -39,15 +44,28 @@ const List<String> _sosReasons = [
 ];
 
 class SosActivateScreen extends StatefulWidget {
-  const SosActivateScreen({super.key});
+  const SosActivateScreen({
+    super.key,
+    this.tabIndexListenable,
+    this.tabIndex = 2,
+  });
+
+  final ValueListenable<int>? tabIndexListenable;
+  final int tabIndex;
 
   @override
   State<SosActivateScreen> createState() => _SosActivateScreenState();
 }
 
 class _SosActivateScreenState extends State<SosActivateScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late final AnimationController _holdController;
+
+  AnimationController? _entryController;
+  Animation<double>? _entryFade;
+  Animation<Offset>? _entrySlide;
+  bool _wasActive = false;
+
   int _selectedAddressIndex = 0;
   int _selectedReasonIndex = 0;
   bool _isHolding = false;
@@ -190,12 +208,64 @@ class _SosActivateScreenState extends State<SosActivateScreen>
         _onHoldComplete();
       }
     });
+
+    final entryController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+    _entryController = entryController;
+    _entryFade = CurvedAnimation(
+      parent: entryController,
+      curve: Curves.easeOutCubic,
+    );
+    _entrySlide = Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero)
+        .animate(
+          CurvedAnimation(parent: entryController, curve: Curves.easeOutCubic),
+        );
+
+    _wasActive =
+        (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+        widget.tabIndex;
+    widget.tabIndexListenable?.addListener(_handleTabChange);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_wasActive) {
+        _entryController?.forward(from: 0);
+      } else {
+        _entryController?.value = 1;
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant SosActivateScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tabIndexListenable != widget.tabIndexListenable) {
+      oldWidget.tabIndexListenable?.removeListener(_handleTabChange);
+      widget.tabIndexListenable?.addListener(_handleTabChange);
+      _wasActive =
+          (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+          widget.tabIndex;
+    }
+  }
+
+  void _handleTabChange() {
+    final currentIndex = widget.tabIndexListenable?.value;
+    if (currentIndex == null) return;
+    final isActive = currentIndex == widget.tabIndex;
+    if (isActive && !_wasActive) {
+      _entryController?.forward(from: 0);
+    }
+    _wasActive = isActive;
   }
 
   @override
   void dispose() {
     _hideAddressDropdown();
     _holdController.dispose();
+    widget.tabIndexListenable?.removeListener(_handleTabChange);
+    _entryController?.dispose();
     super.dispose();
   }
 
@@ -441,15 +511,9 @@ class _SosActivateScreenState extends State<SosActivateScreen>
       builder: (context, snapshot) {
         final records = _buildAddressRecords(snapshot.data);
         if (records.isEmpty) {
-          return Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: Colors.grey[300]!),
-            ),
-            child: const Center(child: CircularProgressIndicator()),
+          return const _PremiumCard(
+            padding: EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+            child: Center(child: CircularProgressIndicator()),
           );
         }
         _addressRecords = records;
@@ -458,68 +522,69 @@ class _SosActivateScreenState extends State<SosActivateScreen>
           records.length - 1,
         );
         final current = records[selectedIndex];
-        return SizedBox(
-          width: double.infinity,
-          child: Material(
-            color: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(16),
-              onTap: () => _showAddressMenu(context, records),
-              child: Container(
-                width: double.infinity,
-                constraints: const BoxConstraints(minHeight: 48),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 10,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.grey[300]!),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.location_on,
-                      color: Color(0xFF00A8A7),
-                      size: 20,
+        return _PremiumCard(
+          padding: EdgeInsets.zero,
+          child: Builder(
+            builder: (headerContext) {
+              return Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(_cardRadius),
+                  onTap: () => _showAddressMenu(headerContext, records),
+                  child: Container(
+                    width: double.infinity,
+                    constraints: const BoxConstraints(minHeight: 50),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
                     ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            current.display.primary,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w700,
-                              color: _sosHeadingColor,
-                              fontSize: 14,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.location_on,
+                          color: _accentGreen,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                current.display.primary,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  color: _sosHeadingColor,
+                                  fontSize: 13,
+                                  letterSpacing: -0.1,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                current.display.secondary,
+                                style: const TextStyle(
+                                  color: _sosSubTextColor,
+                                  fontSize: 11,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            current.display.secondary,
-                            style: const TextStyle(
-                              color: _sosSubTextColor,
-                              fontSize: 11,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
+                        ),
+                        const Icon(
+                          Icons.expand_more_rounded,
+                          size: 22,
+                          color: Colors.black54,
+                        ),
+                      ],
                     ),
-                    const Icon(Icons.arrow_drop_down, color: Colors.black54),
-                  ],
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
           ),
         );
       },
@@ -579,7 +644,7 @@ class _SosActivateScreenState extends State<SosActivateScreen>
   }
 
   Widget _buildHoldButton(BuildContext context) {
-    final circleSize = 170.0;
+    final circleSize = 152.0;
     final theme = Theme.of(context);
     return Stack(
       alignment: Alignment.center,
@@ -601,10 +666,10 @@ class _SosActivateScreenState extends State<SosActivateScreen>
           onTapCancel: _onHoldCancel,
           onTapUp: (_) => _onHoldCancel(),
           behavior: HitTestBehavior.opaque,
-          child: Container(
-            width: circleSize - 40,
-            height: circleSize - 40,
-            decoration: BoxDecoration(
+            child: Container(
+              width: circleSize - 40,
+              height: circleSize - 40,
+              decoration: BoxDecoration(
               shape: BoxShape.circle,
               gradient: LinearGradient(
                 colors: [
@@ -629,7 +694,7 @@ class _SosActivateScreenState extends State<SosActivateScreen>
                   : Icon(
                       _isHolding ? Icons.favorite : Icons.notifications_active,
                       color: Colors.white,
-                      size: 46,
+                      size: 42,
                     ),
             ),
           ),
@@ -648,59 +713,156 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     );
   }
 
+  Widget _buildSectionHeader(String title) {
+    return Text(
+      title,
+      style: const TextStyle(
+        fontSize: 13,
+        fontWeight: FontWeight.w800,
+        color: _sosHeadingColor,
+        letterSpacing: -0.1,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Scaffold(
-      backgroundColor: Colors.white,
-      appBar: buildProfileStyleAppBar(title: 'Emergency Assistance'),
-      body: Padding(
-        padding: EdgeInsets.symmetric(
-          horizontal: kScreenHorizontalPaddingValue,
-          vertical: 16,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Need help now?',
-              style: theme.textTheme.titleLarge?.copyWith(
-                fontWeight: FontWeight.w600,
-                color: _sosHeadingColor,
+    final entryFade = _entryFade ?? const AlwaysStoppedAnimation<double>(1);
+    final entrySlide =
+        _entrySlide ?? const AlwaysStoppedAnimation<Offset>(Offset.zero);
+
+    return FadeTransition(
+      opacity: entryFade,
+      child: SlideTransition(
+        position: entrySlide,
+        child: Scaffold(
+          backgroundColor: _pageBackground,
+          appBar: buildProfileStyleAppBar(title: 'Emergency Assistance'),
+          body: SafeArea(
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: _contentMaxWidth),
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(
+                    kScreenHorizontalPaddingValue,
+                    16,
+                    kScreenHorizontalPaddingValue,
+                    18,
+                  ),
+                  physics: const BouncingScrollPhysics(),
+                  children: [
+                    _PremiumCard(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            width: 40,
+                            height: 40,
+                            decoration: BoxDecoration(
+                              color: _accentGreen.withValues(alpha: 0.10),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: _accentGreen.withValues(alpha: 0.22),
+                              ),
+                            ),
+                            child: const Icon(
+                              Icons.sos_rounded,
+                              size: 20,
+                              color: _accentGreen,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Need help now?',
+                                  style: theme.textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.w800,
+                                    color: _sosHeadingColor,
+                                    letterSpacing: -0.2,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  'Choose your location and why you need support before activating SOS.',
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: _sosSubTextColor,
+                                    height: 1.35,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    _buildSectionHeader('Location'),
+                    const SizedBox(height: 10),
+                    _buildAddressHeader(context),
+                    const SizedBox(height: 16),
+                    _buildSectionHeader('Reason'),
+                    const SizedBox(height: 10),
+                    _buildReasonChips(context),
+                    const SizedBox(height: 16),
+                    _PremiumCard(
+                      padding: const EdgeInsets.fromLTRB(14, 16, 14, 16),
+                      child: Column(
+                        children: [
+                          Center(child: _buildHoldButton(context)),
+                          const SizedBox(height: 12),
+                          Text(
+                            'Once helpers accept your alert we will guide them to your selected address.',
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: _sosSubTextColor,
+                              height: 1.35,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-            const SizedBox(height: 4),
-            Text(
-              'Choose your location and why you need support before activating SOS.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: _sosSubTextColor,
-              ),
-            ),
-            const SizedBox(height: 16),
-            _buildAddressHeader(context),
-            const SizedBox(height: 16),
-            Text(
-              'Reason',
-              style: theme.textTheme.bodySmall?.copyWith(
-                fontWeight: FontWeight.w600,
-                color: _sosHeadingColor,
-              ),
-            ),
-            const SizedBox(height: 8),
-            _buildReasonChips(context),
-            const SizedBox(height: 18),
-            Center(child: _buildHoldButton(context)),
-            const SizedBox(height: 16),
-            Text(
-              'Once helpers accept your alert we will guide them to your selected address.',
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: _sosSubTextColor,
-              ),
-            ),
-          ],
+          ),
         ),
       ),
+    );
+  }
+}
+
+class _PremiumCard extends StatelessWidget {
+  const _PremiumCard({
+    required this.child,
+    this.padding = const EdgeInsets.all(14),
+  });
+
+  final Widget child;
+  final EdgeInsets padding;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: padding,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(_cardRadius),
+        border: Border.all(color: _cardBorderColor),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.12),
+            blurRadius: 16,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: child,
     );
   }
 }

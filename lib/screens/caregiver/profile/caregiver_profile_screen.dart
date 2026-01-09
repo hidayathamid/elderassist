@@ -15,6 +15,7 @@ import '../../user/profile/profile_services_screen.dart';
 import '../../user/profile/profile_payments_screen.dart';
 import 'profile_availability_schedule_screen.dart';
 import 'profile_documents_screen.dart';
+import 'profile_review_screen.dart';
 
 const Color _accentGold = Color(0xFFF4B63D);
 const Color _accentBlue = Color(0xFF00A8A7);
@@ -313,6 +314,10 @@ class _CaregiverProfileScreenState extends State<CaregiverProfileScreen>
     required DocumentReference<Map<String, dynamic>> caregiverRef,
   }) {
     return SingleChildScrollView(
+      physics: const BouncingScrollPhysics(),
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).padding.bottom + 96,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -637,6 +642,19 @@ class _CaregiverProfileScreenState extends State<CaregiverProfileScreen>
                           builder: (_) => const ProfilePaymentsScreen(
                             target: PaymentDocumentTarget.caregiver,
                           ),
+                        ),
+                      );
+                    },
+                  ),
+                  const _ZUSDivider(),
+                  _ZUSRow(
+                    icon: Icons.rate_review_outlined,
+                    label: 'Reviews',
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const ProfileReviewScreen(),
                         ),
                       );
                     },

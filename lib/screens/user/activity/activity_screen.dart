@@ -67,11 +67,7 @@ const BorderRadius _activityCardBorderRadius = BorderRadius.all(
 );
 
 class ActivityScreen extends StatefulWidget {
-  const ActivityScreen({
-    super.key,
-    this.tabIndexListenable,
-    this.tabIndex = 3,
-  });
+  const ActivityScreen({super.key, this.tabIndexListenable, this.tabIndex = 3});
 
   final ValueListenable<int>? tabIndexListenable;
   final int tabIndex;
@@ -102,11 +98,17 @@ class _ActivityScreenState extends State<ActivityScreen>
   );
 
   BookingStatus _statusFromString(String status) {
-    final normalized = status.toUpperCase();
+    final normalized = status
+        .toUpperCase()
+        .replaceAll(' ', '_')
+        .replaceAll('-', '_')
+        .replaceAll('__', '_');
     switch (normalized) {
       case 'ONGOING':
       case 'IN_PROGRESS':
       case 'ASSIGNED':
+      case 'NOTIFY':
+      case 'HANDLE_CLIENT':
         return BookingStatus.ongoing;
       case 'COMPLETED':
       case 'EMERGENCY':
@@ -134,17 +136,13 @@ class _ActivityScreenState extends State<ActivityScreen>
       parent: entryController,
       curve: Curves.easeOutCubic,
     );
-    _entrySlide = Tween<Offset>(
-      begin: const Offset(0, 0.02),
-      end: Offset.zero,
-    ).animate(
-      CurvedAnimation(
-        parent: entryController,
-        curve: Curves.easeOutCubic,
-      ),
-    );
+    _entrySlide = Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero)
+        .animate(
+          CurvedAnimation(parent: entryController, curve: Curves.easeOutCubic),
+        );
     _wasActive =
-        (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+        (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+        widget.tabIndex;
     widget.tabIndexListenable?.addListener(_handleTabChange);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -178,7 +176,8 @@ class _ActivityScreenState extends State<ActivityScreen>
       oldWidget.tabIndexListenable?.removeListener(_handleTabChange);
       widget.tabIndexListenable?.addListener(_handleTabChange);
       _wasActive =
-          (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+          (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+          widget.tabIndex;
     }
   }
 
@@ -204,9 +203,9 @@ class _ActivityScreenState extends State<ActivityScreen>
   ActivityBooking _mapFromDoc(Map<String, dynamic> data, String docId) {
     final date = (data['date'] as String?) ?? '';
     final time = (data['time'] as String?) ?? '';
-    final scheduledDate = date;
-    final startTime = time;
-    final endTime = time;
+    final scheduledDate = (data['scheduledDate'] as String?) ?? date;
+    final startTime = (data['startTime'] as String?) ?? '';
+    final endTime = (data['endTime'] as String?) ?? '';
     final paymentMethod = (data['paymentMethod'] as String?) ?? 'Unknown';
     final servicePrice = (data['servicePrice'] as num?)?.toDouble() ?? 0.0;
     final rawStatus = ((data['status'] as String?) ?? 'PENDING')
@@ -247,8 +246,9 @@ class _ActivityScreenState extends State<ActivityScreen>
       final hidden = (data['hidden'] as bool?) ?? false;
       if (hidden) return null;
       final rawStatus = (data['status'] as String?)?.trim().toUpperCase();
-      final paymentStatus =
-          (data['paymentStatus'] as String?)?.trim().toUpperCase();
+      final paymentStatus = (data['paymentStatus'] as String?)
+          ?.trim()
+          .toUpperCase();
       if (rawStatus == 'PAYMENT_FAILED' ||
           rawStatus == 'PENDING_PAYMENT' ||
           paymentStatus == 'FAILED') {
@@ -303,8 +303,6 @@ class _ActivityScreenState extends State<ActivityScreen>
       );
     }
 
-    final userId = user.uid;
-    final unreadStream = _chatService.streamUnreadCountForUser(userId);
     return FadeTransition(
       opacity: entryFade,
       child: SlideTransition(
@@ -329,67 +327,6 @@ class _ActivityScreenState extends State<ActivityScreen>
               return _buildActivityContent(enriched);
             },
           ),
-          floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
-          floatingActionButton: StreamBuilder<int>(
-            stream: unreadStream,
-            builder: (context, snapshot) {
-              final badgeCount = snapshot.data ?? 0;
-              return Stack(
-                alignment: Alignment.center,
-                clipBehavior: Clip.none,
-                children: [
-                  GestureDetector(
-                    onTap: _navigateToChatList,
-                    child: Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        shape: BoxShape.circle,
-                        border: Border.all(color: _activityCardBorderColor),
-                        boxShadow: [_statusCardShadow],
-                      ),
-                      child: const Icon(
-                        Icons.chat_bubble_outline,
-                        color: activityAccentBlue,
-                        size: 20,
-                      ),
-                    ),
-                  ),
-                  if (badgeCount > 0)
-                    Positioned(
-                      bottom: -4,
-                      right: -4,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 7,
-                          vertical: 2.5,
-                        ),
-                        decoration: BoxDecoration(
-                          color: activityAccentBlue,
-                          borderRadius: BorderRadius.circular(24),
-                          boxShadow: const [
-                            BoxShadow(
-                              color: Colors.black26,
-                              blurRadius: 10,
-                              offset: Offset(0, 5),
-                            ),
-                          ],
-                        ),
-                        child: Text(
-                          badgeCount.toString(),
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: Colors.white,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              );
-            },
-          ),
         ),
       ),
     );
@@ -400,7 +337,10 @@ class _ActivityScreenState extends State<ActivityScreen>
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => const UserChatListScreen(showBackButton: true),
+        builder: (_) => const UserChatListScreen(
+          showBackButton: true,
+          showPersonChats: false,
+        ),
       ),
     );
   }
@@ -774,7 +714,9 @@ class _ActivityScreenState extends State<ActivityScreen>
 
     final body = visibleList.isEmpty
         ? _buildEmptyState(icon, title, subtitle)
-        : (isHistory ? _buildHistoryList(visibleList) : _buildList(visibleList));
+        : (isHistory
+              ? _buildHistoryList(visibleList)
+              : _buildList(visibleList));
 
     return body;
   }
@@ -806,20 +748,35 @@ class _ActivityScreenState extends State<ActivityScreen>
   }
 
   Widget _buildActivityContent(List<_EnrichedBooking> enriched) {
-    final upcoming = enriched.where((entry) {
-      return entry.booking.status == BookingStatus.pending ||
-          entry.booking.status == BookingStatus.ongoing;
-    }).toList();
-    final history = enriched.where((entry) {
-      return entry.booking.status == BookingStatus.completed ||
-          entry.booking.status == BookingStatus.cancelled;
-    }).toList();
+    String normalizeStatus(String value) {
+      return value
+          .trim()
+          .toUpperCase()
+          .replaceAll(' ', '_')
+          .replaceAll('-', '_')
+          .replaceAll('__', '_');
+    }
+
+    bool isScheduled(_EnrichedBooking entry) =>
+        normalizeStatus(entry.status) == 'SCHEDULED';
+
+    bool isHistory(_EnrichedBooking entry) =>
+        entry.booking.status == BookingStatus.completed ||
+        entry.booking.status == BookingStatus.cancelled;
+
+    final active = enriched
+        .where((entry) => !isHistory(entry) && !isScheduled(entry))
+        .toList();
+    final upcoming = enriched
+        .where((entry) => !isHistory(entry) && isScheduled(entry))
+        .toList();
+    final history = enriched.where(isHistory).toList();
 
     return Stack(
       children: [
         DefaultTabController(
           initialIndex: 0,
-          length: 2,
+          length: 3,
           child: Column(
             children: [
               Padding(
@@ -865,6 +822,7 @@ class _ActivityScreenState extends State<ActivityScreen>
                             labelColor: Colors.black,
                             unselectedLabelColor: Colors.black54,
                             tabs: const [
+                              Tab(text: 'Active'),
                               Tab(text: 'Upcoming'),
                               Tab(text: 'History'),
                             ],
@@ -881,6 +839,13 @@ class _ActivityScreenState extends State<ActivityScreen>
                   child: TabBarView(
                     physics: const NeverScrollableScrollPhysics(),
                     children: [
+                      _buildTabContent(
+                        active,
+                        Icons.bolt_outlined,
+                        'No active bookings yet',
+                        'Assigned and ongoing bookings will appear here.',
+                        isHistory: false,
+                      ),
                       _buildTabContent(
                         upcoming,
                         Icons.calendar_month_outlined,
@@ -956,22 +921,15 @@ class _ActivityScreenState extends State<ActivityScreen>
         child: AnimatedBuilder(
           animation: _reasonSheetController,
           builder: (context, child) {
-            final overlayOpacity = (_reasonSheetController.value * 0.35).clamp(
-              0.0,
-              0.35,
-            );
+            final t = _reasonSheetController.value.clamp(0.0, 1.0);
+            final scrimOpacity = 0.54 * t; // match showModalBottomSheet default
             return Stack(
               children: [
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: _hideReasonPanel,
                   child: Container(
-                    color: Color.fromRGBO(
-                      0,
-                      0,
-                      0,
-                      (0.15 * overlayOpacity).clamp(0.0, 1.0).toDouble(),
-                    ),
+                    color: Colors.black.withValues(alpha: scrimOpacity),
                   ),
                 ),
                 Positioned(
@@ -980,7 +938,27 @@ class _ActivityScreenState extends State<ActivityScreen>
                   bottom: 0,
                   child: SlideTransition(
                     position: _reasonSheetOffset,
-                    child: _buildReasonPanelContent(),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IgnorePointer(
+                          child: Container(
+                            height: 22,
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [
+                                  Colors.transparent,
+                                  Colors.black.withValues(alpha: 0.14),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        _buildReasonPanelContent(),
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -1022,7 +1000,7 @@ class _ActivityScreenState extends State<ActivityScreen>
               ),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(16),
-              borderSide: const BorderSide(color: _activityCardBorderColor),
+                borderSide: const BorderSide(color: _activityCardBorderColor),
               ),
               hintText: 'Tell us why you need to cancel',
               hintStyle: TextStyle(
@@ -1197,13 +1175,10 @@ class _ActivityScreenState extends State<ActivityScreen>
         }
       }
 
-      final bookingsSub = bookingsStream.listen(
-        (snapshot) {
-          latestBookings = snapshot.docs;
-          emitIfReady();
-        },
-        onError: controller.addError,
-      );
+      final bookingsSub = bookingsStream.listen((snapshot) {
+        latestBookings = snapshot.docs;
+        emitIfReady();
+      }, onError: controller.addError);
       final reviewsSub = reviewsStream.listen(
         (snapshot) {
           latestReviewedBookingIds = snapshot.docs
@@ -1365,9 +1340,47 @@ class ActivityBookingCard extends StatefulWidget {
 
 class _ActivityBookingCardState extends State<ActivityBookingCard> {
   bool _isChatting = false;
+  OverlayEntry? _loadingOverlayEntry;
 
   final _auth = AuthService();
   final _chatService = ChatService();
+
+  void _showLoadingOverlay() {
+    if (_loadingOverlayEntry != null) return;
+    final overlay = Overlay.of(context, rootOverlay: true);
+
+    final cutoff = MediaQuery.of(context).padding.top + kToolbarHeight;
+    _loadingOverlayEntry = OverlayEntry(
+      builder: (ctx) {
+        return Positioned.fill(
+          child: Stack(
+            children: [
+              Positioned.fill(
+                top: cutoff,
+                child: const ModalBarrier(
+                  dismissible: false,
+                  color: Color(0x8A000000),
+                ),
+              ),
+              const Center(child: CircularProgressIndicator()),
+            ],
+          ),
+        );
+      },
+    );
+    overlay.insert(_loadingOverlayEntry!);
+  }
+
+  void _hideLoadingOverlay() {
+    _loadingOverlayEntry?.remove();
+    _loadingOverlayEntry = null;
+  }
+
+  @override
+  void dispose() {
+    _hideLoadingOverlay();
+    super.dispose();
+  }
 
   Future<void> _startChat(BuildContext context) async {
     if (_isChatting) return;
@@ -1418,22 +1431,20 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
         _showSnackBar(context, 'Caregiver not assigned yet');
         return;
       }
+      final personId = widget.booking.personId;
 
       final navigator = Navigator.of(context);
 
       final caregiverName = await _loadCaregiverName();
-      final personProfile = _buildPersonProfile();
-      final caregiverData = widget.caregiverData;
-      final caregiverPhotoUrl =
-          (caregiverData?['photoUrl'] as String?)?.trim().isNotEmpty == true
-              ? (caregiverData?['photoUrl'] as String).trim()
-              : ((caregiverData?['avatarUrl'] as String?)?.trim().isNotEmpty ==
-                      true
-                  ? (caregiverData?['avatarUrl'] as String).trim()
-                  : null);
-      final caregiverPhone =
-          (caregiverData?['phone'] as String?)?.trim() ??
-          (caregiverData?['phoneNumber'] as String?)?.trim();
+
+      await FirebaseFirestore.instance
+          .collection('bookings')
+          .doc(widget.booking.id)
+          .set({
+            'trackingCaregiverId': caregiverId,
+            if (personId.isNotEmpty) 'trackingPersonId': personId,
+            'trackingUpdatedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
 
       if (!mounted) return;
       navigator.push(
@@ -1441,6 +1452,9 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
           builder: (_) => TrackCaregiverScreen(
             bookingId: widget.booking.id,
             caregiverName: caregiverName,
+            caregiverId: caregiverId,
+            personId: personId.isNotEmpty ? personId : null,
+            showStatusUpdateButton: false,
           ),
         ),
       );
@@ -1489,12 +1503,7 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
 
   Future<void> _editBooking(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
-    final rootNavigator = Navigator.of(context, rootNavigator: true);
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
+    _showLoadingOverlay();
     try {
       final caregiverMap =
           widget.caregiverData ??
@@ -1510,24 +1519,34 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
       );
       final personProfile = _buildPersonProfile();
       final selectedAddress = _buildSelectedAddress(personProfile);
-      final scheduleDate =
-          _parseBookingDate(widget.booking.date) ?? DateTime.now();
-      final startTime =
-          _parseBookingTime(widget.booking.time) ??
-          const TimeOfDay(hour: 8, minute: 0);
-      final endTime = _addHourToTime(startTime);
-
-      rootNavigator.pop();
+      final hasScheduledTimes =
+          widget.booking.startTime.trim().isNotEmpty &&
+          widget.booking.endTime.trim().isNotEmpty;
+      final scheduleDate = _parseBookingDate(
+        hasScheduledTimes ? widget.booking.scheduledDate : widget.booking.date,
+      );
+      final startTime = _parseBookingTime(
+        hasScheduledTimes ? widget.booking.startTime : widget.booking.time,
+      );
+      final endTime = hasScheduledTimes
+          ? (_parseBookingTime(widget.booking.endTime) ??
+                _addHourToTime(
+                  startTime ?? const TimeOfDay(hour: 8, minute: 0),
+                ))
+          : _addHourToTime(startTime ?? const TimeOfDay(hour: 8, minute: 0));
+      final resolvedDate = scheduleDate ?? DateTime.now();
+      final resolvedStart = startTime ?? const TimeOfDay(hour: 8, minute: 0);
 
       if (!context.mounted) return;
+      _hideLoadingOverlay();
       final updated = await Navigator.push<bool>(
         context,
         MaterialPageRoute(
           builder: (_) => BookingSummaryScreen(
             person: personProfile,
             caregiver: caregiver,
-            scheduleDate: scheduleDate,
-            startTime: startTime,
+            scheduleDate: resolvedDate,
+            startTime: resolvedStart,
             endTime: endTime,
             price: widget.booking.servicePrice,
             selectedAddress: selectedAddress,
@@ -1544,11 +1563,12 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
         setState(() {});
       }
     } catch (e) {
-      rootNavigator.pop();
+      _hideLoadingOverlay();
       messenger.showSnackBar(
         SnackBar(content: Text('Unable to open booking for edit: $e')),
       );
     }
+    _hideLoadingOverlay();
   }
 
   PersonProfile _buildPersonProfile() {
@@ -1785,12 +1805,20 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
       ),
     );
 
-    final normalizedStatus = widget.booking.rawStatus.trim().toUpperCase();
+    final normalizedStatus = widget.booking.rawStatus
+        .trim()
+        .toUpperCase()
+        .replaceAll(' ', '_')
+        .replaceAll('-', '_')
+        .replaceAll('__', '_');
     final isScheduled =
         normalizedStatus == 'SCHEDULED' || normalizedStatus == 'PENDING';
     final isAssigned = normalizedStatus == 'ASSIGNED';
     final isOngoing =
-        normalizedStatus == 'ONGOING' || normalizedStatus == 'IN_PROGRESS';
+        normalizedStatus == 'ONGOING' ||
+        normalizedStatus == 'IN_PROGRESS' ||
+        normalizedStatus == 'NOTIFY' ||
+        normalizedStatus == 'HANDLE_CLIENT';
     final isCancelled =
         normalizedStatus == 'CANCELLED' || normalizedStatus == 'CANCELED';
     final isEmergency = normalizedStatus == 'EMERGENCY';
@@ -2006,7 +2034,10 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
                 ),
                 const SizedBox(width: 4),
                 Text(
-                  widget.booking.date,
+                  (widget.booking.startTime.trim().isNotEmpty &&
+                          widget.booking.endTime.trim().isNotEmpty)
+                      ? widget.booking.scheduledDate
+                      : widget.booking.date,
                   style: TextStyle(
                     fontSize: 10,
                     color: activityPrimaryTextColor,
@@ -2020,7 +2051,10 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
                 ),
                 const SizedBox(width: 4),
                 Text(
-                  widget.booking.time,
+                  (widget.booking.startTime.trim().isNotEmpty &&
+                          widget.booking.endTime.trim().isNotEmpty)
+                      ? '${widget.booking.startTime} - ${widget.booking.endTime}'
+                      : widget.booking.time,
                   style: TextStyle(
                     fontSize: 10,
                     color: activityPrimaryTextColor,
@@ -2053,14 +2087,13 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
               ),
               child: Row(
                 children: [
-                    DefaultProfileAvatar(
-                      radius: 14,
-                      photoUrl:
-                        personProfile.photoUrl.trim().isNotEmpty
-                            ? personProfile.photoUrl.trim()
-                            : null,
-                      label: personName,
-                    ),
+                  DefaultProfileAvatar(
+                    radius: 14,
+                    photoUrl: personProfile.photoUrl.trim().isNotEmpty
+                        ? personProfile.photoUrl.trim()
+                        : null,
+                    label: personName,
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Column(
@@ -2406,7 +2439,8 @@ class _ActivitySectionInfoIcon extends StatefulWidget {
   final String message;
 
   @override
-  State<_ActivitySectionInfoIcon> createState() => _ActivitySectionInfoIconState();
+  State<_ActivitySectionInfoIcon> createState() =>
+      _ActivitySectionInfoIconState();
 }
 
 class _ActivitySectionInfoIconState extends State<_ActivitySectionInfoIcon> {

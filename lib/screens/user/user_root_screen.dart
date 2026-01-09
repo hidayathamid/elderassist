@@ -1,8 +1,12 @@
 ﻿import 'package:flutter/material.dart';
 
+import 'dart:ui' as ui;
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
+import '../../services/chat_service.dart';
+import 'chat/user_chat_list_screen.dart';
 import 'activity/activity_screen.dart';
 import 'booking/booking_person_screen.dart';
 import 'home/home_screen.dart';
@@ -25,6 +29,9 @@ class UserRootScreen extends StatefulWidget {
 class _UserRootScreenState extends State<UserRootScreen> {
   late int _selectedIndex;
   final ValueNotifier<int> _tabIndexNotifier = ValueNotifier<int>(0);
+  final ValueNotifier<VoidCallback?> _homeAddressPickerOpener =
+      ValueNotifier<VoidCallback?>(null);
+  final ChatService _chatService = ChatService();
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   bool _initialSeenSetup = false;
@@ -60,10 +67,18 @@ class _UserRootScreenState extends State<UserRootScreen> {
       _selectedIndex = requested;
     }
     _tabIndexNotifier.value = _selectedIndex;
-    _pages[0] = UserHomeScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 0);
+    _pages[0] = UserHomeScreen(
+      tabIndexListenable: _tabIndexNotifier,
+      tabIndex: 0,
+      addressPickerOpener: _homeAddressPickerOpener,
+    );
     _pages[1] = BookingPersonScreen(
       tabIndexListenable: _tabIndexNotifier,
       tabIndex: 1,
+    );
+    _pages[2] = SosActivateScreen(
+      tabIndexListenable: _tabIndexNotifier,
+      tabIndex: 2,
     );
     _pages[3] = ActivityScreen(
       tabIndexListenable: _tabIndexNotifier,
@@ -79,6 +94,7 @@ class _UserRootScreenState extends State<UserRootScreen> {
   @override
   void dispose() {
     _tabIndexNotifier.dispose();
+    _homeAddressPickerOpener.dispose();
     super.dispose();
   }
 
@@ -134,9 +150,143 @@ class _UserRootScreenState extends State<UserRootScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.of(context).padding.bottom;
+    final userId = _auth.currentUser?.uid ?? '';
     return Scaffold(
       backgroundColor: _pageBackground,
-      body: IndexedStack(index: _selectedIndex, children: _pages),
+      extendBody: true,
+      body: Stack(
+        children: [
+          IndexedStack(index: _selectedIndex, children: _pages),
+          if (_selectedIndex == 0)
+            Positioned(
+              right: 16,
+              bottom: bottomInset + 88,
+              child: ValueListenableBuilder<VoidCallback?>(
+                valueListenable: _homeAddressPickerOpener,
+                builder: (context, openSheet, _) {
+                  final enabled = openSheet != null;
+                  return IgnorePointer(
+                    ignoring: !enabled,
+                    child: AnimatedOpacity(
+                      duration: const Duration(milliseconds: 180),
+                      curve: Curves.easeOut,
+                      opacity: enabled ? 1 : 0.55,
+                      child: GestureDetector(
+                        onTap: openSheet,
+                        child: Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: Colors.black.withValues(alpha: 0.08),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.18),
+                                blurRadius: 10,
+                                offset: const Offset(0, 6),
+                              ),
+                            ],
+                          ),
+                          child: const Icon(
+                            Icons.place_outlined,
+                            color: Color(0xFF00A8A7),
+                            size: 20,
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          if (_selectedIndex == 3 && userId.isNotEmpty)
+            Positioned(
+              right: 16,
+              bottom: bottomInset + 88,
+              child: StreamBuilder<int>(
+                stream: _chatService.streamUnreadCountForUser(userId),
+                builder: (context, snapshot) {
+                  final badgeCount = snapshot.data ?? 0;
+                  return Stack(
+                    alignment: Alignment.center,
+                    clipBehavior: Clip.none,
+                    children: [
+                      GestureDetector(
+                        onTap: () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => const UserChatListScreen(
+                                showBackButton: true,
+                                showPersonChats: false,
+                              ),
+                            ),
+                          );
+                        },
+                        child: Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: Colors.black.withValues(alpha: 0.08),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.18),
+                                blurRadius: 10,
+                                offset: const Offset(0, 6),
+                              ),
+                            ],
+                          ),
+                          child: const Icon(
+                            Icons.chat_bubble_outline,
+                            color: Color(0xFF00B8C6),
+                            size: 20,
+                          ),
+                        ),
+                      ),
+                      if (badgeCount > 0)
+                        Positioned(
+                          bottom: -4,
+                          right: -4,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 7,
+                              vertical: 2.5,
+                            ),
+                            decoration: BoxDecoration(
+                              color: _activeBlue,
+                              borderRadius: BorderRadius.circular(24),
+                              boxShadow: const [
+                                BoxShadow(
+                                  color: Colors.black26,
+                                  blurRadius: 10,
+                                  offset: Offset(0, 5),
+                                ),
+                              ],
+                            ),
+                            child: Text(
+                              badgeCount.toString(),
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  );
+                },
+              ),
+            ),
+        ],
+      ),
       bottomNavigationBar: _buildBottomNav(context),
     );
   }
@@ -145,78 +295,92 @@ class _UserRootScreenState extends State<UserRootScreen> {
     final double bottomInset = MediaQuery.of(context).padding.bottom;
     final userId = _auth.currentUser?.uid ?? '';
 
-    return Container(
-      decoration: BoxDecoration(
-        color: _navBarBackground,
-        border: Border(
-          top: BorderSide(color: Colors.black12.withValues(alpha: 0.08)),
+    final padding = EdgeInsets.only(
+      left: 6,
+      right: 6,
+      top: 6,
+      bottom: bottomInset > 0 ? bottomInset : 8,
+    );
+
+    // Keep background "light" (no solid blocking container), but do not clip
+    // the SOS bubble which intentionally overflows upward.
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Positioned.fill(
+          child: ClipRect(
+            child: BackdropFilter(
+              filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: _navBarBackground.withValues(alpha: 0.82),
+                  border: Border(
+                    top: BorderSide(
+                      color: Colors.black.withValues(alpha: 0.14),
+                      width: 1.25,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
         ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.10),
-            blurRadius: 18,
-            offset: const Offset(0, -6),
-          ),
-        ],
-      ),
-      padding: EdgeInsets.only(
-        left: 6,
-        right: 6,
-        top: 6,
-        bottom: bottomInset > 0 ? bottomInset : 8,
-      ),
-      child: Row(
-        children: [
-          _NavBubbleItem(
-            icon: Icons.home_filled,
-            label: 'Home',
-            index: 0,
-            isActive: _selectedIndex == 0,
-            activeColor: _activeBlue,
-            onTap: () => _onItemTapped(0),
-          ),
-          _NavBubbleItem(
-            icon: Icons.add_circle_outline,
-            label: 'Book',
-            index: 1,
-            isActive: _selectedIndex == 1,
-            activeColor: _activeBlue,
-            onTap: () => _onItemTapped(1),
-          ),
-          _NavBubbleItem(
-            icon: Icons.sos_rounded,
-            label: 'Emergency',
-            index: 2,
-            isActive: _selectedIndex == 2,
-            isSos: true,
-            activeColor: _activeBlue,
-            onTap: () => _onItemTapped(2),
-          ),
-          StreamBuilder<int>(
-            stream: _activityBadgeStream(userId),
-            builder: (context, snapshot) {
-              final badgeCount = snapshot.data ?? 0;
-              return _NavBubbleItem(
-                icon: Icons.receipt_long_rounded,
-                label: 'Activity',
-                index: 3,
-                isActive: _selectedIndex == 3,
+        Padding(
+          padding: padding,
+          child: Row(
+            children: [
+              _NavBubbleItem(
+                icon: Icons.home_filled,
+                label: 'Home',
+                index: 0,
+                isActive: _selectedIndex == 0,
                 activeColor: _activeBlue,
-                onTap: () => _onItemTapped(3),
-                badgeCount: badgeCount,
-              );
-            },
+                onTap: () => _onItemTapped(0),
+              ),
+              _NavBubbleItem(
+                icon: Icons.add_circle_outline,
+                label: 'Book',
+                index: 1,
+                isActive: _selectedIndex == 1,
+                activeColor: _activeBlue,
+                onTap: () => _onItemTapped(1),
+              ),
+              _NavBubbleItem(
+                icon: Icons.sos_rounded,
+                label: 'Emergency',
+                index: 2,
+                isActive: _selectedIndex == 2,
+                isSos: true,
+                activeColor: _activeBlue,
+                onTap: () => _onItemTapped(2),
+              ),
+              StreamBuilder<int>(
+                stream: _activityBadgeStream(userId),
+                builder: (context, snapshot) {
+                  final badgeCount = snapshot.data ?? 0;
+                  return _NavBubbleItem(
+                    icon: Icons.receipt_long_rounded,
+                    label: 'Activity',
+                    index: 3,
+                    isActive: _selectedIndex == 3,
+                    activeColor: _activeBlue,
+                    onTap: () => _onItemTapped(3),
+                    badgeCount: badgeCount,
+                  );
+                },
+              ),
+              _NavBubbleItem(
+                icon: Icons.person_2_rounded,
+                label: 'Account',
+                index: 4,
+                isActive: _selectedIndex == 4,
+                activeColor: _activeBlue,
+                onTap: () => _onItemTapped(4),
+              ),
+            ],
           ),
-          _NavBubbleItem(
-            icon: Icons.person_2_rounded,
-            label: 'Account',
-            index: 4,
-            isActive: _selectedIndex == 4,
-            activeColor: _activeBlue,
-            onTap: () => _onItemTapped(4),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

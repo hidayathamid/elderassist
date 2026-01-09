@@ -83,15 +83,36 @@ class _LoginScreenState extends State<LoginScreen> {
 
     setState(() => _isLoading = false);
 
-    if (result == null) {
-      _showErrorDialog(
-        title: 'Login failed',
-        message: 'Please double-check your email and password, then try again.',
+    if (!result.signedIn) {
+      final code = result.errorCode ?? 'unknown';
+      final message = switch (code) {
+        'network-request-failed' =>
+          'No internet/DNS. Please turn on Wi‑Fi/mobile data and try again.',
+        'invalid-credential' =>
+          'Invalid credentials. Please check your email and password.',
+        'user-not-found' =>
+          'Account not found. Please check your email or register.',
+        'wrong-password' => 'Incorrect password. Please try again.',
+        'too-many-requests' =>
+          'Too many attempts. Please wait and try again later.',
+        _ =>
+          'Login failed. Please double-check your email and password, then try again.',
+      };
+      _showErrorDialog(title: 'Login failed', message: message);
+      return;
+    }
+
+    if (!result.hasProfile) {
+      if (!mounted) return;
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      _showSnack(
+        'Signed in, but failed to load your profile. Check internet/App Check then try again.',
       );
       return;
     }
 
-    final Widget destination = result is CaregiverModel
+    final profile = result.profile;
+    final Widget destination = profile is CaregiverModel
         ? const CaregiverRootScreen()
         : const UserRootScreen();
 

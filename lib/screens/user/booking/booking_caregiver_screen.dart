@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'dart:ui' as ui;
 
@@ -10,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
+import 'package:http/http.dart' as http;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter/services.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
@@ -17,24 +19,19 @@ import 'package:emergencies_disability_assistance_app/widgets/service_tag_chip.d
 import 'package:emergencies_disability_assistance_app/utils/map_styles.dart';
 
 import '../../../models/caregiver_model.dart';
+import '../../../models/recommendation_rules.dart';
 import 'booking_person_screen.dart';
 import 'booking_summary_screen.dart';
 
 enum CaregiverCategory { forYou, recommendation, nearby }
 
-const double _maxRuleDistance = 12.0;
-const double _preferredDistance = 6.0;
 const double _maxSearchDistanceKm = 15.0;
-const double _ratingPenaltyThreshold = 3.5;
-const double _minAcceptableRating = 3.0;
 
 const Color _bookingAppBarText = Color(0xFF1B1D29);
 const Color _caregiverMatchAccent = Color(0xFF00A8A7);
-const Color _bookingTextDark = Color(0xFF1B1D29);
 const Color _categoryIndicatorColor = Color(0xFFF4F5F7);
 const double _categorySegmentRadius = 26.0;
 const Color _serviceTagBlue = Color(0xFF00A8A7);
-const double _recommendationScoreThreshold = 2200.0;
 const Color _pageBackground = Color(0xFFF7F8FA);
 
 const Color _primaryColor = Color(0xFFF4B63D);
@@ -55,6 +52,7 @@ class CaregiverOption {
     required this.available,
     required this.addressLine,
     required this.matchCount,
+    required this.recommendationClass,
     this.latLng,
     this.avatarUrl,
     this.score = 0,
@@ -72,6 +70,7 @@ class CaregiverOption {
   final bool available;
   final String addressLine;
   final int matchCount;
+  final int recommendationClass;
   final LatLng? latLng;
   final String? avatarUrl;
   final double score;
@@ -90,6 +89,7 @@ class CaregiverOption {
       available: available,
       addressLine: addressLine,
       matchCount: matchCount,
+      recommendationClass: recommendationClass,
       latLng: latLng,
       avatarUrl: avatarUrl,
       score: score,
@@ -116,7 +116,7 @@ class BookingCaregiverScreen extends StatefulWidget {
 
 class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     with TickerProviderStateMixin {
-  static const double _minSheetSize = 0.32;
+  static const double _minSheetSize = 0.40;
   static const double _maxSheetSize = 0.85;
   static const SpringDescription _panelSpring = SpringDescription(
     mass: 1,
@@ -127,6 +127,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   GoogleMapController? _mapController;
   late final AnimationController _panelController;
   double _backdropOpacity = 0.0;
+  bool _modalSheetScrimVisible = false;
   double _panelBlend = 0.0;
   bool _hideFrontPanel = false;
   double _lastDragDelta = 0;
@@ -179,6 +180,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
 
   late LatLng _currentLatLng;
   List<String> _clientServicePrefs = [];
+  RecommendationRules _recommendationRules = RecommendationRules.defaults();
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _rulesSub;
   CaregiverCategory _selectedCategory = CaregiverCategory.forYou;
   bool _didInitialHeaderHide = false;
 
@@ -224,6 +227,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     _listController.addListener(_handleScrollCategoryDetection);
     _updatePanelVisuals();
     _listenAssignedCaregivers();
+    _listenForRecommendationRules();
     _loadClientPreferences();
     _shineController = AnimationController(
       vsync: this,
@@ -254,7 +258,25 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     _mapController?.dispose();
     _caregiverSub?.cancel();
     _assignedBookingSub?.cancel();
+    _rulesSub?.cancel();
     super.dispose();
+  }
+
+  void _listenForRecommendationRules() {
+    _rulesSub?.cancel();
+    _rulesSub = FirebaseFirestore.instance
+        .collection('recommendationRules')
+        .doc('current')
+        .snapshots()
+        .listen((doc) {
+          if (!mounted) return;
+          setState(() {
+            _recommendationRules = RecommendationRules.fromFirestore(
+              doc,
+              fallback: _recommendationRules,
+            );
+          });
+        });
   }
 
   void _listenAssignedCaregivers() {
@@ -264,20 +286,20 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         .where('status', isEqualTo: 'ASSIGNED')
         .snapshots()
         .listen((snapshot) {
-      final next = <String>{};
-      for (final doc in snapshot.docs) {
-        final data = doc.data();
-        final caregiverId = (data['caregiverId'] as String?)?.trim() ?? '';
-        if (caregiverId.isNotEmpty) next.add(caregiverId);
-      }
-      if (setEquals(next, _assignedCaregiverIds)) return;
-      setState(() {
-        _assignedCaregiverIds
-          ..clear()
-          ..addAll(next);
-      });
-      _rebuildFromCandidates();
-    }, onError: (_) {});
+          final next = <String>{};
+          for (final doc in snapshot.docs) {
+            final data = doc.data();
+            final caregiverId = (data['caregiverId'] as String?)?.trim() ?? '';
+            if (caregiverId.isNotEmpty) next.add(caregiverId);
+          }
+          if (setEquals(next, _assignedCaregiverIds)) return;
+          setState(() {
+            _assignedCaregiverIds
+              ..clear()
+              ..addAll(next);
+          });
+          _rebuildFromCandidates();
+        }, onError: (_) {});
   }
 
   GlobalKey _tileKeyFor(String caregiverId, CaregiverCategory category) {
@@ -536,6 +558,11 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       price: priceValue,
       matchCount: matchCount,
     );
+    final int recommendationClass = _recommendationClassFromScore(
+      score,
+      caregiverRating: rating,
+      caregiverDistanceKm: distanceKm,
+    );
 
     return CaregiverOption(
       id: doc.id,
@@ -549,6 +576,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       available: available,
       addressLine: addressLine,
       matchCount: matchCount,
+      recommendationClass: recommendationClass,
       latLng: loc,
       avatarUrl: data['avatarUrl'] as String? ?? data['photoUrl'] as String?,
       score: score,
@@ -559,7 +587,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   List<CaregiverOption> _applyCategories(List<CaregiverOption> source) {
     final ranked = List<CaregiverOption>.from(source)
       ..sort((a, b) {
-        // priority: matchCount desc, rating desc, price asc, distance asc
+        final classCmp = a.recommendationClass.compareTo(b.recommendationClass);
+        if (classCmp != 0) return classCmp;
         final matchCmp = b.matchCount.compareTo(a.matchCount);
         if (matchCmp != 0) return matchCmp;
         final ratingCmp = b.rating.compareTo(a.rating);
@@ -577,9 +606,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     final qualified = available
         .where((c) => !_shouldExcludeCaregiver(c))
         .toList();
-    final recommended = qualified
-        .where((c) => c.score >= _recommendationScoreThreshold)
-        .toList();
+    final class1 = qualified.where((c) => c.recommendationClass == 1).toList();
+    final class2 = qualified.where((c) => c.recommendationClass == 2).toList();
+    final recommended = [...class1, ...class2];
     final fallback = qualified.take(3).toList();
     final pool = recommended.isNotEmpty ? recommended : fallback;
     return pool.take(3).toList();
@@ -600,9 +629,21 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   }
 
   bool _shouldExcludeCaregiver(CaregiverOption caregiver) {
-    if (caregiver.rating < _minAcceptableRating) return true;
-    if (caregiver.distanceKm > _maxRuleDistance) return true;
+    if (caregiver.rating < _recommendationRules.minAcceptableRating) return true;
+    if (caregiver.distanceKm > _recommendationRules.maxRuleDistanceKm) return true;
     return false;
+  }
+
+  int _recommendationClassFromScore(
+    double score, {
+    required double caregiverRating,
+    required double caregiverDistanceKm,
+  }) {
+    if (caregiverRating < _recommendationRules.minAcceptableRating) return 3;
+    if (caregiverDistanceKm > _recommendationRules.maxRuleDistanceKm) return 3;
+    if (score >= _recommendationRules.recommendationTier1MinScore) return 1;
+    if (score >= _recommendationRules.recommendationTier2MinScore) return 2;
+    return 3;
   }
 
   double _score({
@@ -612,18 +653,21 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     required double price,
     required int matchCount,
   }) {
+    final rules = _recommendationRules;
     final double normalizedDistance = max(
       0,
-      _preferredDistance - min(distanceKm, _preferredDistance),
+      rules.preferredDistanceKm - min(distanceKm, rules.preferredDistanceKm),
     );
-    final double distanceScore = normalizedDistance * 8;
-    final double ratingScore = rating * 15;
-    final double matchScore = matchCount * 1200;
-    final double serviceScore = min(serviceCount, 6) * 3;
-    final double priceScore = -price * 6;
-    final double ratingPenalty = rating < _ratingPenaltyThreshold ? -10 : 0;
-    final double distancePenalty = distanceKm > _preferredDistance
-        ? -(distanceKm - _preferredDistance) * 2
+    final double distanceScore = normalizedDistance * rules.distanceScoreMultiplier;
+    final double ratingScore = rating * rules.ratingScoreMultiplier;
+    final double matchScore = matchCount * rules.matchScoreMultiplier;
+    final double serviceScore =
+        min(serviceCount, rules.serviceScoreCap) * rules.serviceScoreMultiplier;
+    final double priceScore = price * rules.priceScoreMultiplier;
+    final double ratingPenalty =
+        rating < rules.ratingPenaltyThreshold ? rules.ratingPenaltyValue : 0;
+    final double distancePenalty = distanceKm > rules.preferredDistanceKm
+        ? (distanceKm - rules.preferredDistanceKm) * rules.distancePenaltyMultiplier
         : 0;
     return distanceScore +
         ratingScore +
@@ -661,10 +705,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
           _panelController.value,
         )! *
         MediaQuery.of(context).size.height;
-  }
-
-  double _minSheetHeightPx(BuildContext context) {
-    return _minSheetSize * MediaQuery.of(context).size.height;
   }
 
   void _updatePanelVisuals() {
@@ -838,7 +878,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         ),
         splashRadius: 24,
         onPressed: () {
-          _openScheduleSheet();
+          _openScheduleSheetV2();
         },
       ),
     );
@@ -855,7 +895,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
 
   void _animateRoute(List<LatLng> points) {
     if (points.length < 2) return;
-    final simplified = _simplifyPoints(points);
+    final simplified = _simplifyPoints(points, maxPoints: 180);
     setState(() {
       _route = {
         Polyline(
@@ -872,7 +912,1185 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     });
   }
 
-  void _openScheduleSheet() {
+  void _openScheduleSheetV2() {
+    // New schedule UI; fallback to legacy if anything goes wrong.
+    _openScheduleSheetTelegramStyle().catchError((e) {
+      debugPrint('Schedule sheet failed, falling back. $e');
+      _openScheduleSheet();
+    });
+  }
+
+  Future<void> _openScheduleSheetTelegramStyle() async {
+    final caregiver = _selectedCaregiverModel;
+    if (caregiver == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select a caregiver first')),
+      );
+      return;
+    }
+
+    final initialSelected = DateTime.now().add(const Duration(minutes: 30));
+
+    if (!mounted) return;
+    setState(() => _modalSheetScrimVisible = true);
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        barrierColor: Colors.transparent,
+        backgroundColor: Colors.transparent,
+        builder: (ctx) {
+          final availabilityFuture = FirebaseFirestore.instance
+              .collection('availability')
+              .doc(caregiver.id)
+              .get();
+
+          return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+            future: availabilityFuture,
+            builder: (context, snapshot) {
+              const sheetBg = Colors.white;
+              const sheetRadius = Radius.circular(28);
+              final ButtonStyle schedulePrimaryButtonStyle = ButtonStyle(
+                backgroundColor: WidgetStateProperty.resolveWith((states) {
+                  if (states.contains(WidgetState.disabled)) {
+                    return Colors.grey.shade300;
+                  }
+                  return _primaryColor;
+                }),
+                foregroundColor: WidgetStateProperty.resolveWith((states) {
+                  if (states.contains(WidgetState.disabled)) {
+                    return Colors.grey.shade600;
+                  }
+                  return Colors.black;
+                }),
+                elevation: WidgetStateProperty.resolveWith<double>((states) {
+                  if (states.contains(WidgetState.disabled)) return 0;
+                  return 2;
+                }),
+                padding: WidgetStateProperty.all(
+                  const EdgeInsets.symmetric(vertical: 14),
+                ),
+                shape: WidgetStateProperty.all(
+                  RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                ),
+                textStyle: WidgetStateProperty.all(
+                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+              );
+
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return Padding(
+                  padding: EdgeInsets.only(
+                    bottom: MediaQuery.of(ctx).viewInsets.bottom,
+                  ),
+                  child: Container(
+                    decoration: const BoxDecoration(
+                      color: sheetBg,
+                      borderRadius: BorderRadius.vertical(top: sheetRadius),
+                    ),
+                    child: const SafeArea(
+                      top: false,
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(18, 14, 18, 22),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            SizedBox(height: 6),
+                            SizedBox(
+                              width: 36,
+                              height: 4,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: Color(0x33FFFFFF),
+                                  borderRadius: BorderRadius.all(
+                                    Radius.circular(24),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            SizedBox(height: 16),
+                            Text(
+                              'Schedule booking',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                fontSize: 16,
+                                color: Colors.black87,
+                              ),
+                            ),
+                            SizedBox(height: 18),
+                            SizedBox(
+                              height: 200,
+                              child: Center(child: CircularProgressIndicator()),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }
+
+              final data = snapshot.data?.data() ?? const <String, dynamic>{};
+              final blockedRanges = _parseBlockedDateRanges(
+                data['blockedDates'],
+              );
+              final disabledWeekdays = _parseUnavailableWeekdays(
+                data['weeklySchedule'],
+              );
+              final weeklyRanges = _parseWeeklyTimeRanges(
+                data['weeklySchedule'],
+              );
+
+              DateTime normalize(DateTime d) =>
+                  DateTime(d.year, d.month, d.day);
+
+              bool isBlocked(DateTime day) {
+                final date = normalize(day);
+                for (final range in blockedRanges) {
+                  final start = normalize(range.start);
+                  final end = normalize(range.end);
+                  if (!date.isBefore(start) && !date.isAfter(end)) return true;
+                }
+                return false;
+              }
+
+              bool isAvailableDay(DateTime day) {
+                final date = normalize(day);
+                final today = normalize(DateTime.now());
+                // Book in advance: disable today and past dates.
+                if (!date.isAfter(today)) return false;
+                if (disabledWeekdays.contains(date.weekday)) return false;
+                if (isBlocked(date)) return false;
+                if (!weeklyRanges.containsKey(date.weekday)) return false;
+                return true;
+              }
+
+              final today = normalize(DateTime.now());
+              final availableDays = <DateTime>[];
+              for (int i = 0; i < 180; i++) {
+                final day = today.add(Duration(days: i));
+                if (isAvailableDay(day)) availableDays.add(day);
+                if (availableDays.length >= 120) break;
+              }
+
+              DateTime selectedDay = availableDays.isNotEmpty
+                  ? availableDays.first
+                  : today;
+              DateTime visibleMonth = DateTime(
+                selectedDay.year,
+                selectedDay.month,
+              );
+              TimeOfDay selectedTime = _alignTimeToInterval(
+                TimeOfDay.fromDateTime(initialSelected),
+                15,
+              );
+              TimeOfDay selectedEndTime = _endTimeFromStart(selectedTime);
+
+              int toMinutes(TimeOfDay t) => (t.hour * 60) + t.minute;
+              TimeOfDay fromMinutes(int minutes) {
+                final clamped = minutes.clamp(0, 24 * 60 - 1);
+                return TimeOfDay(hour: clamped ~/ 60, minute: clamped % 60);
+              }
+
+              TimeOfDay ensureEndTime(
+                TimeOfDay start,
+                TimeOfDay currentEnd,
+                TimeOfDay latestAllowed,
+              ) {
+                final minEnd = fromMinutes(toMinutes(start) + 15);
+                if (toMinutes(latestAllowed) <= toMinutes(minEnd)) {
+                  return latestAllowed;
+                }
+                if (toMinutes(currentEnd) < toMinutes(minEnd)) return minEnd;
+                if (toMinutes(currentEnd) > toMinutes(latestAllowed)) {
+                  return latestAllowed;
+                }
+                return currentEnd;
+              }
+
+              String ymd(DateTime d) {
+                final y = d.year.toString().padLeft(4, '0');
+                final m = d.month.toString().padLeft(2, '0');
+                final day = d.day.toString().padLeft(2, '0');
+                return '$y-$m-$day';
+              }
+
+              bool overlapsMinutes(int startA, int endA, int startB, int endB) {
+                // Treat as [start, end) to avoid boundary collisions.
+                final aStart = min(startA, endA);
+                final aEnd = max(startA, endA);
+                final bStart = min(startB, endB);
+                final bEnd = max(startB, endB);
+                return max(aStart, bStart) < min(aEnd, bEnd);
+              }
+
+              bool rangeOverlapsTaken(
+                int startMin,
+                int endMin,
+                List<DateTimeRange> taken,
+              ) {
+                for (final r in taken) {
+                  final s = r.start.hour * 60 + r.start.minute;
+                  final e = r.end.hour * 60 + r.end.minute;
+                  if (overlapsMinutes(startMin, endMin, s, e)) return true;
+                }
+                return false;
+              }
+
+              const monthNames = [
+                'January',
+                'February',
+                'March',
+                'April',
+                'May',
+                'June',
+                'July',
+                'August',
+                'September',
+                'October',
+                'November',
+                'December',
+              ];
+              const weekdayHeaders = [
+                'MON',
+                'TUE',
+                'WED',
+                'THU',
+                'FRI',
+                'SAT',
+                'SUN',
+              ];
+
+              String timeLabel(TimeOfDay t) {
+                final hour12 = t.hourOfPeriod == 0 ? 12 : t.hourOfPeriod;
+                final minute = t.minute.toString().padLeft(2, '0');
+                final suffix = t.period == DayPeriod.am ? 'AM' : 'PM';
+                return '$hour12:$minute $suffix';
+              }
+
+              final takenCache = <String, List<DateTimeRange>>{};
+              final loadingTaken = <String>{};
+
+              Future<List<DateTimeRange>> fetchTakenRanges(DateTime day) async {
+                final key = ymd(day);
+                try {
+                  final snap = await FirebaseFirestore.instance
+                      .collection('bookings')
+                      .where('caregiverId', isEqualTo: caregiver.id)
+                      .where('date', isEqualTo: key)
+                      .where('paymentStatus', isEqualTo: 'PAID')
+                      .where('status', whereIn: const ['ASSIGNED', 'SCHEDULED'])
+                      .get();
+
+                  TimeOfDay? parseHHmm(String? value) {
+                    if (value == null) return null;
+                    final v = value.trim();
+                    if (v.isEmpty) return null;
+                    final parts = v.split(':');
+                    if (parts.length != 2) return null;
+                    final h = int.tryParse(parts[0]);
+                    final m = int.tryParse(parts[1]);
+                    if (h == null || m == null) return null;
+                    if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+                    return TimeOfDay(hour: h, minute: m);
+                  }
+
+                  final ranges = <DateTimeRange>[];
+                  for (final doc in snap.docs) {
+                    final data = doc.data();
+                    final start = parseHHmm(data['startTime']?.toString());
+                    final end = parseHHmm(data['endTime']?.toString());
+                    if (start == null || end == null) continue;
+                    if (toMinutes(end) <= toMinutes(start)) continue;
+                    ranges.add(
+                      DateTimeRange(
+                        start: DateTime(2000, 1, 1, start.hour, start.minute),
+                        end: DateTime(2000, 1, 1, end.hour, end.minute),
+                      ),
+                    );
+                  }
+
+                  ranges.sort((a, b) => a.start.compareTo(b.start));
+                  return ranges;
+                } catch (e) {
+                  debugPrint('Failed to load taken ranges for $key: $e');
+                  return const <DateTimeRange>[];
+                }
+              }
+
+              List<TimeOfDay> generateSlotsInclusiveEnd({
+                required TimeOfDay start,
+                required TimeOfDay end,
+                required int minuteInterval,
+              }) {
+                final startMinutes = toMinutes(start);
+                final endMinutes = toMinutes(end);
+                if (minuteInterval <= 0 || endMinutes < startMinutes)
+                  return const [];
+
+                int first = startMinutes;
+                if (first % minuteInterval != 0) {
+                  first = ((first ~/ minuteInterval) + 1) * minuteInterval;
+                }
+                int last = endMinutes;
+                last = (last ~/ minuteInterval) * minuteInterval;
+                if (last < first) return const [];
+
+                final slots = <TimeOfDay>[];
+                for (int m = first; m <= last; m += minuteInterval) {
+                  slots.add(TimeOfDay(hour: (m ~/ 60) % 24, minute: m % 60));
+                }
+                return slots;
+              }
+
+              return StatefulBuilder(
+                builder: (context, setModalState) {
+                  final dayRange = weeklyRanges[selectedDay.weekday];
+
+                  final selectedKey = ymd(selectedDay);
+                  final takenRanges =
+                      takenCache[selectedKey] ?? const <DateTimeRange>[];
+                  if (!takenCache.containsKey(selectedKey) &&
+                      !loadingTaken.contains(selectedKey)) {
+                    loadingTaken.add(selectedKey);
+                    WidgetsBinding.instance.addPostFrameCallback((_) async {
+                      final next = await fetchTakenRanges(selectedDay);
+                      if (!ctx.mounted) return;
+                      setModalState(() {
+                        takenCache[selectedKey] = next;
+                        loadingTaken.remove(selectedKey);
+                      });
+                    });
+                  }
+
+                  bool isRangeFree(TimeOfDay start, TimeOfDay end) {
+                    final s = toMinutes(start);
+                    final e = toMinutes(end);
+                    if (e <= s) return false;
+                    return !rangeOverlapsTaken(s, e, takenRanges);
+                  }
+
+                  List<TimeOfDay> startSlots = dayRange == null
+                      ? const <TimeOfDay>[]
+                      : _generateTimeSlots(
+                          start: dayRange.start,
+                          end: dayRange.end,
+                          minuteInterval: 15,
+                        );
+
+                  if (dayRange != null) {
+                    final maxStartMin = toMinutes(dayRange.end) - 15;
+                    startSlots = startSlots
+                        .where((t) => toMinutes(t) <= maxStartMin)
+                        .toList();
+                  }
+
+                  List<TimeOfDay> endOptionsFor(TimeOfDay start) {
+                    if (dayRange == null) return const <TimeOfDay>[];
+                    final minEnd = fromMinutes(toMinutes(start) + 15);
+                    final raw = generateSlotsInclusiveEnd(
+                      start: minEnd,
+                      end: dayRange.end,
+                      minuteInterval: 15,
+                    );
+                    return raw;
+                  }
+
+                  bool isStartEnabled(TimeOfDay start) =>
+                      isRangeFree(start, fromMinutes(toMinutes(start) + 15));
+                  bool isEndEnabled(TimeOfDay start, TimeOfDay end) =>
+                      isRangeFree(start, end);
+
+                  if (startSlots.isNotEmpty) {
+                    final stillExists = startSlots.any(
+                      (t) =>
+                          t.hour == selectedTime.hour &&
+                          t.minute == selectedTime.minute,
+                    );
+                    final firstEnabled = startSlots.firstWhere(
+                      isStartEnabled,
+                      orElse: () => startSlots.first,
+                    );
+                    if (!stillExists || !isStartEnabled(selectedTime)) {
+                      selectedTime = firstEnabled;
+                    }
+                  }
+
+                  final endSlots = endOptionsFor(selectedTime);
+                  if (endSlots.isNotEmpty) {
+                    final minEnd = fromMinutes(toMinutes(selectedTime) + 15);
+                    final stillExists = endSlots.any(
+                      (t) =>
+                          t.hour == selectedEndTime.hour &&
+                          t.minute == selectedEndTime.minute,
+                    );
+                    final validOrder =
+                        toMinutes(selectedEndTime) >= toMinutes(minEnd);
+                    final firstEnabled = endSlots.firstWhere(
+                      (t) => isEndEnabled(selectedTime, t),
+                      orElse: () => endSlots.first,
+                    );
+                    if (!stillExists ||
+                        !validOrder ||
+                        !isEndEnabled(selectedTime, selectedEndTime)) {
+                      selectedEndTime = firstEnabled;
+                    }
+                  }
+
+                  void shiftMonth(int delta) {
+                    visibleMonth = DateTime(
+                      visibleMonth.year,
+                      visibleMonth.month + delta,
+                    );
+                  }
+
+                  Widget settingRow({
+                    required String label,
+                    required String value,
+                    required VoidCallback onTap,
+                    required bool enabled,
+                  }) {
+                    return InkWell(
+                      onTap: enabled ? onTap : null,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 12,
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                label,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                  color: enabled
+                                      ? Colors.black87
+                                      : Colors.black.withValues(alpha: 0.35),
+                                ),
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 7,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.06),
+                                borderRadius: BorderRadius.circular(18),
+                                border: Border.all(
+                                  color: Colors.black.withValues(alpha: 0.08),
+                                ),
+                              ),
+                              child: Text(
+                                value,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w800,
+                                  color: enabled
+                                      ? Colors.black87
+                                      : Colors.black.withValues(alpha: 0.35),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }
+
+                  final firstOfMonth = DateTime(
+                    visibleMonth.year,
+                    visibleMonth.month,
+                    1,
+                  );
+                  final daysInMonth = DateUtils.getDaysInMonth(
+                    visibleMonth.year,
+                    visibleMonth.month,
+                  );
+                  final leadingEmpty = firstOfMonth.weekday - 1;
+                  final itemCount = ((leadingEmpty + daysInMonth + 6) ~/ 7) * 7;
+                  final canPickStart = startSlots.any(isStartEnabled);
+                  final canPickEnd = endSlots.any(
+                    (t) => isEndEnabled(selectedTime, t),
+                  );
+                  final canSubmit =
+                      availableDays.isNotEmpty && canPickStart && canPickEnd;
+
+                  return Padding(
+                    padding: EdgeInsets.only(
+                      bottom: MediaQuery.of(ctx).viewInsets.bottom,
+                    ),
+                    child: Container(
+                      decoration: const BoxDecoration(
+                        color: sheetBg,
+                        borderRadius: BorderRadius.vertical(top: sheetRadius),
+                      ),
+                      child: SafeArea(
+                        top: false,
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxHeight:
+                                MediaQuery.of(context).size.height * 0.92,
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const SizedBox(height: 10),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                ),
+                                child: Row(
+                                  children: [
+                                    IconButton(
+                                      onPressed: () => Navigator.of(ctx).pop(),
+                                      icon: const Icon(
+                                        Icons.close_rounded,
+                                        color: Colors.black87,
+                                      ),
+                                      splashRadius: 20,
+                                    ),
+                                    const Expanded(
+                                      child: Text(
+                                        'Schedule booking',
+                                        textAlign: TextAlign.center,
+                                        style: TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w800,
+                                          color: Colors.black87,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 48),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 18,
+                                ),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        '${monthNames[visibleMonth.month - 1]} ${visibleMonth.year}',
+                                        style: const TextStyle(
+                                          fontSize: 22,
+                                          fontWeight: FontWeight.w900,
+                                          color: Colors.black87,
+                                        ),
+                                      ),
+                                    ),
+                                    IconButton(
+                                      onPressed: () =>
+                                          setModalState(() => shiftMonth(-1)),
+                                      icon: const Icon(
+                                        Icons.chevron_left_rounded,
+                                        color: Colors.black54,
+                                      ),
+                                      splashRadius: 18,
+                                    ),
+                                    IconButton(
+                                      onPressed: () =>
+                                          setModalState(() => shiftMonth(1)),
+                                      icon: const Icon(
+                                        Icons.chevron_right_rounded,
+                                        color: Colors.black54,
+                                      ),
+                                      splashRadius: 18,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                ),
+                                child: Row(
+                                  children: [
+                                    for (final label in weekdayHeaders)
+                                      Expanded(
+                                        child: Center(
+                                          child: Text(
+                                            label,
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w700,
+                                              color: Colors.black54,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                ),
+                                child: GridView.builder(
+                                  shrinkWrap: true,
+                                  physics: const NeverScrollableScrollPhysics(),
+                                  itemCount: itemCount,
+                                  gridDelegate:
+                                      const SliverGridDelegateWithFixedCrossAxisCount(
+                                        crossAxisCount: 7,
+                                        mainAxisSpacing: 8,
+                                        crossAxisSpacing: 6,
+                                      ),
+                                  itemBuilder: (context, index) {
+                                    final cellIndex = index - leadingEmpty;
+                                    if (cellIndex < 0 ||
+                                        cellIndex >= daysInMonth) {
+                                      return const SizedBox.shrink();
+                                    }
+                                    final dayNumber = cellIndex + 1;
+                                    final date = DateTime(
+                                      visibleMonth.year,
+                                      visibleMonth.month,
+                                      dayNumber,
+                                    );
+
+                                    if (isBlocked(date))
+                                      return const SizedBox.shrink();
+
+                                    final available = isAvailableDay(date);
+                                    final selected =
+                                        date.year == selectedDay.year &&
+                                        date.month == selectedDay.month &&
+                                        date.day == selectedDay.day;
+
+                                    final textColor = available
+                                        ? Colors.black87
+                                        : Colors.black.withValues(alpha: 0.20);
+
+                                    return GestureDetector(
+                                      onTap: available
+                                          ? () => setModalState(() {
+                                              selectedDay = date;
+                                              visibleMonth = DateTime(
+                                                date.year,
+                                                date.month,
+                                              );
+                                              final range =
+                                                  weeklyRanges[date.weekday];
+                                              final daySlots = range == null
+                                                  ? const <TimeOfDay>[]
+                                                  : _generateTimeSlots(
+                                                      start: range.start,
+                                                      end: range.end,
+                                                      minuteInterval: 15,
+                                                    );
+                                              if (daySlots.isNotEmpty) {
+                                                selectedTime = daySlots.first;
+                                              }
+                                              if (range != null) {
+                                                selectedEndTime = ensureEndTime(
+                                                  selectedTime,
+                                                  selectedEndTime,
+                                                  range.end,
+                                                );
+                                              }
+                                            })
+                                          : null,
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          color: selected
+                                              ? _primaryColor
+                                              : Colors.transparent,
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: Center(
+                                          child: Text(
+                                            dayNumber.toString(),
+                                            style: TextStyle(
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.w800,
+                                              color: selected
+                                                  ? Colors.black
+                                                  : textColor,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Divider(height: 1, color: Colors.black12),
+                              if (takenRanges.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    18,
+                                    10,
+                                    18,
+                                    2,
+                                  ),
+                                  child: Text(
+                                    'Taken: ${takenRanges.map((r) => '${timeLabel(TimeOfDay.fromDateTime(r.start))} – ${timeLabel(TimeOfDay.fromDateTime(r.end))}').join(', ')}',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.black.withValues(
+                                        alpha: 0.55,
+                                      ),
+                                    ),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              settingRow(
+                                label: 'Select time',
+                                value:
+                                    '${timeLabel(selectedTime)} – ${timeLabel(selectedEndTime)}',
+                                enabled: canSubmit,
+                                onTap: () async {
+                                  final range = dayRange;
+                                  if (range == null) return;
+
+                                  await showGeneralDialog<void>(
+                                    context: context,
+                                    barrierDismissible: true,
+                                    barrierLabel: 'Select time',
+                                    barrierColor: Colors.black.withValues(
+                                      alpha: 0.55,
+                                    ),
+                                    transitionDuration: const Duration(
+                                      milliseconds: 180,
+                                    ),
+                                    pageBuilder: (context, animation, secondaryAnimation) {
+                                      TimeOfDay localStart = selectedTime;
+                                      TimeOfDay localEnd = selectedEndTime;
+
+                                      return StatefulBuilder(
+                                        builder: (context, setDialogState) {
+                                          final startOptions = startSlots;
+
+                                          TimeOfDay pickFirstEnabledStart() {
+                                            return startOptions.firstWhere(
+                                              isStartEnabled,
+                                              orElse: () => startOptions.first,
+                                            );
+                                          }
+
+                                          if (!startOptions.any(
+                                            (t) =>
+                                                t.hour == localStart.hour &&
+                                                t.minute == localStart.minute,
+                                          )) {
+                                            localStart =
+                                                pickFirstEnabledStart();
+                                          }
+                                          if (!isStartEnabled(localStart)) {
+                                            localStart =
+                                                pickFirstEnabledStart();
+                                          }
+
+                                          final endOptions = endOptionsFor(
+                                            localStart,
+                                          );
+
+                                          TimeOfDay pickFirstEnabledEnd() {
+                                            return endOptions.firstWhere(
+                                              (t) =>
+                                                  isEndEnabled(localStart, t),
+                                              orElse: () => endOptions.first,
+                                            );
+                                          }
+
+                                          if (endOptions.isNotEmpty) {
+                                            if (!endOptions.any(
+                                              (t) =>
+                                                  t.hour == localEnd.hour &&
+                                                  t.minute == localEnd.minute,
+                                            )) {
+                                              localEnd = pickFirstEnabledEnd();
+                                            }
+                                            if (!isEndEnabled(
+                                              localStart,
+                                              localEnd,
+                                            )) {
+                                              localEnd = pickFirstEnabledEnd();
+                                            }
+                                          }
+
+                                          final startIndex = max(
+                                            0,
+                                            startOptions.indexWhere(
+                                              (t) =>
+                                                  t.hour == localStart.hour &&
+                                                  t.minute == localStart.minute,
+                                            ),
+                                          );
+                                          final endIndex = max(
+                                            0,
+                                            endOptions.indexWhere(
+                                              (t) =>
+                                                  t.hour == localEnd.hour &&
+                                                  t.minute == localEnd.minute,
+                                            ),
+                                          );
+
+                                          final startController =
+                                              FixedExtentScrollController(
+                                                initialItem: startIndex,
+                                              );
+                                          final endController =
+                                              FixedExtentScrollController(
+                                                initialItem: endIndex,
+                                              );
+
+                                          const dialogTitleStyle = TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w800,
+                                            color: Colors.black87,
+                                            decoration: TextDecoration.none,
+                                            letterSpacing: 0,
+                                            height: 1.0,
+                                          );
+                                          const dialogLabelStyle = TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w800,
+                                            color: Colors.black87,
+                                            decoration: TextDecoration.none,
+                                            letterSpacing: 0,
+                                            height: 1.0,
+                                          );
+
+                                          return Theme(
+                                            data: Theme.of(ctx),
+                                            child: Material(
+                                              type: MaterialType.transparency,
+                                              child: Center(
+                                                child: ClipRRect(
+                                                  borderRadius:
+                                                      BorderRadius.circular(22),
+                                                  child: BackdropFilter(
+                                                    filter: ui.ImageFilter.blur(
+                                                      sigmaX: 14,
+                                                      sigmaY: 14,
+                                                    ),
+                                                    child: Container(
+                                                      width: 340,
+                                                      padding:
+                                                          const EdgeInsets.fromLTRB(
+                                                            16,
+                                                            14,
+                                                            16,
+                                                            10,
+                                                          ),
+                                                      decoration: BoxDecoration(
+                                                        color: sheetBg
+                                                            .withValues(
+                                                              alpha: 0.98,
+                                                            ),
+                                                        border: Border.all(
+                                                          color: Colors.black
+                                                              .withValues(
+                                                                alpha: 0.10,
+                                                              ),
+                                                        ),
+                                                      ),
+                                                      child: Column(
+                                                        mainAxisSize:
+                                                            MainAxisSize.min,
+                                                        children: [
+                                                          Text(
+                                                            'Select time',
+                                                            style:
+                                                                dialogTitleStyle,
+                                                          ),
+                                                          const SizedBox(
+                                                            height: 12,
+                                                          ),
+                                                          Align(
+                                                            alignment: Alignment
+                                                                .centerLeft,
+                                                            child: Text(
+                                                              'Start',
+                                                              style:
+                                                                  dialogLabelStyle,
+                                                            ),
+                                                          ),
+                                                          const SizedBox(
+                                                            height: 6,
+                                                          ),
+                                                          SizedBox(
+                                                            height: 150,
+                                                            child: CupertinoTheme(
+                                                              data: const CupertinoThemeData(
+                                                                brightness:
+                                                                    Brightness
+                                                                        .light,
+                                                              ),
+                                                              child: CupertinoPicker(
+                                                                scrollController:
+                                                                    startController,
+                                                                itemExtent: 36,
+                                                                magnification:
+                                                                    1.08,
+                                                                useMagnifier:
+                                                                    true,
+                                                                onSelectedItemChanged: (index) {
+                                                                  final picked =
+                                                                      startOptions[index];
+                                                                  setDialogState(
+                                                                    () {
+                                                                      localStart =
+                                                                          picked;
+                                                                    },
+                                                                  );
+                                                                },
+                                                                children: [
+                                                                  for (final t
+                                                                      in startOptions)
+                                                                    Center(
+                                                                      child: Text(
+                                                                        timeLabel(
+                                                                          t,
+                                                                        ),
+                                                                        style: TextStyle(
+                                                                          fontSize:
+                                                                              18,
+                                                                          fontWeight:
+                                                                              FontWeight.w800,
+                                                                          color:
+                                                                              isStartEnabled(
+                                                                                t,
+                                                                              )
+                                                                              ? Colors.black87
+                                                                              : Colors.black.withValues(
+                                                                                  alpha: 0.35,
+                                                                                ),
+                                                                          decoration:
+                                                                              TextDecoration.none,
+                                                                        ),
+                                                                      ),
+                                                                    ),
+                                                                ],
+                                                              ),
+                                                            ),
+                                                          ),
+                                                          const SizedBox(
+                                                            height: 10,
+                                                          ),
+                                                          Align(
+                                                            alignment: Alignment
+                                                                .centerLeft,
+                                                            child: Text(
+                                                              'End',
+                                                              style:
+                                                                  dialogLabelStyle,
+                                                            ),
+                                                          ),
+                                                          const SizedBox(
+                                                            height: 6,
+                                                          ),
+                                                          SizedBox(
+                                                            height: 150,
+                                                            child: CupertinoTheme(
+                                                              data: const CupertinoThemeData(
+                                                                brightness:
+                                                                    Brightness
+                                                                        .light,
+                                                              ),
+                                                              child: CupertinoPicker(
+                                                                key: ValueKey(
+                                                                  '${localStart.hour}:${localStart.minute}',
+                                                                ),
+                                                                scrollController:
+                                                                    endController,
+                                                                itemExtent: 36,
+                                                                magnification:
+                                                                    1.08,
+                                                                useMagnifier:
+                                                                    true,
+                                                                onSelectedItemChanged: (index) {
+                                                                  final picked =
+                                                                      endOptions[index];
+                                                                  setDialogState(
+                                                                    () {
+                                                                      localEnd =
+                                                                          picked;
+                                                                    },
+                                                                  );
+                                                                },
+                                                                children: [
+                                                                  for (final t
+                                                                      in endOptions)
+                                                                    Center(
+                                                                      child: Text(
+                                                                        timeLabel(
+                                                                          t,
+                                                                        ),
+                                                                        style: TextStyle(
+                                                                          fontSize:
+                                                                              18,
+                                                                          fontWeight:
+                                                                              FontWeight.w800,
+                                                                          color:
+                                                                              isEndEnabled(
+                                                                                localStart,
+                                                                                t,
+                                                                              )
+                                                                              ? Colors.black87
+                                                                              : Colors.black.withValues(
+                                                                                  alpha: 0.35,
+                                                                                ),
+                                                                          decoration:
+                                                                              TextDecoration.none,
+                                                                        ),
+                                                                      ),
+                                                                    ),
+                                                                ],
+                                                              ),
+                                                            ),
+                                                          ),
+                                                          const SizedBox(
+                                                            height: 10,
+                                                          ),
+                                                          SizedBox(
+                                                            width:
+                                                                double.infinity,
+                                                            child: ElevatedButton(
+                                                              onPressed: () {
+                                                                if (!isStartEnabled(
+                                                                      localStart,
+                                                                    ) ||
+                                                                    !isEndEnabled(
+                                                                      localStart,
+                                                                      localEnd,
+                                                                    )) {
+                                                                  ScaffoldMessenger.of(
+                                                                    ctx,
+                                                                  ).showSnackBar(
+                                                                    const SnackBar(
+                                                                      content: Text(
+                                                                        'That time range is already taken. Please choose another slot.',
+                                                                      ),
+                                                                      behavior:
+                                                                          SnackBarBehavior
+                                                                              .floating,
+                                                                    ),
+                                                                  );
+                                                                  return;
+                                                                }
+                                                                Navigator.of(
+                                                                  context,
+                                                                ).pop();
+                                                                setModalState(() {
+                                                                  selectedTime =
+                                                                      localStart;
+                                                                  selectedEndTime =
+                                                                      localEnd;
+                                                                });
+                                                              },
+                                                              style:
+                                                                  schedulePrimaryButtonStyle,
+                                                              child: const Text(
+                                                                'Done',
+                                                              ),
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      );
+                                    },
+                                    transitionBuilder:
+                                        (context, animation, _, child) {
+                                          return FadeTransition(
+                                            opacity: animation,
+                                            child: ScaleTransition(
+                                              scale:
+                                                  Tween<double>(
+                                                    begin: 0.96,
+                                                    end: 1.0,
+                                                  ).animate(
+                                                    CurvedAnimation(
+                                                      parent: animation,
+                                                      curve:
+                                                          Curves.easeOutCubic,
+                                                    ),
+                                                  ),
+                                              child: child,
+                                            ),
+                                          );
+                                        },
+                                  );
+                                },
+                              ),
+                              Divider(height: 1, color: Colors.black12),
+                              const SizedBox(height: 16),
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  18,
+                                  0,
+                                  18,
+                                  18,
+                                ),
+                                child: SizedBox(
+                                  width: double.infinity,
+                                  child: ElevatedButton(
+                                    onPressed: canSubmit
+                                        ? () {
+                                            Navigator.of(ctx).pop();
+                                            final scheduled = DateTime(
+                                              selectedDay.year,
+                                              selectedDay.month,
+                                              selectedDay.day,
+                                              selectedTime.hour,
+                                              selectedTime.minute,
+                                            );
+                                            _goToSummary(
+                                              scheduleDate: scheduled,
+                                              startTime: selectedTime,
+                                              endTime: selectedEndTime,
+                                              showSchedule: true,
+                                            );
+                                          }
+                                        : null,
+                                    style: schedulePrimaryButtonStyle,
+                                    child: Text(
+                                      canSubmit
+                                          ? 'Book ${const ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][selectedDay.weekday - 1]} ${selectedDay.day} ${monthNames[selectedDay.month - 1]} at ${timeLabel(selectedTime)}'
+                                          : 'Book in advance',
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              );
+            },
+          );
+        },
+      );
+    } finally {
+      if (mounted) setState(() => _modalSheetScrimVisible = false);
+    }
+  }
+
+  Future<void> _openScheduleSheet() async {
     final caregiver = _selectedCaregiverModel;
     if (caregiver == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -882,157 +2100,27 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     }
 
     DateTime selected = DateTime.now().add(const Duration(minutes: 30));
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (ctx) {
-        final availabilityFuture = FirebaseFirestore.instance
-            .collection('availability')
-            .doc(caregiver.id)
-            .get();
+    if (!mounted) return;
+    setState(() => _modalSheetScrimVisible = true);
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        barrierColor: Colors.transparent,
+        backgroundColor: Colors.white,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+        ),
+        builder: (ctx) {
+          final availabilityFuture = FirebaseFirestore.instance
+              .collection('availability')
+              .doc(caregiver.id)
+              .get();
 
-        return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-          future: availabilityFuture,
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return Padding(
-                padding: EdgeInsets.only(
-                  bottom: MediaQuery.of(ctx).viewInsets.bottom,
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const SizedBox(height: 12),
-                    Container(
-                      width: 38,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: Colors.grey[400],
-                        borderRadius: BorderRadius.circular(24),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'Schedule booking',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 16,
-                      ),
-                    ),
-                    const SizedBox(height: 18),
-                    const SizedBox(
-                      height: 220,
-                      child: Center(child: CircularProgressIndicator()),
-                    ),
-                    const SizedBox(height: 20),
-                  ],
-                ),
-              );
-            }
-
-            final data = snapshot.data?.data() ?? const <String, dynamic>{};
-            final blockedRanges = _parseBlockedDateRanges(data['blockedDates']);
-            final disabledWeekdays = _parseUnavailableWeekdays(
-              data['weeklySchedule'],
-            );
-            final weeklyRanges = _parseWeeklyTimeRanges(data['weeklySchedule']);
-
-            DateTime normalize(DateTime d) => DateTime(d.year, d.month, d.day);
-            bool isBlocked(DateTime day) {
-              final date = normalize(day);
-              for (final range in blockedRanges) {
-                final start = normalize(range.start);
-                final end = normalize(range.end);
-                if (!date.isBefore(start) && !date.isAfter(end)) return true;
-              }
-              return false;
-            }
-
-            bool isAvailableDay(DateTime day) {
-              final date = normalize(day);
-              final today = normalize(DateTime.now());
-              if (date.isBefore(today)) return false;
-              if (disabledWeekdays.contains(date.weekday)) return false;
-              if (isBlocked(date)) return false;
-              if (!weeklyRanges.containsKey(date.weekday)) return false;
-              return true;
-            }
-
-            final today = normalize(DateTime.now());
-            final availableDays = <DateTime>[];
-            for (int i = 0; i < 180; i++) {
-              final day = today.add(Duration(days: i));
-              if (isAvailableDay(day)) availableDays.add(day);
-              if (availableDays.length >= 120) break;
-            }
-
-            DateTime selectedDay = availableDays.isNotEmpty
-                ? availableDays.first
-                : today;
-            TimeOfDay selectedTime = TimeOfDay.fromDateTime(selected);
-            selectedTime = _alignTimeToInterval(selectedTime, 15);
-            return StatefulBuilder(
-              builder: (context, setModalState) {
-                final weeklyRanges = _parseWeeklyTimeRanges(
-                  data['weeklySchedule'],
-                );
-                final dayRange = weeklyRanges[selectedDay.weekday];
-                final slots = dayRange == null
-                    ? const <TimeOfDay>[]
-                    : _generateTimeSlots(
-                        start: dayRange.start,
-                        end: dayRange.end,
-                        minuteInterval: 15,
-                      );
-                if (slots.isNotEmpty) {
-                  final currentIndex = slots.indexWhere(
-                    (t) =>
-                        t.hour == selectedTime.hour &&
-                        t.minute == selectedTime.minute,
-                  );
-                  if (currentIndex < 0) {
-                    selectedTime = slots.first;
-                  }
-                }
-                String weekdayLabel(DateTime day) => const [
-                  'Mon',
-                  'Tue',
-                  'Wed',
-                  'Thu',
-                  'Fri',
-                  'Sat',
-                  'Sun',
-                ][day.weekday - 1];
-
-                String monthLabel(int month) => const [
-                  'Jan',
-                  'Feb',
-                  'Mar',
-                  'Apr',
-                  'May',
-                  'Jun',
-                  'Jul',
-                  'Aug',
-                  'Sep',
-                  'Oct',
-                  'Nov',
-                  'Dec',
-                ][month - 1];
-
-                String selectedDateLabel(DateTime day) {
-                  return '${weekdayLabel(day)}, ${day.day} ${monthLabel(day.month)} ${day.year}';
-                }
-
-                String timeLabel(TimeOfDay t) {
-                  final h = t.hour.toString().padLeft(2, '0');
-                  final m = t.minute.toString().padLeft(2, '0');
-                  return '$h:$m';
-                }
-
+          return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+            future: availabilityFuture,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
                 return Padding(
                   padding: EdgeInsets.only(
                     bottom: MediaQuery.of(ctx).viewInsets.bottom,
@@ -1051,276 +2139,429 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                       ),
                       const SizedBox(height: 16),
                       const Text(
-                        'Choose date & time',
+                        'Schedule booking',
                         style: TextStyle(
                           fontWeight: FontWeight.w800,
-                          fontSize: 17,
+                          fontSize: 16,
                         ),
                       ),
-                      const SizedBox(height: 10),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.event_available_rounded,
-                              size: 18,
-                              color: Colors.black87,
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
+                      const SizedBox(height: 18),
+                      const SizedBox(
+                        height: 220,
+                        child: Center(child: CircularProgressIndicator()),
+                      ),
+                      const SizedBox(height: 20),
+                    ],
+                  ),
+                );
+              }
+
+              final data = snapshot.data?.data() ?? const <String, dynamic>{};
+              final blockedRanges = _parseBlockedDateRanges(
+                data['blockedDates'],
+              );
+              final disabledWeekdays = _parseUnavailableWeekdays(
+                data['weeklySchedule'],
+              );
+              final weeklyRanges = _parseWeeklyTimeRanges(
+                data['weeklySchedule'],
+              );
+
+              DateTime normalize(DateTime d) =>
+                  DateTime(d.year, d.month, d.day);
+              bool isBlocked(DateTime day) {
+                final date = normalize(day);
+                for (final range in blockedRanges) {
+                  final start = normalize(range.start);
+                  final end = normalize(range.end);
+                  if (!date.isBefore(start) && !date.isAfter(end)) return true;
+                }
+                return false;
+              }
+
+              bool isAvailableDay(DateTime day) {
+                final date = normalize(day);
+                final today = normalize(DateTime.now());
+                if (date.isBefore(today)) return false;
+                if (disabledWeekdays.contains(date.weekday)) return false;
+                if (isBlocked(date)) return false;
+                if (!weeklyRanges.containsKey(date.weekday)) return false;
+                return true;
+              }
+
+              final today = normalize(DateTime.now());
+              final availableDays = <DateTime>[];
+              for (int i = 0; i < 180; i++) {
+                final day = today.add(Duration(days: i));
+                if (isAvailableDay(day)) availableDays.add(day);
+                if (availableDays.length >= 120) break;
+              }
+
+              DateTime selectedDay = availableDays.isNotEmpty
+                  ? availableDays.first
+                  : today;
+              TimeOfDay selectedTime = TimeOfDay.fromDateTime(selected);
+              selectedTime = _alignTimeToInterval(selectedTime, 15);
+              return StatefulBuilder(
+                builder: (context, setModalState) {
+                  final weeklyRanges = _parseWeeklyTimeRanges(
+                    data['weeklySchedule'],
+                  );
+                  final dayRange = weeklyRanges[selectedDay.weekday];
+                  final slots = dayRange == null
+                      ? const <TimeOfDay>[]
+                      : _generateTimeSlots(
+                          start: dayRange.start,
+                          end: dayRange.end,
+                          minuteInterval: 15,
+                        );
+                  if (slots.isNotEmpty) {
+                    final currentIndex = slots.indexWhere(
+                      (t) =>
+                          t.hour == selectedTime.hour &&
+                          t.minute == selectedTime.minute,
+                    );
+                    if (currentIndex < 0) {
+                      selectedTime = slots.first;
+                    }
+                  }
+                  String weekdayLabel(DateTime day) => const [
+                    'Mon',
+                    'Tue',
+                    'Wed',
+                    'Thu',
+                    'Fri',
+                    'Sat',
+                    'Sun',
+                  ][day.weekday - 1];
+
+                  String monthLabel(int month) => const [
+                    'Jan',
+                    'Feb',
+                    'Mar',
+                    'Apr',
+                    'May',
+                    'Jun',
+                    'Jul',
+                    'Aug',
+                    'Sep',
+                    'Oct',
+                    'Nov',
+                    'Dec',
+                  ][month - 1];
+
+                  String selectedDateLabel(DateTime day) {
+                    return '${weekdayLabel(day)}, ${day.day} ${monthLabel(day.month)} ${day.year}';
+                  }
+
+                  String timeLabel(TimeOfDay t) {
+                    final h = t.hour.toString().padLeft(2, '0');
+                    final m = t.minute.toString().padLeft(2, '0');
+                    return '$h:$m';
+                  }
+
+                  return Padding(
+                    padding: EdgeInsets.only(
+                      bottom: MediaQuery.of(ctx).viewInsets.bottom,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const SizedBox(height: 12),
+                        Container(
+                          width: 38,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: Colors.grey[400],
+                            borderRadius: BorderRadius.circular(24),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'Choose date & time',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 17,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.event_available_rounded,
+                                size: 18,
+                                color: Colors.black87,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  availableDays.isEmpty
+                                      ? 'No available dates'
+                                      : '${selectedDateLabel(selectedDay)} • ${timeLabel(selectedTime)}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.black54,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (availableDays.isEmpty) ...[
+                          const SizedBox(height: 18),
+                          const SizedBox(
+                            height: 120,
+                            child: Center(
                               child: Text(
-                                availableDays.isEmpty
-                                    ? 'No available dates'
-                                    : '${selectedDateLabel(selectedDay)} • ${timeLabel(selectedTime)}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
+                                'No available dates found.',
+                                style: TextStyle(
                                   color: Colors.black54,
-                                  fontSize: 12,
+                                  fontSize: 13,
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
                             ),
-                          ],
-                        ),
-                      ),
-                      if (availableDays.isEmpty) ...[
-                        const SizedBox(height: 18),
-                        const SizedBox(
-                          height: 120,
-                          child: Center(
+                          ),
+                        ] else ...[
+                          const SizedBox(height: 14),
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 16),
                             child: Text(
-                              'No available dates found.',
+                              'Date',
                               style: TextStyle(
-                                color: Colors.black54,
+                                fontWeight: FontWeight.w800,
                                 fontSize: 13,
-                                fontWeight: FontWeight.w600,
+                                color: Colors.black87,
                               ),
                             ),
                           ),
-                        ),
-                      ] else ...[
-                        const SizedBox(height: 14),
-                        const Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 16),
-                          child: Text(
-                            'Date',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w800,
-                              fontSize: 13,
-                              color: Colors.black87,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        SizedBox(
-                          height: 74,
-                          child: ListView.separated(
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            scrollDirection: Axis.horizontal,
-                            itemCount: availableDays.length,
-                            separatorBuilder: (_, __) =>
-                                const SizedBox(width: 8),
-                            itemBuilder: (context, index) {
-                              final day = availableDays[index];
-                              final isSelected =
-                                  day.year == selectedDay.year &&
-                                  day.month == selectedDay.month &&
-                                  day.day == selectedDay.day;
-                              return GestureDetector(
-                                onTap: () => setModalState(() {
-                                  selectedDay = day;
-                                  final range = weeklyRanges[day.weekday];
-                                  final daySlots = range == null
-                                      ? const <TimeOfDay>[]
-                                      : _generateTimeSlots(
-                                          start: range.start,
-                                          end: range.end,
-                                          minuteInterval: 15,
-                                        );
-                                  if (daySlots.isNotEmpty) {
-                                    selectedTime = daySlots.first;
-                                  }
-                                }),
-                                child: Container(
-                                  width: 58,
-                                  decoration: BoxDecoration(
-                                    color: isSelected
-                                        ? _caregiverMatchAccent.withValues(
-                                            alpha: 0.10,
-                                          )
-                                        : Colors.white,
-                                    borderRadius: BorderRadius.circular(16),
-                                    border: Border.all(
+                          const SizedBox(height: 10),
+                          SizedBox(
+                            height: 74,
+                            child: ListView.separated(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                              ),
+                              scrollDirection: Axis.horizontal,
+                              itemCount: availableDays.length,
+                              separatorBuilder: (_, __) =>
+                                  const SizedBox(width: 8),
+                              itemBuilder: (context, index) {
+                                final day = availableDays[index];
+                                final isSelected =
+                                    day.year == selectedDay.year &&
+                                    day.month == selectedDay.month &&
+                                    day.day == selectedDay.day;
+                                return GestureDetector(
+                                  onTap: () => setModalState(() {
+                                    selectedDay = day;
+                                    final range = weeklyRanges[day.weekday];
+                                    final daySlots = range == null
+                                        ? const <TimeOfDay>[]
+                                        : _generateTimeSlots(
+                                            start: range.start,
+                                            end: range.end,
+                                            minuteInterval: 15,
+                                          );
+                                    if (daySlots.isNotEmpty) {
+                                      selectedTime = daySlots.first;
+                                    }
+                                  }),
+                                  child: Container(
+                                    width: 58,
+                                    decoration: BoxDecoration(
                                       color: isSelected
-                                          ? _caregiverMatchAccent
-                                          : Colors.grey.shade300,
-                                      width: isSelected ? 1.6 : 1,
-                                    ),
-                                    boxShadow: const [
-                                      BoxShadow(
-                                        color: Color(0x08000000),
-                                        blurRadius: 4,
-                                        offset: Offset(0, 1),
+                                          ? _caregiverMatchAccent.withValues(
+                                              alpha: 0.10,
+                                            )
+                                          : Colors.white,
+                                      borderRadius: BorderRadius.circular(16),
+                                      border: Border.all(
+                                        color: isSelected
+                                            ? _caregiverMatchAccent
+                                            : Colors.grey.shade300,
+                                        width: isSelected ? 1.6 : 1,
                                       ),
-                                    ],
-                                  ),
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 8,
-                                  ),
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Text(
-                                        weekdayLabel(day),
-                                        style: TextStyle(
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.black54,
+                                      boxShadow: const [
+                                        BoxShadow(
+                                          color: Color(0x08000000),
+                                          blurRadius: 4,
+                                          offset: Offset(0, 1),
                                         ),
-                                      ),
-                                      const SizedBox(height: 6),
-                                      Text(
-                                        day.day.toString().padLeft(2, '0'),
-                                        style: TextStyle(
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.w800,
-                                          color: isSelected
-                                              ? _caregiverMatchAccent
-                                              : Colors.black87,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                        ),
-                        const SizedBox(height: 14),
-                        const Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 16),
-                          child: Text(
-                            'Start time',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w800,
-                              fontSize: 13,
-                              color: Colors.black87,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        SizedBox(
-                          height: 180,
-                          child: slots.isEmpty
-                              ? const Center(
-                                  child: Text(
-                                    'No available times for this day.',
-                                    style: TextStyle(
-                                      color: Colors.black54,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w600,
+                                      ],
                                     ),
-                                  ),
-                                )
-                              : CupertinoPicker(
-                                  scrollController: FixedExtentScrollController(
-                                    initialItem: slots
-                                        .indexWhere(
-                                          (t) =>
-                                              t.hour == selectedTime.hour &&
-                                              t.minute == selectedTime.minute,
-                                        )
-                                        .clamp(0, slots.length - 1),
-                                  ),
-                                  itemExtent: 40,
-                                  magnification: 1.06,
-                                  useMagnifier: true,
-                                  onSelectedItemChanged: (index) =>
-                                      setModalState(() {
-                                        selectedTime = slots[index];
-                                      }),
-                                  children: [
-                                    for (final slot in slots)
-                                      Center(
-                                        child: Text(
-                                          _formatTime24(slot),
-                                          style: const TextStyle(
-                                            fontSize: 16,
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 8,
+                                    ),
+                                    child: Column(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Text(
+                                          weekdayLabel(day),
+                                          style: TextStyle(
+                                            fontSize: 10,
                                             fontWeight: FontWeight.w700,
+                                            color: Colors.black54,
                                           ),
                                         ),
-                                      ),
-                                  ],
-                                ),
-                        ),
-                      ],
-                      const Padding(
-                        padding: EdgeInsets.symmetric(
-                          horizontal: 20,
-                          vertical: 8,
-                        ),
-                        child: Text(
-                          'Select a date and start time.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.black54, fontSize: 11),
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
-                        child: SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton(
-                            onPressed: availableDays.isEmpty || slots.isEmpty
-                                ? null
-                                : () {
-                                    Navigator.of(ctx).pop();
-                                    final scheduled = DateTime(
-                                      selectedDay.year,
-                                      selectedDay.month,
-                                      selectedDay.day,
-                                      selectedTime.hour,
-                                      selectedTime.minute,
-                                    );
-                                    final startTime = TimeOfDay.fromDateTime(
-                                      scheduled,
-                                    );
-                                    _goToSummary(
-                                      scheduleDate: scheduled,
-                                      startTime: startTime,
-                                      endTime: _endTimeFromStart(startTime),
-                                      showSchedule: true,
-                                    );
-                                  },
-                            style: ElevatedButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(vertical: 14),
-                              backgroundColor: const Color(0xFFF4B63D),
-                              foregroundColor: Colors.black,
-                              textStyle: const TextStyle(
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          day.day.toString().padLeft(2, '0'),
+                                          style: TextStyle(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w800,
+                                            color: isSelected
+                                                ? _caregiverMatchAccent
+                                                : Colors.black87,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                          const SizedBox(height: 14),
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 16),
+                            child: Text(
+                              'Start time',
+                              style: TextStyle(
                                 fontWeight: FontWeight.w800,
-                                fontSize: 15,
-                              ),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(18),
+                                fontSize: 13,
+                                color: Colors.black87,
                               ),
                             ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: const [Text('Book in advance')],
+                          ),
+                          const SizedBox(height: 10),
+                          SizedBox(
+                            height: 180,
+                            child: slots.isEmpty
+                                ? const Center(
+                                    child: Text(
+                                      'No available times for this day.',
+                                      style: TextStyle(
+                                        color: Colors.black54,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  )
+                                : CupertinoPicker(
+                                    scrollController:
+                                        FixedExtentScrollController(
+                                          initialItem: slots
+                                              .indexWhere(
+                                                (t) =>
+                                                    t.hour ==
+                                                        selectedTime.hour &&
+                                                    t.minute ==
+                                                        selectedTime.minute,
+                                              )
+                                              .clamp(0, slots.length - 1),
+                                        ),
+                                    itemExtent: 40,
+                                    magnification: 1.06,
+                                    useMagnifier: true,
+                                    onSelectedItemChanged: (index) =>
+                                        setModalState(() {
+                                          selectedTime = slots[index];
+                                        }),
+                                    children: [
+                                      for (final slot in slots)
+                                        Center(
+                                          child: Text(
+                                            _formatTime24(slot),
+                                            style: const TextStyle(
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                          ),
+                        ],
+                        const Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 20,
+                            vertical: 8,
+                          ),
+                          child: Text(
+                            'Select a date and start time.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.black54,
+                              fontSize: 11,
                             ),
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            );
-          },
-        );
-      },
-    );
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                          child: SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton(
+                              onPressed: availableDays.isEmpty || slots.isEmpty
+                                  ? null
+                                  : () {
+                                      Navigator.of(ctx).pop();
+                                      final scheduled = DateTime(
+                                        selectedDay.year,
+                                        selectedDay.month,
+                                        selectedDay.day,
+                                        selectedTime.hour,
+                                        selectedTime.minute,
+                                      );
+                                      final startTime = TimeOfDay.fromDateTime(
+                                        scheduled,
+                                      );
+                                      _goToSummary(
+                                        scheduleDate: scheduled,
+                                        startTime: startTime,
+                                        endTime: _endTimeFromStart(startTime),
+                                        showSchedule: true,
+                                      );
+                                    },
+                              style: ElevatedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 14,
+                                ),
+                                backgroundColor: const Color(0xFFF4B63D),
+                                foregroundColor: Colors.black,
+                                textStyle: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 15,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(18),
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: const [Text('Book in advance')],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              );
+            },
+          );
+        },
+      );
+    } finally {
+      if (mounted) setState(() => _modalSheetScrimVisible = false);
+    }
   }
 
   List<DateTimeRange> _parseBlockedDateRanges(dynamic raw) {
@@ -1497,6 +2738,12 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                     : 'Care location'));
     final double panelHeight = _currentSheetHeight(context);
     final double bottomInset = MediaQuery.of(context).padding.bottom;
+    final mediaPadding = MediaQuery.of(context).padding;
+    final screenHeight = MediaQuery.of(context).size.height;
+    final mapTopPadding = mediaPadding.top + kToolbarHeight + 8;
+    // Keep Google attribution/logo above the bottom sheet + front card.
+    final minPanelHeight = _minSheetSize * screenHeight;
+    final mapBottomPadding = minPanelHeight + mediaPadding.bottom + 1;
     final double frontBottom = _hideFrontPanel
         ? -110
         : (bottomInset + 2).clamp(4.0, double.infinity);
@@ -1508,21 +2755,27 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     );
     return Scaffold(
       backgroundColor: _pageBackground,
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
-        backgroundColor: Colors.white,
+        backgroundColor: Colors.transparent,
         elevation: 0,
         centerTitle: true,
         automaticallyImplyLeading: false,
-        flexibleSpace: Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.08),
-                blurRadius: 8,
-                offset: const Offset(0, 4),
+        flexibleSpace: ClipRect(
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.86),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.08),
+                    blurRadius: 8,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
         leading: IconButton(
@@ -1553,7 +2806,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                 border: Border.all(
                   color: Colors.black12.withValues(alpha: 0.08),
                 ),
-                borderRadius: BorderRadius.circular(18),
+                borderRadius: BorderRadius.zero,
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withValues(alpha: 0.10),
@@ -1569,12 +2822,20 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                     top: 0,
                     left: 0,
                     right: 0,
-                    bottom: _minSheetHeightPx(context),
+                    bottom: 0,
                     child: GoogleMap(
                       initialCameraPosition: _cameraPosition(_currentLatLng),
                       style: boldMapStyle,
                       myLocationEnabled: false,
+                      mapToolbarEnabled: false,
+                      compassEnabled: false,
                       zoomControlsEnabled: false,
+                      padding: EdgeInsets.fromLTRB(
+                        0,
+                        mapTopPadding,
+                        0,
+                        mapBottomPadding,
+                      ),
                       markers: _markers.isNotEmpty
                           ? _markers
                           : {_selectedMarker()},
@@ -1589,6 +2850,18 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 180),
                       color: Colors.black.withValues(alpha: _backdropOpacity),
+                    ),
+                  ),
+                  IgnorePointer(
+                    ignoring: true,
+                    child: AnimatedOpacity(
+                      duration: const Duration(milliseconds: 160),
+                      curve: Curves.easeOut,
+                      opacity: _modalSheetScrimVisible ? 1 : 0,
+                      child: ColoredBox(
+                        color: Colors.black.withValues(alpha: 0.54),
+                        child: SizedBox.expand(),
+                      ),
                     ),
                   ),
                   Positioned(
@@ -1669,10 +2942,12 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                                   ),
                                   children: [
                                     if (_loadingCaregivers)
-                                      const Padding(
-                                        padding: EdgeInsets.all(24),
+                                      Padding(
+                                        padding: const EdgeInsets.all(24),
                                         child: Center(
-                                          child: CircularProgressIndicator(),
+                                          child: _buildLoadingHint(
+                                            message: 'No caregivers nearby',
+                                          ),
                                         ),
                                       )
                                     else if (_caregivers.isEmpty)
@@ -1972,7 +3247,30 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       items = [];
     }
     if (items.isEmpty) {
-      return const SizedBox.shrink();
+      if (category != CaregiverCategory.nearby) return const SizedBox.shrink();
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(key: _sectionKeys[category], height: 0),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(6, 8, 6, 6),
+            child: Text(
+              _labelFor(category),
+              style: const TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 13,
+                color: Colors.black87,
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(6, 14, 6, 20),
+            child: Center(
+              child: _buildNoCaregiversHint(message: 'No caregivers nearby'),
+            ),
+          ),
+        ],
+      );
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2011,6 +3309,33 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         const SizedBox(height: 10),
         Text(
           message ?? 'No caregivers nearby',
+          style: const TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 15,
+            color: Colors.black87,
+          ),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          'Caregivers matching your request will appear.',
+          style: TextStyle(fontSize: 12, color: Colors.black54),
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLoadingHint({String? message}) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.search_rounded, size: 32, color: _caregiverMatchAccent),
+        const SizedBox(height: 10),
+        Text(
+          message ?? 'Loading...',
           style: const TextStyle(
             fontWeight: FontWeight.w700,
             fontSize: 15,
@@ -2100,14 +3425,26 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Text(
-                          caregiver.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w800,
-                            fontSize: 13,
-                          ),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                caregiver.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ),
+                            if (isRecommendation) ...[
+                              const SizedBox(width: 8),
+                              _RecommendationClassChip(
+                                classLevel: caregiver.recommendationClass,
+                              ),
+                            ],
+                          ],
                         ),
                         const SizedBox(height: 3),
                         Row(
@@ -2223,17 +3560,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                                             .toList(),
                                       ),
                                     ),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.info_outline,
-                                      size: 18,
-                                      color: Color(0xFFF4B63D),
-                                    ),
-                                    padding: const EdgeInsets.all(4),
-                                    constraints: const BoxConstraints(),
-                                    onPressed: () =>
-                                        _showRecommendationDialog(reasons),
                                   ),
                                 ],
                               ),
@@ -2396,16 +3722,22 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     final String cacheKey =
         '${_currentLatLng.latitude.toStringAsFixed(5)},${_currentLatLng.longitude.toStringAsFixed(5)}:${caregiverLoc.latitude.toStringAsFixed(5)},${caregiverLoc.longitude.toStringAsFixed(5)}';
     final cached = _routeCache[cacheKey];
+    final bool cachedHasPolyline = cached != null && cached.length >= 10;
 
-    if (tappedTooFast && cached == null) {
+    if (tappedTooFast && !cachedHasPolyline) {
       // avoid hammering API if user spam taps; keep selection only
       return;
     }
 
-    final List<LatLng> points =
-        cached ?? await _buildRoadRoutePoints(_currentLatLng, caregiverLoc);
+    final List<LatLng> points = cachedHasPolyline
+        ? cached
+        : await _buildRoadRoutePoints(_currentLatLng, caregiverLoc);
     if (!mounted || requestSeq != _routeRequestSeq) return;
-    _routeCache[cacheKey] = points;
+    if (points.length >= 10) {
+      _routeCache[cacheKey] = points;
+    } else {
+      _routeCache.remove(cacheKey);
+    }
 
     setState(() {
       _markers = {personMarker, caregiverMarker};
@@ -2500,8 +3832,62 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     double zoom = _defaultCameraZoom,
   }) => CameraUpdate.newCameraPosition(_cameraPosition(target, zoom: zoom));
 
+  Future<List<LatLng>?> _fetchDirectionsRoutePoints(
+    LatLng start,
+    LatLng end,
+  ) async {
+    final apiKey = _mapsApiKey.trim();
+    if (apiKey.isEmpty) return null;
+
+    final uri = Uri.https('maps.googleapis.com', '/maps/api/directions/json', {
+      'origin': '${start.latitude},${start.longitude}',
+      'destination': '${end.latitude},${end.longitude}',
+      'mode': 'driving',
+      'key': apiKey,
+    });
+
+    try {
+      final response = await http.get(uri).timeout(const Duration(seconds: 8));
+      if (response.statusCode != 200) return null;
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map<String, dynamic>) return null;
+
+      final status = decoded['status']?.toString();
+      if (status != 'OK') {
+        debugPrint(
+          'Directions status=$status; error=${decoded['error_message'] ?? decoded['errorMessage']}',
+        );
+        return null;
+      }
+
+      final routes = decoded['routes'];
+      if (routes is! List || routes.isEmpty) return null;
+      final firstRoute = routes.first;
+      if (firstRoute is! Map) return null;
+
+      final overview = firstRoute['overview_polyline'];
+      final polyline = (overview is Map)
+          ? overview['points']?.toString()
+          : null;
+      if (polyline == null || polyline.trim().isEmpty) return null;
+
+      final decodedPoints = PolylinePoints().decodePolyline(polyline.trim());
+      if (decodedPoints.isEmpty) return null;
+      return decodedPoints
+          .map((point) => LatLng(point.latitude, point.longitude))
+          .toList(growable: false);
+    } catch (e) {
+      debugPrint('Directions request failed; using fallback polyline. $e');
+      return null;
+    }
+  }
+
   Future<List<LatLng>> _buildRoadRoutePoints(LatLng start, LatLng end) async {
-    if (_mapsApiKey.isNotEmpty) {
+    final points = await _fetchDirectionsRoutePoints(start, end);
+    if (points != null && points.length >= 2) return points;
+
+    final apiKey = _mapsApiKey.trim();
+    if (apiKey.isNotEmpty) {
       try {
         final result = await PolylinePoints().getRouteBetweenCoordinates(
           request: PolylineRequest(
@@ -2509,21 +3895,18 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
             destination: PointLatLng(end.latitude, end.longitude),
             mode: TravelMode.driving,
           ),
-          googleApiKey: _mapsApiKey,
-        );
-        debugPrint(
-          'Directions status=${result.status}; error=${result.errorMessage}; points=${result.points.length}',
+          googleApiKey: apiKey,
         );
         if (result.points.isNotEmpty) {
           return result.points
               .map((p) => LatLng(p.latitude, p.longitude))
-              .toList();
+              .toList(growable: false);
         }
-      } catch (e, st) {
-        debugPrint('Directions request failed; using fallback polyline. $e');
-        debugPrint('$st');
+      } catch (e) {
+        debugPrint('PolylinePoints request failed; using fallback. $e');
       }
     }
+
     return _buildCurvedRoutePoints(start, end);
   }
 
@@ -2859,10 +4242,10 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
 
   List<Widget> _serviceChips(
     List<String> services, {
-    required Set<String> prefsLower,
-    required bool isRecommendation,
-    required int matchCount,
-  }) {
+      required Set<String> prefsLower,
+      required bool isRecommendation,
+      required int matchCount,
+    }) {
     final List<Widget> chips = [];
     for (final s in services) {
       chips.add(
@@ -2902,102 +4285,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     return reasons;
   }
 
-  void _showRecommendationDialog(List<String> reasons) {
-    showDialog<void>(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: const Text(
-          'Why this caregiver?',
-          textAlign: TextAlign.center,
-          style: TextStyle(fontWeight: FontWeight.w700),
-        ),
-        contentPadding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'These badges explain why this caregiver matches your needs.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.black87),
-              ),
-              const SizedBox(height: 10),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 220),
-                child: SingleChildScrollView(
-                  physics: const BouncingScrollPhysics(),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: reasons
-                        .map(
-                          (reason) => Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 6),
-                            child: Row(
-                              children: [
-                                Container(
-                                  width: 24,
-                                  height: 24,
-                                  padding: const EdgeInsets.all(2),
-                                  decoration: const BoxDecoration(
-                                    color: Color(0xFFFFF0CA),
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: const Icon(
-                                    Icons.check,
-                                    size: 16,
-                                    color: Color(0xFFB68F00),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    reason,
-                                    style: const TextStyle(
-                                      fontSize: 13,
-                                      color: _bookingTextDark,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        )
-                        .toList(),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        actionsAlignment: MainAxisAlignment.center,
-        actionsPadding: const EdgeInsets.only(bottom: 12),
-        actions: [
-          SizedBox(
-            width: 140,
-            child: ElevatedButton(
-              onPressed: () => Navigator.of(context).pop(),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFF9C12A),
-                foregroundColor: Colors.black87,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                padding: const EdgeInsets.symmetric(vertical: 12),
-              ),
-              child: const Text(
-                'Got it',
-                style: TextStyle(fontWeight: FontWeight.w700),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   List<String> _servicesForDisplay(
     CaregiverOption caregiver, {
     required bool matchedOnly,
@@ -3030,6 +4317,47 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       markerId: const MarkerId('selected'),
       position: _currentLatLng,
       icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+    );
+  }
+}
+
+class _RecommendationClassChip extends StatelessWidget {
+  const _RecommendationClassChip({required this.classLevel});
+
+  final int classLevel;
+
+  String get _label {
+    final safe = classLevel.clamp(1, 3);
+    if (safe == 1) return 'Best match';
+    if (safe == 2) return 'Recommended';
+    return 'Not ideal';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final safe = classLevel.clamp(1, 3);
+    final Color background;
+    final Color border;
+    final Color foreground;
+    if (safe == 1) {
+      background = const Color(0xFFF4B63D);
+      border = const Color(0xFFF4B63D);
+      foreground = Colors.black87;
+    } else if (safe == 2) {
+      background = const Color(0x2E00A8A7);
+      border = _serviceTagBlue;
+      foreground = _serviceTagBlue;
+    } else {
+      background = const Color(0x14000000);
+      border = Colors.black26;
+      foreground = Colors.black54;
+    }
+
+    return ServiceTagChip(
+      label: _label,
+      backgroundColor: background,
+      foregroundColor: foreground,
+      borderColor: border,
     );
   }
 }

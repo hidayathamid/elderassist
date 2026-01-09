@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui' show lerpDouble;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -6,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../../widgets/default_profile_avatar.dart';
+import '../../../widgets/safe_network_image.dart';
 import '../../../widgets/standard_app_bar.dart';
 import 'activity_tracking_helpers.dart';
 import '../../../utils/service_preferences.dart';
@@ -13,44 +16,94 @@ import 'track_caregiver_screen.dart';
 
 const Color _cardBorder = Color(0xFFEBEDF0);
 const Color _accentGreen = Color(0xFF00A8A7);
+const Color _accentBlue = _accentGreen; // Match Home screen blue.
 const Color _profileDarkText = Color(0xFF1B1D29);
-const Color _screenBackground = Color(0xFFF7F8FB);
+const Color _screenBackground = Colors.white;
 const Color _cardShadow = Color(0x1A0B0C10);
 const Color _cardBorderStrong = Color(0xFFE1E4EA);
 const double _cardRadius = 18;
-const double _segmentRadius = 26.0;
-const Color _segmentIndicatorColor = Color(0xFFF4F5F7);
+const Color _mutedText = Color(0xFF6B7280);
+
+const TextStyle _sectionHeaderTextStyle = TextStyle(
+  fontWeight: FontWeight.w800,
+  fontSize: 14,
+  color: _profileDarkText,
+  letterSpacing: -0.15,
+);
+
+const TextStyle _fieldLabelTextStyle = TextStyle(
+  fontSize: 11,
+  fontWeight: FontWeight.w700,
+  color: _mutedText,
+);
+
+const TextStyle _fieldValueTextStyle = TextStyle(
+  fontSize: 12,
+  fontWeight: FontWeight.w700,
+  color: _profileDarkText,
+  height: 1.25,
+);
 const String _defaultAvatarUrl =
     'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=400&q=80';
 
 class ActivityBookingDetailsScreen extends StatefulWidget {
-  const ActivityBookingDetailsScreen({super.key, required this.bookingId});
+  const ActivityBookingDetailsScreen({
+    super.key,
+    required this.bookingId,
+    this.hideBookingDetailsTab = false,
+  });
 
   final String bookingId;
+  final bool hideBookingDetailsTab;
 
   @override
   State<ActivityBookingDetailsScreen> createState() =>
       _ActivityBookingDetailsScreenState();
 }
 
+class _NoOverscrollScrollBehavior extends ScrollBehavior {
+  const _NoOverscrollScrollBehavior();
+
+  @override
+  ScrollPhysics getScrollPhysics(BuildContext context) {
+    return const ClampingScrollPhysics();
+  }
+
+  @override
+  Widget buildOverscrollIndicator(
+    BuildContext context,
+    Widget child,
+    ScrollableDetails details,
+  ) {
+    return child;
+  }
+}
+
 class _ActivityBookingDetailsScreenState
     extends State<ActivityBookingDetailsScreen>
     with TickerProviderStateMixin {
+  static const double _sheetMinExtentRaw = 0.40;
+  static const double _sheetMaxExtentRaw = 1.0;
+  static const double _sheetFallbackInitialExtentRaw = 0.78;
+
   bool _isLoading = true;
   String? _error;
   bool _notFound = false;
   Map<String, dynamic>? _booking;
   Map<String, dynamic>? _caregiverData;
   Map<String, dynamic>? _userData;
-  bool _isCaregiverUser = false;
   late final AnimationController _entryController;
   late final Animation<double> _entryFade;
   late final Animation<Offset> _entrySlide;
   late final AnimationController _tabEntryController;
   late final Animation<double> _tabFade;
   late final Animation<Offset> _tabSlide;
-  TabController? _attachedTabController;
-  Timer? _tabDebounceTimer;
+  int _selectedTabIndex = 0;
+  double _currentSheetExtent = 0.0;
+  final GlobalKey _metricsKey = GlobalKey();
+  double? _autoInitialSheetExtent;
+  final Map<String, Future<_UserMini>> _reviewUserCache =
+      <String, Future<_UserMini>>{};
 
   @override
   void initState() {
@@ -63,20 +116,25 @@ class _ActivityBookingDetailsScreenState
       parent: _entryController,
       curve: Curves.easeOutCubic,
     );
-    _entrySlide = Tween<Offset>(
-      begin: const Offset(0, 0.02),
-      end: Offset.zero,
-    ).animate(
-      CurvedAnimation(parent: _entryController, curve: Curves.easeOutCubic),
-    );
+    _entrySlide = Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero)
+        .animate(
+          CurvedAnimation(parent: _entryController, curve: Curves.easeOutCubic),
+        );
     _tabEntryController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 180),
     );
-    _tabFade = CurvedAnimation(parent: _tabEntryController, curve: Curves.easeOutCubic);
-    _tabSlide = Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero).animate(
-      CurvedAnimation(parent: _tabEntryController, curve: Curves.easeOutCubic),
+    _tabFade = CurvedAnimation(
+      parent: _tabEntryController,
+      curve: Curves.easeOutCubic,
     );
+    _tabSlide = Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero)
+        .animate(
+          CurvedAnimation(
+            parent: _tabEntryController,
+            curve: Curves.easeOutCubic,
+          ),
+        );
     _fetchBooking();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -85,28 +143,45 @@ class _ActivityBookingDetailsScreenState
     });
   }
 
-  void _attachTabController(TabController? controller) {
-    if (_attachedTabController == controller) return;
-    _attachedTabController?.removeListener(_handleTabChanged);
-    _attachedTabController = controller;
-    _attachedTabController?.addListener(_handleTabChanged);
+  void _selectTab(int index) {
+    if (_selectedTabIndex == index) return;
+    setState(() => _selectedTabIndex = index);
+    _tabEntryController.forward(from: 0);
   }
 
-  void _handleTabChanged() {
-    final controller = _attachedTabController;
-    if (controller == null) return;
-    if (controller.indexIsChanging) return;
-    _tabDebounceTimer?.cancel();
-    _tabDebounceTimer = Timer(const Duration(milliseconds: 20), () {
+  void _onSheetExtentChanged(double extent) {
+    final normalized = extent.clamp(0.0, 1.0);
+    if ((_currentSheetExtent - normalized).abs() < 0.001) return;
+    setState(() => _currentSheetExtent = normalized);
+  }
+
+  void _scheduleAutoSheetExtentUpdate() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _tabEntryController.forward(from: 0);
+      final metricsContext = _metricsKey.currentContext;
+      if (metricsContext == null) return;
+      final renderObject = metricsContext.findRenderObject();
+      if (renderObject is! RenderBox || !renderObject.hasSize) return;
+      final metricsBottom =
+          renderObject.localToGlobal(Offset.zero).dy + renderObject.size.height;
+      final screenHeight = MediaQuery.of(context).size.height;
+      if (screenHeight <= 0) return;
+
+      const gapBelowMetrics = 12.0;
+      final desiredTop = metricsBottom + gapBelowMetrics;
+      final initial = (1 - (desiredTop / screenHeight))
+          .clamp(_sheetMinExtentRaw, _sheetMaxExtentRaw);
+
+      if (_autoInitialSheetExtent != null &&
+          (_autoInitialSheetExtent! - initial).abs() < 0.01) {
+        return;
+      }
+      setState(() => _autoInitialSheetExtent = initial);
     });
   }
 
   @override
   void dispose() {
-    _tabDebounceTimer?.cancel();
-    _attachedTabController?.removeListener(_handleTabChanged);
     _entryController.dispose();
     _tabEntryController.dispose();
     super.dispose();
@@ -136,10 +211,8 @@ class _ActivityBookingDetailsScreenState
       }
       final data = doc.data();
       final caregiverId = (data?['caregiverId'] as String?) ?? '';
-      final currentUid = user.uid;
       setState(() {
         _booking = data;
-        _isCaregiverUser = caregiverId.isNotEmpty && caregiverId == currentUid;
         _isLoading = false;
       });
       if (caregiverId.isNotEmpty) {
@@ -205,6 +278,1068 @@ class _ActivityBookingDetailsScreenState
     }
   }
 
+  String _formatRelative(Timestamp? timestamp) {
+    if (timestamp == null) return '';
+    final dt = timestamp.toDate();
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+    if (diff.inDays >= 365) return '${diff.inDays ~/ 365}y';
+    if (diff.inDays >= 30) return '${diff.inDays ~/ 30}mo';
+    if (diff.inDays >= 7) return '${diff.inDays ~/ 7}w';
+    if (diff.inDays >= 1) return '${diff.inDays}d';
+    if (diff.inHours >= 1) return '${diff.inHours}h';
+    if (diff.inMinutes >= 1) return '${diff.inMinutes}m';
+    return 'Now';
+  }
+
+  String _formatReviewDate(Timestamp? timestamp) {
+    if (timestamp == null) return '';
+    try {
+      return DateFormat('yyyy-MM-dd').format(timestamp.toDate());
+    } catch (_) {
+      return '';
+    }
+  }
+
+  int _coerceRating(dynamic value) {
+    if (value is int) return value.clamp(1, 5);
+    if (value is double) return value.round().clamp(1, 5);
+    if (value is num) return value.toInt().clamp(1, 5);
+    if (value is String) return (int.tryParse(value.trim()) ?? 0).clamp(1, 5);
+    return 0;
+  }
+
+  Future<_UserMini> _fetchUserMini({
+    required String userId,
+    required String fallbackName,
+  }) {
+    if (userId.trim().isEmpty) {
+      return Future<_UserMini>.value(
+        _UserMini(name: fallbackName, photoUrl: null),
+      );
+    }
+    return _reviewUserCache.putIfAbsent(userId, () async {
+      try {
+        final snap =
+            await FirebaseFirestore.instance.collection('users').doc(userId).get();
+        final data = snap.data() ?? const <String, dynamic>{};
+        final name = (data['name'] as String?)?.trim();
+        final photoUrl = (data['photoUrl'] as String?)?.trim();
+        return _UserMini(
+          name: (name?.isNotEmpty == true) ? name! : fallbackName,
+          photoUrl: (photoUrl?.isNotEmpty == true) ? photoUrl! : null,
+        );
+      } catch (_) {
+        return _UserMini(name: fallbackName, photoUrl: null);
+      }
+    });
+  }
+
+  Widget _reviewAvatar(_UserMini user) {
+    final trimmed = user.photoUrl?.trim();
+    if (trimmed?.isNotEmpty == true) {
+      return ClipOval(
+        child: SizedBox(
+          width: 36,
+          height: 36,
+          child: SafeNetworkImage(
+            trimmed!,
+            fit: BoxFit.cover,
+            placeholder: const SizedBox.shrink(),
+            errorWidget: const SizedBox.shrink(),
+          ),
+        ),
+      );
+    }
+
+    final name = user.name.trim();
+    final initial = name.isEmpty ? 'U' : name[0].toUpperCase();
+    return CircleAvatar(
+      radius: 18,
+      backgroundColor: Colors.black.withValues(alpha: 0.08),
+      child: Text(
+        initial,
+        style: const TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w900,
+          color: _profileDarkText,
+        ),
+      ),
+    );
+  }
+
+  Widget _starRow(double rating, {double size = 16}) {
+    const gold = Color(0xFFF4B63D);
+    final clamped = rating.clamp(0.0, 5.0);
+    final full = clamped.floor();
+    final half = (clamped - full) >= 0.5 ? 1 : 0;
+    final empty = 5 - full - half;
+    final stars = <Widget>[];
+    for (var i = 0; i < full; i++) {
+      stars.add(Icon(Icons.star_rounded, size: size, color: gold));
+    }
+    if (half == 1) {
+      stars.add(Icon(Icons.star_half_rounded, size: size, color: gold));
+    }
+    for (var i = 0; i < empty; i++) {
+      stars.add(
+        Icon(
+          Icons.star_border_rounded,
+          size: size,
+          color: Colors.black.withValues(alpha: 0.18),
+        ),
+      );
+    }
+    return Row(mainAxisSize: MainAxisSize.min, children: stars);
+  }
+
+  Widget _buildHeroCover(String photoUrl) {
+    return SizedBox(
+      height: 220,
+      width: double.infinity,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.zero,
+            child: Image.network(
+              photoUrl,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Container(color: Colors.grey[200]),
+              loadingBuilder: (context, child, progress) {
+                if (progress == null) return child;
+                return Container(
+                  color: Colors.grey[200],
+                  child: const Center(child: CircularProgressIndicator()),
+                );
+              },
+            ),
+          ),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.zero,
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.black.withValues(alpha: 0.10),
+                  Colors.black.withValues(alpha: 0.12),
+                  Colors.black.withValues(alpha: 0.65),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHeaderCard({
+    required String name,
+    required String serviceLabel,
+    required List<String> servicePreferences,
+    required String defaultAddress,
+    required int clientsCount,
+    required int verifiedDocsCount,
+    required int reviewsCount,
+    String? photoUrl,
+  }) {
+    const avatarRadius = 38.0;
+
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Container(
+          padding: const EdgeInsets.fromLTRB(14, 44, 14, 12),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(_cardRadius),
+            border: Border.all(color: _cardBorderStrong, width: 1.2),
+            boxShadow: const [
+              BoxShadow(
+                color: _cardShadow,
+                blurRadius: 18,
+                offset: Offset(0, 10),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                name,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800,
+                  color: _profileDarkText,
+                  letterSpacing: -0.15,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 10),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.location_on_outlined,
+                    size: 17,
+                    color: Colors.black.withValues(alpha: 0.55),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      defaultAddress,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black.withValues(alpha: 0.65),
+                        height: 1.25,
+                      ),
+                      softWrap: true,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Divider(
+                height: 1,
+                thickness: 1,
+                color: Colors.black.withValues(alpha: 0.06),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  _buildMetricItem(
+                    icon: Icons.groups_2_outlined,
+                    label: 'Clients',
+                    value: clientsCount.toString(),
+                  ),
+                  _buildMetricItem(
+                    icon: Icons.verified_outlined,
+                    label: 'Certification',
+                    value: verifiedDocsCount.toString(),
+                  ),
+                  _buildMetricItem(
+                    icon: Icons.star_rounded,
+                    label: 'Reviews',
+                    value: reviewsCount.toString(),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        Positioned(
+          top: -(avatarRadius),
+          left: 0,
+          right: 0,
+          child: Center(
+            child: Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white, width: 4),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.12),
+                    blurRadius: 14,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
+              ),
+              child: DefaultProfileAvatar(
+                radius: avatarRadius,
+                photoUrl: photoUrl,
+                label: name,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMetricItem({
+    required IconData icon,
+    required String label,
+    required String value,
+  }) {
+    return Expanded(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isTight = constraints.maxWidth < 118;
+          final iconBox = isTight ? 40.0 : 46.0;
+          final iconSize = isTight ? 20.0 : 22.0;
+          final gap = isTight ? 7.0 : 10.0;
+          final valueFontSize = isTight ? 13.0 : 14.0;
+          final labelFontSize = isTight ? 10.5 : 11.0;
+
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Container(
+                width: iconBox,
+                height: iconBox,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _accentBlue.withValues(alpha: 0.12),
+                  border: Border.all(
+                    color: _accentBlue.withValues(alpha: 0.55),
+                    width: 1.2,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.10),
+                      blurRadius: 8,
+                      offset: const Offset(0, 5),
+                    ),
+                  ],
+                ),
+                alignment: Alignment.center,
+                child: Icon(icon, size: iconSize, color: _accentBlue),
+              ),
+              SizedBox(width: gap),
+              Flexible(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: valueFontSize,
+                        fontWeight: FontWeight.w800,
+                        color: _profileDarkText,
+                        letterSpacing: -0.15,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: labelFontSize,
+                        fontWeight: FontWeight.w800,
+                        color: _mutedText,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  // ignore: unused_element
+  Widget _buildMetricsRow({
+    required int clientsCount,
+    required int verifiedDocsCount,
+    required int reviewsCount,
+  }) {
+    return Padding(
+      // Push this down so it doesn't overlap the floating header card.
+      padding: const EdgeInsets.fromLTRB(16, 74, 16, 10),
+      child: Row(
+        children: [
+          _buildMetricItem(
+            icon: Icons.groups_2_outlined,
+            label: 'Clients',
+            value: clientsCount.toString(),
+          ),
+          _buildMetricItem(
+            icon: Icons.verified_outlined,
+            label: 'Certification',
+            value: verifiedDocsCount.toString(),
+          ),
+          _buildMetricItem(
+            icon: Icons.star_rounded,
+            label: 'Reviews',
+            value: reviewsCount.toString(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOtherInfoTabs({
+    required List<String> labels,
+    required int selectedIndex,
+    required ValueChanged<int> onSelected,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 0, 0, 8),
+      child: SizedBox(
+        height: 32,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          physics: const BouncingScrollPhysics(),
+          itemCount: labels.length,
+          separatorBuilder: (_, __) => const SizedBox(width: 8),
+          itemBuilder: (context, index) {
+            final selected = selectedIndex == index;
+            return Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(999),
+                onTap: () => onSelected(index),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 160),
+                  curve: Curves.easeOutCubic,
+                  width: 124,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: selected ? _accentBlue : Colors.white,
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: selected
+                          ? _accentBlue
+                          : Colors.black.withValues(alpha: 0.12),
+                      width: 1.1,
+                    ),
+                    boxShadow: selected
+                        ? [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.10),
+                              blurRadius: 8,
+                              offset: const Offset(0, 4),
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: Center(
+                    child: Text(
+                      labels[index],
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                        color: selected
+                            ? Colors.white
+                            : Colors.black.withValues(alpha: 0.65),
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildUnavailablePlaceholder({
+    required String message,
+    String explanation = "It'll show up as soon as it becomes available.",
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF9FAFB),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+        boxShadow: const [
+          BoxShadow(color: _cardShadow, blurRadius: 10, offset: Offset(0, 6)),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: _accentBlue.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.bolt_rounded, size: 22, color: _accentBlue),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            message,
+            style: const TextStyle(
+              fontSize: 11,
+              color: _profileDarkText,
+              fontWeight: FontWeight.w800,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            explanation,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: _mutedText,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAboutMeSection(Map<String, dynamic>? caregiver) {
+    final bioRaw = (caregiver?['bio'] as String?)?.trim() ?? '';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildSectionHeader(title: 'About me'),
+        if (bioRaw.isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+            child: _buildUnavailablePlaceholder(
+              message: 'About me unavailable',
+              explanation: "This caregiver hasn't shared a bio yet.",
+            ),
+          )
+        else
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+            child: Text(
+              bioRaw,
+              style: _fieldValueTextStyle.copyWith(
+                color: Colors.black.withValues(alpha: 0.70),
+                height: 1.45,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildServiceChip({required String label}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      constraints: const BoxConstraints(minHeight: 30),
+      decoration: BoxDecoration(
+        color: _accentBlue,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _accentBlue.withValues(alpha: 0.45)),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: Colors.white,
+        ),
+        textAlign: TextAlign.center,
+      ),
+    );
+  }
+
+  Widget _buildServicesSection({
+    required List<String> servicePreferences,
+    required String fallbackServiceLabel,
+  }) {
+    final services = servicePreferences
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList(growable: false);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildSectionHeader(title: 'Services'),
+        if (services.isEmpty && fallbackServiceLabel.trim().isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+            child: _buildUnavailablePlaceholder(
+              message: 'Services unavailable',
+              explanation: "This caregiver hasn't shared their services yet.",
+            ),
+          )
+        else
+          SizedBox(
+            height: 38,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(),
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              itemCount: services.isNotEmpty ? services.length : 1,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (context, index) {
+                final label = services.isNotEmpty
+                    ? services[index]
+                    : fallbackServiceLabel;
+                return _buildServiceChip(label: label);
+              },
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildVerifiedCertificatesSection({
+    required Stream<QuerySnapshot<Map<String, dynamic>>> documentsStream,
+  }) {
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: documentsStream,
+      builder: (context, snapshot) {
+        final docs = snapshot.data?.docs ?? const [];
+        final verified = docs
+            .where((d) => (d.data()['status'] as bool?) == true)
+            .toList();
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildSectionHeader(title: 'Certificates'),
+            if (snapshot.connectionState == ConnectionState.waiting ||
+                verified.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+                child: _buildUnavailablePlaceholder(
+                  message: 'Certificates unavailable',
+                  explanation: "No verified certificates have been added yet.",
+                ),
+              )
+            else
+              ...verified.asMap().entries.map((entry) {
+                final index = entry.key;
+                final doc = entry.value;
+                final data = doc.data();
+                final name = (data['name'] as String?)?.trim();
+                final docName = (name != null && name.isNotEmpty)
+                    ? name
+                    : 'Document';
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Column(
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            width: 38,
+                            height: 38,
+                            decoration: BoxDecoration(
+                              color: _accentBlue.withValues(alpha: 0.10),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: _accentBlue.withValues(alpha: 0.28),
+                                width: 1.2,
+                              ),
+                            ),
+                            child: const Icon(
+                              Icons.description_outlined,
+                              color: _accentBlue,
+                              size: 18,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              docName,
+                              style: _fieldValueTextStyle.copyWith(
+                                color: Colors.black.withValues(alpha: 0.70),
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (index != verified.length - 1)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 10),
+                          child: Divider(
+                            height: 1,
+                            thickness: 1,
+                            color: Colors.black.withValues(alpha: 0.06),
+                          ),
+                        ),
+                    ],
+                  ),
+                );
+              }),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildCaregiverDetailsTab({
+    required Map<String, dynamic>? caregiver,
+    required Stream<QuerySnapshot<Map<String, dynamic>>> documentsStream,
+  }) {
+    final prefs = extractServicePreferencesList(
+      caregiver?['servicePreferences'] ?? caregiver?['services'],
+    );
+    final fallbackServiceLabel = normalizeString(caregiver?['service']) ?? '';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildAboutMeSection(caregiver),
+        const SizedBox(height: 12),
+        _buildServicesSection(
+          servicePreferences: prefs,
+          fallbackServiceLabel: fallbackServiceLabel,
+        ),
+        const SizedBox(height: 12),
+        _buildVerifiedCertificatesSection(documentsStream: documentsStream),
+      ],
+    );
+  }
+
+  // ignore: unused_element
+  Widget _buildClientDetailsTab() {
+    final booking = _booking ?? const <String, dynamic>{};
+    final user = _userData ?? const <String, dynamic>{};
+
+    final ownerName =
+        normalizeString(user['name']) ??
+        normalizeString(booking['userName']) ??
+        'Client';
+    final ownerPhone =
+        normalizeString(user['phone']) ??
+        normalizeString(booking['userPhone']) ??
+        '—';
+    final personName =
+        normalizeString(booking['personName']) ??
+        normalizeString(user['defaultPerson']) ??
+        '—';
+    final personLabel =
+        normalizeString(booking['personLabel']) ?? 'Care recipient';
+    final careLocation =
+        normalizeString(booking['personAddress']) ??
+        normalizeString(booking['address']) ??
+        normalizeString(user['defaultAddress']) ??
+        '—';
+    final notes = normalizeString(booking['notes']) ?? '';
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+      physics: const BouncingScrollPhysics(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildSectionHeader(title: 'Client details'),
+          _buildTabContent([
+            _buildInfoRow(
+              icon: Icons.person,
+              title: 'Client name',
+              value: ownerName,
+            ),
+            _buildInfoRow(
+              icon: Icons.phone_android,
+              title: 'Client contact',
+              value: ownerPhone,
+            ),
+            _buildInfoRow(
+              icon: Icons.home,
+              title: 'Care location',
+              value: careLocation,
+            ),
+            _buildInfoRow(
+              icon: Icons.accessibility_new_rounded,
+              title: 'Primary person',
+              value:
+                  '$personName (${personLabel.trim().isEmpty ? '—' : personLabel.trim()})',
+              showBorder: notes.isNotEmpty,
+            ),
+            if (notes.isNotEmpty)
+              _buildInfoContentRow(
+                icon: Icons.sticky_note_2_outlined,
+                title: 'Notes',
+                value: notes,
+              ),
+          ]),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLocationTab({
+    required String caregiverAddress,
+    required String bookingAddress,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildSectionHeader(title: 'Location'),
+        _buildTabContent([
+          _buildInfoRow(
+            icon: Icons.location_on,
+            title: 'Caregiver base',
+            value: caregiverAddress,
+          ),
+          _buildInfoRow(
+            icon: Icons.home,
+            title: 'Booking address',
+            value: bookingAddress,
+            showBorder: false,
+          ),
+        ]),
+      ],
+    );
+  }
+
+  Widget _buildScheduleTab(Map<String, dynamic> booking) {
+    final date = normalizeString(booking['date']) ?? '';
+    final time = normalizeString(booking['time']) ?? '';
+    final startTime = normalizeString(booking['startTime']) ?? '';
+    final endTime = normalizeString(booking['endTime']) ?? '';
+    final scheduledDate = normalizeString(booking['scheduledDate']) ?? '';
+
+    final dateLabel = scheduledDate.isNotEmpty ? scheduledDate : date;
+    final timeLabel = (startTime.isNotEmpty && endTime.isNotEmpty)
+        ? '${_formatTime(startTime)} - ${_formatTime(endTime)}'
+        : (time.isNotEmpty ? _formatTime(time) : '');
+
+    return Padding(
+      padding: EdgeInsets.zero,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildSectionHeader(title: 'Schedule'),
+          _buildTabContent([
+            _buildInfoRow(
+              icon: Icons.calendar_month,
+              title: 'Date',
+              value: dateLabel.isNotEmpty ? _formatDate(dateLabel) : '—',
+            ),
+            _buildInfoRow(
+              icon: Icons.access_time,
+              title: 'Time',
+              value: timeLabel.isNotEmpty ? timeLabel : '—',
+              showBorder: false,
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReviewsTab(String caregiverId) {
+    if (caregiverId.isEmpty) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+            child: _buildUnavailablePlaceholder(
+              message: 'Reviews unavailable',
+              explanation: 'No caregiver assigned yet.',
+            ),
+          ),
+        ],
+      );
+    }
+
+    final stream = FirebaseFirestore.instance
+        .collection('reviews')
+        .where('caregiverId', isEqualTo: caregiverId)
+        .snapshots();
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: stream,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+                child: _buildUnavailablePlaceholder(
+                  message: 'Reviews unavailable',
+                  explanation: 'Unable to load reviews right now.',
+                ),
+              ),
+            ],
+          );
+        }
+        if (!snapshot.hasData) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+                child: _buildUnavailablePlaceholder(
+                  message: 'Reviews unavailable',
+                  explanation: 'Loading reviews...',
+                ),
+              ),
+            ],
+          );
+        }
+
+        final docs = snapshot.data!.docs.toList(growable: false)
+          ..sort((a, b) {
+            final ta = a.data()['createdAt'] as Timestamp?;
+            final tb = b.data()['createdAt'] as Timestamp?;
+            if (ta == null && tb == null) return 0;
+            if (ta == null) return 1;
+            if (tb == null) return -1;
+            return tb.compareTo(ta);
+          });
+
+        if (docs.isEmpty) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+                child: _buildUnavailablePlaceholder(
+                  message: 'Reviews unavailable',
+                  explanation: 'No reviews yet.',
+                ),
+              ),
+            ],
+          );
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: ListView.separated(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: docs.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 8),
+                itemBuilder: (context, index) {
+                  final data = docs[index].data();
+                  final rating = _coerceRating(data['rating']);
+                  final feedbackRaw = (data['feedback'] as String?) ??
+                      (data['comment'] as String?) ??
+                      (data['message'] as String?) ??
+                      '';
+                  final feedback = feedbackRaw.trim();
+                  final createdAt = data['createdAt'] as Timestamp?;
+                  final relative = _formatRelative(createdAt);
+                  final dateLabel = _formatReviewDate(createdAt);
+                  final service = ((data['service'] as String?) ?? '').trim();
+                  final userId = ((data['userId'] as String?) ?? '').trim();
+                  final personName =
+                      ((data['personName'] as String?) ??
+                              (data['userName'] as String?) ??
+                              'User')
+                          .trim();
+
+                  return Container(
+                    margin: const EdgeInsets.only(top: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: Colors.black.withValues(alpha: 0.12),
+                        width: 1.2,
+                      ),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x1A000000),
+                          blurRadius: 14,
+                          offset: Offset(0, 6),
+                        ),
+                      ],
+                    ),
+                    padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        FutureBuilder<_UserMini>(
+                          future: _fetchUserMini(
+                            userId: userId,
+                            fallbackName:
+                                personName.isNotEmpty ? personName : 'User',
+                          ),
+                          builder: (context, userSnap) {
+                            final user = userSnap.data ??
+                                _UserMini(
+                                  name: personName.isNotEmpty
+                                      ? personName
+                                      : 'User',
+                                  photoUrl: null,
+                                );
+                            return Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                _reviewAvatar(user),
+                                const SizedBox(width: 9),
+                                Expanded(
+                                  child: Text(
+                                    user.name.trim().isNotEmpty
+                                        ? user.name.trim()
+                                        : (personName.isNotEmpty
+                                            ? personName
+                                            : 'User'),
+                                    style: const TextStyle(
+                                      fontSize: 13.5,
+                                      fontWeight: FontWeight.w900,
+                                      color: _profileDarkText,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                        const SizedBox(height: 8),
+                        _starRow(rating.toDouble(), size: 15),
+                        if (service.isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            'Service: $service',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.black.withValues(alpha: 0.58),
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 10),
+                        Text(
+                          feedback.isNotEmpty ? feedback : 'No written feedback.',
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            height: 1.35,
+                            fontWeight: FontWeight.w700,
+                            color: feedback.isNotEmpty
+                                ? _profileDarkText
+                                : Colors.black.withValues(alpha: 0.52),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Text(
+                              relative.isNotEmpty ? relative : dateLabel,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.black.withValues(alpha: 0.45),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Widget _buildInfoRow({
     required IconData icon,
     required String title,
@@ -215,12 +1350,12 @@ class _ActivityBookingDetailsScreenState
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
       decoration: BoxDecoration(
         border: Border(
-          bottom: BorderSide.none,
+          bottom: showBorder ? const BorderSide(color: _cardBorder) : BorderSide.none,
         ),
       ),
       child: Row(
         children: [
-          Icon(icon, size: 18, color: _accentGreen),
+          Icon(icon, size: 17, color: _accentGreen),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -228,20 +1363,12 @@ class _ActivityBookingDetailsScreenState
               children: [
                 Text(
                   title,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.grey,
-                  ),
+                  style: _fieldLabelTextStyle,
                 ),
                 const SizedBox(height: 4),
                 Text(
                   value,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: _profileDarkText,
-                  ),
+                  style: _fieldValueTextStyle,
                 ),
               ],
             ),
@@ -258,11 +1385,7 @@ class _ActivityBookingDetailsScreenState
         borderRadius: BorderRadius.circular(_cardRadius),
         border: Border.all(color: _cardBorderStrong),
         boxShadow: const [
-          BoxShadow(
-            color: _cardShadow,
-            blurRadius: 14,
-            offset: Offset(0, 6),
-          ),
+          BoxShadow(color: _cardShadow, blurRadius: 12, offset: Offset(0, 6)),
         ],
       ),
       margin: const EdgeInsets.only(top: 6),
@@ -270,122 +1393,19 @@ class _ActivityBookingDetailsScreenState
     );
   }
 
-  Widget _buildSectionHeader({
-    required String title,
-    String? hint,
-  }) {
+  Widget _buildSectionHeader({required String title, String? hint}) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 4, 4, 6),
+      padding: const EdgeInsets.fromLTRB(4, 6, 4, 8),
       child: Row(
         children: [
           Expanded(
             child: Text(
               title,
-              style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w700,
-                color: _profileDarkText,
-              ),
+              style: _sectionHeaderTextStyle,
             ),
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildCaregiverDetailsTab() {
-    final caregiver = _caregiverData;
-    if (caregiver == null) {
-      return const Padding(
-        padding: EdgeInsets.all(16),
-        child: Text('Loading caregiver details...'),
-      );
-    }
-    final phone = normalizeString(caregiver['phone']) ?? 'No phone';
-    final location =
-        normalizeString(caregiver['defaultAddress']) ??
-        normalizeString(caregiver['address']) ??
-        normalizeString(caregiver['area']) ??
-        'Location not provided';
-    final services = normalizeString(caregiver['services']) ?? 'Home care';
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildSectionHeader(
-          title: 'Caregiver details',
-          hint: 'Contact information and caregiver profile details.',
-        ),
-        _buildTabContent([
-          _buildInfoRow(icon: Icons.phone, title: 'Phone', value: phone),
-          _buildInfoRow(
-            icon: Icons.location_on,
-            title: 'Base location',
-            value: location,
-          ),
-          _buildInfoRow(
-            icon: Icons.work,
-            title: 'Speciality',
-            value: services,
-            showBorder: false,
-          ),
-        ]),
-      ],
-    );
-  }
-
-  Widget _buildClientDetailsTab() {
-    final client = _userData;
-    if (client == null) {
-      return const Padding(
-        padding: EdgeInsets.all(16),
-        child: Text('Loading client details...'),
-      );
-    }
-    final phone = normalizeString(client['phone']) ?? 'No phone';
-    final location =
-        normalizeString(client['address']) ??
-        normalizeString(client['addressLabel']) ??
-        normalizeString(client['area']) ??
-        'Location not provided';
-    final email = normalizeString(client['email']);
-    final relationship =
-        normalizeString(client['relationship']) ?? 'Family member';
-    final rows = <Widget>[
-      _buildInfoRow(icon: Icons.phone, title: 'Phone', value: phone),
-      _buildInfoRow(
-        icon: Icons.location_on,
-        title: 'Address',
-        value: location,
-        showBorder: email != null,
-      ),
-    ];
-    if (email != null) {
-      rows.add(
-        _buildInfoRow(
-          icon: Icons.email,
-          title: 'Email',
-          value: email,
-          showBorder: true,
-        ),
-      );
-    }
-    rows.add(
-      _buildInfoRow(
-        icon: Icons.person,
-        title: 'Relationship',
-        value: relationship,
-        showBorder: false,
-      ),
-    );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildSectionHeader(
-          title: 'Client details',
-          hint: 'Contact information for the person who made this booking.',
-        ),
-        _buildTabContent(rows),
-      ],
     );
   }
 
@@ -428,8 +1448,16 @@ class _ActivityBookingDetailsScreenState
             title: 'Time',
             value: _formatTime(time ?? ''),
           ),
-          _buildInfoRow(icon: Icons.home, title: 'Care location', value: address),
-          _buildInfoRow(icon: Icons.person, title: 'Booked by', value: ownerName),
+          _buildInfoRow(
+            icon: Icons.home,
+            title: 'Care location',
+            value: address,
+          ),
+          _buildInfoRow(
+            icon: Icons.person,
+            title: 'Booked by',
+            value: ownerName,
+          ),
           _buildInfoRow(
             icon: Icons.phone_android,
             title: 'Owner contact',
@@ -461,6 +1489,7 @@ class _ActivityBookingDetailsScreenState
     );
   }
 
+  // ignore: unused_element
   Widget _buildBookingSummaryTab(
     BuildContext context,
     Map<String, dynamic> booking,
@@ -490,57 +1519,32 @@ class _ActivityBookingDetailsScreenState
             SizedBox(
               width: double.infinity,
               child: OutlinedButton(
-                onPressed: () {
-                  final caregiverPhone =
-                      normalizeString(_caregiverData?['phone']) ??
-                      normalizeString(_caregiverData?['phoneNumber']);
-                  final caregiverPhotoUrl =
-                      normalizeString(_caregiverData?['photoUrl']) ??
-                      normalizeString(_caregiverData?['avatarUrl']);
-
-                  double? caregiverLat;
-                  double? caregiverLng;
-                  final caregiverLocation =
-                      _caregiverData?['location'] ?? _caregiverData?['latLng'];
-                  if (caregiverLocation is GeoPoint) {
-                    caregiverLat = caregiverLocation.latitude;
-                    caregiverLng = caregiverLocation.longitude;
-                  } else {
-                    final rawLat =
-                        _caregiverData?['lat'] ??
-                        _caregiverData?['latitude'] ??
-                        _caregiverData?['caregiverLat'];
-                    final rawLng =
-                        _caregiverData?['lng'] ??
-                        _caregiverData?['longitude'] ??
-                        _caregiverData?['caregiverLng'];
-                    if (rawLat is num && rawLng is num) {
-                      caregiverLat = rawLat.toDouble();
-                      caregiverLng = rawLng.toDouble();
-                    }
-                  }
-
+                onPressed: () async {
                   final personId = normalizeString(booking['personId']) ?? '';
-                  final personName =
-                      normalizeString(booking['personName']) ?? 'Your loved one';
-                  final personAddress =
-                      normalizeString(booking['personAddress']) ??
-                      normalizeString(booking['addressLabel']) ??
-                      normalizeString(_userData?['address']) ??
-                      normalizeString(_userData?['addressLabel']) ??
-                      normalizeString(_userData?['area']);
-                  final personPhone = normalizeString(_userData?['phone']);
-                  final personPhotoUrl =
-                      normalizeString(booking['personPhotoUrl']) ??
-                      normalizeString(booking['personPhoto']) ??
-                      normalizeString(_userData?['photoUrl']);
+                  final caregiverId =
+                      normalizeString(booking['caregiverId']) ?? '';
 
+                  await FirebaseFirestore.instance
+                      .collection('bookings')
+                      .doc(widget.bookingId)
+                      .set({
+                        'trackingCaregiverId': caregiverId,
+                        if (personId.isNotEmpty) 'trackingPersonId': personId,
+                        'trackingUpdatedAt': FieldValue.serverTimestamp(),
+                      }, SetOptions(merge: true));
+
+                  if (!context.mounted) return;
                   Navigator.push(
                     context,
                     MaterialPageRoute(
                       builder: (_) => TrackCaregiverScreen(
                         bookingId: widget.bookingId,
                         caregiverName: caregiverName,
+                        caregiverId: caregiverId.isNotEmpty
+                            ? caregiverId
+                            : null,
+                        personId: personId.isNotEmpty ? personId : null,
+                        showStatusUpdateButton: false,
                       ),
                     ),
                   );
@@ -627,7 +1631,7 @@ class _ActivityBookingDetailsScreenState
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
       child: Row(
         children: [
-          Icon(icon, size: 18, color: _accentGreen),
+          Icon(icon, size: 17, color: _accentGreen),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -635,20 +1639,12 @@ class _ActivityBookingDetailsScreenState
               children: [
                 Text(
                   title,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.grey,
-                  ),
+                  style: _fieldLabelTextStyle,
                 ),
                 const SizedBox(height: 4),
                 Text(
                   value,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: _profileDarkText,
-                  ),
+                  style: _fieldValueTextStyle,
                 ),
               ],
             ),
@@ -689,239 +1685,277 @@ class _ActivityBookingDetailsScreenState
         'Caregiver';
     final caregiverPhoto =
         (_caregiverData?['photoUrl'] as String?) ?? _defaultAvatarUrl;
-    final personName =
-        normalizeString(booking['personName']) ?? 'Selected person';
-    final personLabel =
-        normalizeString(booking['personLabel']) ?? 'Care recipient';
     final rawServiceLabel = extractServiceLabelFromFirestore(booking);
     final service = rawServiceLabel.isNotEmpty ? rawServiceLabel : 'Home care';
-    final priceLabel =
-        'RM ${((booking['servicePrice'] as num?)?.toDouble() ?? 0.0).toStringAsFixed(2)}';
-    final status = (booking['status'] as String?)?.toUpperCase() ?? 'PENDING';
+    // Keep booking status available for downstream sections if needed later.
+    // (No longer shown in the header card.)
     final caregiverId = (booking['caregiverId'] as String?) ?? '';
-    final viewerIsCaregiver = _isCaregiverUser;
-    final firstTabLabel = viewerIsCaregiver
-        ? 'Client details'
-        : 'Caregiver details';
-    final firstTabView = SingleChildScrollView(
-      padding: const EdgeInsets.only(top: 8),
-      child: viewerIsCaregiver
-          ? _buildClientDetailsTab()
-          : _buildCaregiverDetailsTab(),
-    );
-    final headerName = viewerIsCaregiver ? personName : caregiverName;
-    final headerPhoto = viewerIsCaregiver ? null : caregiverPhoto;
-    final headerServiceLabel = viewerIsCaregiver ? personLabel : service;
-    final showBookingSummaryTab = status == 'COMPLETED';
-    final tabs = <Tab>[
-      Tab(text: firstTabLabel),
-      const Tab(text: 'Booking details'),
+    final caregiverDefaultAddress =
+        normalizeString(_caregiverData?['defaultAddress']) ??
+        normalizeString(_caregiverData?['address']) ??
+        normalizeString(_caregiverData?['area']) ??
+        'Location not provided';
+
+    final documentsStream = caregiverId.isNotEmpty
+        ? FirebaseFirestore.instance
+              .collection('documents')
+              .where('caregiverId', isEqualTo: caregiverId)
+              .snapshots()
+        : const Stream<QuerySnapshot<Map<String, dynamic>>>.empty();
+    final reviewsCountStream = caregiverId.isNotEmpty
+        ? FirebaseFirestore.instance
+              .collection('reviews')
+              .where('caregiverId', isEqualTo: caregiverId)
+              .snapshots()
+              .map((snap) => snap.docs.length)
+        : Stream<int>.value(0);
+    final verifiedDocsCountStream = caregiverId.isNotEmpty
+        ? documentsStream.map(
+            (snap) => snap.docs
+                .where((d) => (d.data()['status'] as bool?) == true)
+                .length,
+          )
+        : Stream<int>.value(0);
+    final clientsCountStream = caregiverId.isNotEmpty
+        ? FirebaseFirestore.instance
+              .collection('bookings')
+              .where('caregiverId', isEqualTo: caregiverId)
+              .where('status', isEqualTo: 'COMPLETED')
+              .snapshots()
+              .map((snap) => snap.docs.length)
+        : Stream<int>.value(0);
+
+    final bookingAddress =
+        normalizeString(booking['personAddress']) ??
+        normalizeString(booking['addressLabel']) ??
+        'Address not provided';
+
+    final tabLabels = <String>[
+      'Caregiver details',
+      if (!widget.hideBookingDetailsTab) 'Booking details',
+      'Location',
+      'Schedule',
+      'Reviews',
     ];
-    final tabViews = <Widget>[
-      firstTabView,
-      SingleChildScrollView(
-        padding: const EdgeInsets.only(top: 8),
-        child: _buildBookingDetailsTab(),
-      ),
-    ];
-    if (showBookingSummaryTab) {
-      tabs.add(const Tab(text: 'Booking summary'));
-      tabViews.add(
-        SingleChildScrollView(
-          padding: const EdgeInsets.only(top: 8),
-          child: _buildBookingSummaryTab(
-            context,
-            booking,
-            caregiverId,
-            caregiverName,
-          ),
-        ),
-      );
+
+    final selectedIndex = _selectedTabIndex
+        .clamp(0, tabLabels.length - 1)
+        .toInt();
+
+    Widget selectedTabContent() {
+      final index = selectedIndex;
+      final hasBookingTab = !widget.hideBookingDetailsTab;
+      if (index == 0) {
+        return _buildCaregiverDetailsTab(
+          caregiver: _caregiverData,
+          documentsStream: documentsStream,
+        );
+      }
+      if (hasBookingTab && index == 1) {
+        return _buildBookingDetailsTab();
+      }
+      final locationIndex = hasBookingTab ? 2 : 1;
+      final scheduleIndex = hasBookingTab ? 3 : 2;
+      final reviewsIndex = hasBookingTab ? 4 : 3;
+      if (index == locationIndex) {
+        return _buildLocationTab(
+          caregiverAddress: caregiverDefaultAddress,
+          bookingAddress: bookingAddress,
+        );
+      }
+      if (index == scheduleIndex) {
+        return _buildScheduleTab(booking);
+      }
+      if (index == reviewsIndex) {
+        return _buildReviewsTab(caregiverId);
+      }
+      return const SizedBox.shrink();
     }
-    return DefaultTabController(
-      length: tabs.length,
-      child: Scaffold(
-        backgroundColor: _screenBackground,
-        appBar: buildProfileStyleAppBar(
-          title: 'Booking details',
-          onBack: () => Navigator.of(context).pop(),
-        ),
-        body: Builder(
-          builder: (context) {
-            _attachTabController(DefaultTabController.of(context));
-            final content = Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _buildProfileHeader(
-                    name: headerName,
-                    serviceLabel: headerServiceLabel,
-                    priceLabel: priceLabel,
-                    status: status,
-                    photoUrl: headerPhoto,
-                  ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    height: 38,
-                    child: Stack(
-                      children: [
-                        Container(
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            border: Border.all(color: _cardBorderStrong),
-                            borderRadius: BorderRadius.circular(
-                              _segmentRadius,
-                            ),
-                            boxShadow: const [
-                              BoxShadow(
-                                color: _cardShadow,
-                                blurRadius: 14,
-                                offset: Offset(0, 6),
-                              ),
-                            ],
-                          ),
-                        ),
-                        Positioned.fill(
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(
-                              _segmentRadius,
-                            ),
-                            child: TabBar(
-                              indicator: BoxDecoration(
-                                color: _segmentIndicatorColor,
-                                borderRadius: BorderRadius.circular(
-                                  _segmentRadius,
-                                ),
-                              ),
-                              indicatorPadding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 6,
-                              ),
-                              indicatorSize: TabBarIndicatorSize.tab,
-                              labelStyle: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                              ),
-                              labelColor: _accentGreen,
-                              unselectedLabelColor: Colors.black54,
-                              overlayColor: WidgetStateProperty.all(
-                                Colors.black.withValues(alpha: 0.03),
-                              ),
-                              tabs: tabs,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Expanded(
-                    child: FadeTransition(
-                      opacity: _tabFade,
-                      child: SlideTransition(
-                        position: _tabSlide,
-                        child: TabBarView(children: tabViews),
+
+    final coverPhoto = caregiverPhoto.trim().isNotEmpty
+        ? caregiverPhoto.trim()
+        : _defaultAvatarUrl;
+
+    final headerWithMetrics = StreamBuilder<int>(
+      stream: clientsCountStream,
+      builder: (context, clientsSnap) {
+        final clientsCount = clientsSnap.data ?? 0;
+        return StreamBuilder<int>(
+          stream: verifiedDocsCountStream,
+          builder: (context, docsSnap) {
+            final verifiedDocs = docsSnap.data ?? 0;
+            return StreamBuilder<int>(
+              stream: reviewsCountStream,
+              builder: (context, reviewsSnap) {
+                final reviewsCount = reviewsSnap.data ?? 0;
+                return Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    _buildHeroCover(coverPhoto),
+                    Positioned(
+                      left: 16,
+                      right: 16,
+                      bottom: -58,
+                      child: _buildHeaderCard(
+                        name: caregiverName,
+                        serviceLabel: service,
+                        servicePreferences: const [],
+                        defaultAddress: caregiverDefaultAddress,
+                        clientsCount: clientsCount,
+                        verifiedDocsCount: verifiedDocs,
+                        reviewsCount: reviewsCount,
+                        photoUrl: caregiverPhoto,
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-              ),
+                  ],
+                );
+              },
             );
-            return FadeTransition(
-              opacity: _entryFade,
-              child: SlideTransition(position: _entrySlide, child: content),
+          },
+        );
+      },
+    );
+    _scheduleAutoSheetExtentUpdate();
+
+    final tabSelector = _buildOtherInfoTabs(
+      labels: tabLabels,
+      selectedIndex: selectedIndex,
+      onSelected: _selectTab,
+    );
+
+    const double sheetMinExtentRaw = _sheetMinExtentRaw;
+    final sheetInitialExtentRaw =
+        _autoInitialSheetExtent ?? _sheetFallbackInitialExtentRaw;
+    const double sheetMaxExtentRaw = _sheetMaxExtentRaw;
+
+    final computedMinExtent = math.max(
+      sheetMinExtentRaw.clamp(0.0, 1.0),
+      (_autoInitialSheetExtent ?? 0.0),
+    );
+    final sheetMinExtent = computedMinExtent.clamp(0.0, 1.0);
+    final sheetInitialExtent = math
+        .max(sheetInitialExtentRaw, sheetMinExtent)
+        .clamp(sheetMinExtent, 1.0);
+    final sheetMaxExtent = math
+        .max(sheetMaxExtentRaw.clamp(0.0, 1.0), sheetInitialExtent)
+        .clamp(sheetInitialExtent, 1.0);
+
+    final content = Stack(
+      children: [
+        ListView(
+          padding: EdgeInsets.zero,
+          physics: const NeverScrollableScrollPhysics(),
+          children: [
+            KeyedSubtree(key: _metricsKey, child: headerWithMetrics),
+          ],
+        ),
+        DraggableScrollableSheet(
+          initialChildSize: sheetInitialExtent,
+          minChildSize: sheetMinExtent,
+          maxChildSize: sheetMaxExtent,
+          builder: (context, scrollController) {
+            final extentBase = _currentSheetExtent == 0.0
+                ? sheetInitialExtent
+                : _currentSheetExtent;
+            final t = ((extentBase - sheetInitialExtent) /
+                    (1 - sheetInitialExtent))
+                .clamp(0.0, 1.0);
+            final showAppBar = extentBase >= 0.96;
+            final collapsedSpacing = 0.0;
+            final interpolatedSpacing =
+                lerpDouble(collapsedSpacing, 15.0, t) ?? 0.0;
+            final topSpacing =
+                showAppBar ? (kToolbarHeight + 8.0) : interpolatedSpacing;
+
+            return NotificationListener<DraggableScrollableNotification>(
+              onNotification: (notification) {
+                _onSheetExtentChanged(notification.extent);
+                return false;
+              },
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(28),
+                  ),
+                  border: Border.all(
+                    color: Colors.black.withValues(alpha: 0.06),
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.14),
+                      blurRadius: 22,
+                      offset: const Offset(0, -8),
+                    ),
+                  ],
+                ),
+                child: ScrollConfiguration(
+                  behavior: const _NoOverscrollScrollBehavior(),
+                  child: ListView(
+                    controller: scrollController,
+                    padding: EdgeInsets.zero,
+                    physics: const ClampingScrollPhysics(),
+                    children: [
+                      SizedBox(height: topSpacing),
+                      Center(
+                        child: Container(
+                          width: 44,
+                          height: 5,
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.18),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      tabSelector,
+                      Divider(
+                        height: 10,
+                        thickness: 2,
+                        color: Colors.black.withValues(alpha: 0.12),
+                      ),
+                      const SizedBox(height: 6),
+                      FadeTransition(
+                        opacity: _tabFade,
+                        child: SlideTransition(
+                          position: _tabSlide,
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(0, 2, 0, 12),
+                            child: selectedTabContent(),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             );
           },
         ),
-      ),
+      ],
     );
-  }
 
-  Widget _buildProfileHeader({
-    required String name,
-    required String serviceLabel,
-    required String priceLabel,
-    required String status,
-    String? photoUrl,
-  }) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(_cardRadius),
-        border: Border.all(color: _cardBorderStrong),
-        boxShadow: const [
-          BoxShadow(
-            color: _cardShadow,
-            blurRadius: 14,
-            offset: Offset(0, 6),
-          ),
-        ],
+    return Scaffold(
+      backgroundColor: _screenBackground,
+      extendBodyBehindAppBar: true,
+      appBar: buildProfileStyleAppBar(
+        title: 'Booking details',
+        onBack: () => Navigator.of(context).pop(),
       ),
-      child: Column(
-        children: [
-          DefaultProfileAvatar(radius: 34, photoUrl: photoUrl, label: name),
-          const SizedBox(height: 8),
-          Text(
-            name,
-            style: const TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-              color: _profileDarkText,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            serviceLabel,
-            style: const TextStyle(fontSize: 12, color: Colors.black54),
-          ),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              _StatusChip(label: status),
-              Text(
-                priceLabel,
-                style: const TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  color: _profileDarkText,
-                ),
-              ),
-            ],
-          ),
-        ],
+      body: FadeTransition(
+        opacity: _entryFade,
+        child: SlideTransition(position: _entrySlide, child: content),
       ),
     );
   }
 }
 
-class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.label});
+// _StatusChip removed (no longer used in this screen).
 
-  final String label;
+class _UserMini {
+  const _UserMini({required this.name, required this.photoUrl});
 
-  @override
-  Widget build(BuildContext context) {
-    final normalized = label.toUpperCase();
-    var color = _accentGreen;
-    if (normalized == 'COMPLETED') color = Colors.green;
-    if (normalized == 'CANCELLED') color = Colors.red;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Text(
-        normalized,
-        style: TextStyle(
-          fontSize: 10,
-          fontWeight: FontWeight.w600,
-          color: color,
-        ),
-      ),
-    );
-  }
+  final String name;
+  final String? photoUrl;
 }
