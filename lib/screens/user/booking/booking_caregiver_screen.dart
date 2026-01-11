@@ -990,7 +990,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                       color: sheetBg,
                       borderRadius: BorderRadius.vertical(top: sheetRadius),
                     ),
-                    child: const SafeArea(
+                    child: SafeArea(
                       top: false,
                       child: Padding(
                         padding: EdgeInsets.fromLTRB(18, 14, 18, 22),
@@ -1011,12 +1011,30 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                               ),
                             ),
                             SizedBox(height: 16),
-                            Text(
-                              'Schedule booking',
-                              style: TextStyle(
-                                fontWeight: FontWeight.w800,
-                                fontSize: 16,
-                                color: Colors.black87,
+                            Padding(
+                              padding: EdgeInsets.zero,
+                              child: Row(
+                                children: [
+                                  const Expanded(
+                                    child: Text(
+                                      'Schedule booking',
+                                      textAlign: TextAlign.left,
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 16,
+                                        color: Colors.black87,
+                                      ),
+                                    ),
+                                  ),
+                                  IconButton(
+                                    onPressed: () => Navigator.of(ctx).pop(),
+                                    icon: const Icon(
+                                      Icons.close_rounded,
+                                      color: Colors.black87,
+                                    ),
+                                    splashRadius: 18,
+                                  ),
+                                ],
                               ),
                             ),
                             SizedBox(height: 18),
@@ -1442,10 +1460,21 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                               const SizedBox(height: 10),
                               Padding(
                                 padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
+                                  horizontal: 18,
                                 ),
                                 child: Row(
                                   children: [
+                                    const Expanded(
+                                      child: Text(
+                                        'Schedule booking',
+                                        textAlign: TextAlign.left,
+                                        style: TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w800,
+                                          color: Colors.black87,
+                                        ),
+                                      ),
+                                    ),
                                     IconButton(
                                       onPressed: () => Navigator.of(ctx).pop(),
                                       icon: const Icon(
@@ -1454,18 +1483,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                                       ),
                                       splashRadius: 20,
                                     ),
-                                    const Expanded(
-                                      child: Text(
-                                        'Schedule booking',
-                                        textAlign: TextAlign.center,
-                                        style: TextStyle(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w800,
-                                          color: Colors.black87,
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 48),
                                   ],
                                 ),
                               ),
@@ -2138,11 +2155,30 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                         ),
                       ),
                       const SizedBox(height: 16),
-                      const Text(
-                        'Schedule booking',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 16,
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 18),
+                        child: Row(
+                          children: [
+                            const Expanded(
+                              child: Text(
+                                'Schedule booking',
+                                textAlign: TextAlign.left,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 16,
+                                  color: Colors.black87,
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              onPressed: () => Navigator.of(ctx).pop(),
+                              icon: const Icon(
+                                Icons.close_rounded,
+                                color: Colors.black87,
+                              ),
+                              splashRadius: 18,
+                            ),
+                          ],
                         ),
                       ),
                       const SizedBox(height: 18),

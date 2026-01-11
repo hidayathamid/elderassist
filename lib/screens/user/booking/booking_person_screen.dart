@@ -220,6 +220,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   final Map<String, BitmapDescriptor> _markerCache = {};
   final Map<String, ui.Image> _avatarImageCache = {};
   BitmapDescriptor? _selectedPersonIcon;
+  double _devicePixelRatio = 1.0;
   Timer? _mapMoveDebounce;
   LatLng? _pendingMapLatLng;
   int _locationRequestSeq = 0;
@@ -1125,43 +1126,15 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
             ),
             Row(
               children: [
-                Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    color: _accentBlue.withValues(alpha: 0.10),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(
-                    Icons.sticky_note_2_outlined,
-                    size: 16,
-                    color: _accentBlue,
-                  ),
-                ),
-                const SizedBox(width: 10),
                 const Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Note to caregiver',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 15,
-                          color: Colors.black87,
-                        ),
-                      ),
-                      SizedBox(height: 1),
-                      Text(
-                        'Optional. Add helpful details.',
-                        style: TextStyle(
-                          color: Colors.black54,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w800,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
+                  child: Text(
+                    'Note to caregiver',
+                    textAlign: TextAlign.left,
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15,
+                      color: Colors.black87,
+                    ),
                   ),
                 ),
                 IconButton(
@@ -1554,9 +1527,12 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         final entrySlide =
             _entrySlide ?? const AlwaysStoppedAnimation<Offset>(Offset.zero);
         final mediaPadding = MediaQuery.of(context).padding;
+        _devicePixelRatio = MediaQuery.of(context).devicePixelRatio;
+        final screenHeight = MediaQuery.of(context).size.height;
         final mapTopPadding = mediaPadding.top + kToolbarHeight + 8;
         // Keep Google attribution/logo above the sheet.
-        final mapBottomPadding = panelHeight + mediaPadding.bottom + 1;
+        final minPanelHeight = _minSheetSize * screenHeight;
+        final mapBottomPadding = minPanelHeight + 1;
 
         return Scaffold(
           backgroundColor: _pageBackground,
@@ -2194,6 +2170,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       fillColor: fillColor,
       label: label,
       size: 60,
+      pixelRatio: _devicePixelRatio,
       avatar: avatar,
     );
     _markerCache[key] = descriptor;
@@ -2222,10 +2199,13 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     String? label,
     Color textColor = Colors.black,
     double size = 110,
+    double pixelRatio = 1.0,
     ui.Image? avatar,
   }) async {
     final ui.PictureRecorder recorder = ui.PictureRecorder();
     final Canvas canvas = Canvas(recorder);
+    final double effectivePixelRatio = pixelRatio.clamp(1.0, 3.0);
+    canvas.scale(effectivePixelRatio);
     final double radius = size / 2;
     final double circleRadius = size * 0.45;
     final double circleCenterY = radius;
@@ -2236,11 +2216,14 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       circleRadius,
     );
     final Paint outlinePaint = Paint()
-      ..color = Colors.white
+      ..color = Colors.yellow.shade700
       ..style = PaintingStyle.stroke
-      ..strokeWidth = outlineWidth;
+      ..strokeWidth = outlineWidth
+      ..isAntiAlias = true;
     if (avatar == null) {
-      final Paint backgroundPaint = Paint()..color = fillColor;
+      final Paint backgroundPaint = Paint()
+        ..color = fillColor
+        ..isAntiAlias = true;
       canvas.drawCircle(
         Offset(radius, circleCenterY),
         circleRadius,
@@ -2288,7 +2271,14 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       final Path clip = Path()..addOval(dst);
       canvas.save();
       canvas.clipPath(clip);
-      canvas.drawImageRect(avatar, src, dst, Paint());
+      canvas.drawImageRect(
+        avatar,
+        src,
+        dst,
+        Paint()
+          ..isAntiAlias = true
+          ..filterQuality = FilterQuality.high,
+      );
       canvas.restore();
     }
     if (avatar == null && label != null && label.isNotEmpty) {
@@ -2311,7 +2301,8 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       textPainter.paint(canvas, offset);
     }
     final ui.Picture picture = recorder.endRecording();
-    final ui.Image image = await picture.toImage(size.toInt(), size.toInt());
+    final int pixelSize = (size * effectivePixelRatio).round();
+    final ui.Image image = await picture.toImage(pixelSize, pixelSize);
     final ByteData? byteData = await image.toByteData(
       format: ui.ImageByteFormat.png,
     );
@@ -2319,7 +2310,10 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       debugPrint('Avatar marker drawing failed; using default marker');
       return BitmapDescriptor.defaultMarker;
     }
-    return BitmapDescriptor.bytes(byteData.buffer.asUint8List());
+    return BitmapDescriptor.bytes(
+      byteData.buffer.asUint8List(),
+      imagePixelRatio: effectivePixelRatio,
+    );
   }
 
   List<AddressItem> _visibleAddresses() {

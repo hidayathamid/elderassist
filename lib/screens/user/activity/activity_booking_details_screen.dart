@@ -23,6 +23,7 @@ const Color _cardShadow = Color(0x1A0B0C10);
 const Color _cardBorderStrong = Color(0xFFE1E4EA);
 const double _cardRadius = 18;
 const Color _mutedText = Color(0xFF6B7280);
+const Color _accentGold = Color(0xFFF4B63D);
 
 const TextStyle _sectionHeaderTextStyle = TextStyle(
   fontWeight: FontWeight.w800,
@@ -82,7 +83,6 @@ class _NoOverscrollScrollBehavior extends ScrollBehavior {
 class _ActivityBookingDetailsScreenState
     extends State<ActivityBookingDetailsScreen>
     with TickerProviderStateMixin {
-  static const double _sheetMinExtentRaw = 0.40;
   static const double _sheetMaxExtentRaw = 1.0;
   static const double _sheetFallbackInitialExtentRaw = 0.78;
 
@@ -99,6 +99,7 @@ class _ActivityBookingDetailsScreenState
   late final Animation<double> _tabFade;
   late final Animation<Offset> _tabSlide;
   int _selectedTabIndex = 0;
+  int? _selectedRatingFilter;
   double _currentSheetExtent = 0.0;
   final GlobalKey _metricsKey = GlobalKey();
   double? _autoInitialSheetExtent;
@@ -169,8 +170,7 @@ class _ActivityBookingDetailsScreenState
 
       const gapBelowMetrics = 12.0;
       final desiredTop = metricsBottom + gapBelowMetrics;
-      final initial = (1 - (desiredTop / screenHeight))
-          .clamp(_sheetMinExtentRaw, _sheetMaxExtentRaw);
+      final initial = (1 - (desiredTop / screenHeight)).clamp(0.0, 1.0);
 
       if (_autoInitialSheetExtent != null &&
           (_autoInitialSheetExtent! - initial).abs() < 0.01) {
@@ -320,8 +320,10 @@ class _ActivityBookingDetailsScreenState
     }
     return _reviewUserCache.putIfAbsent(userId, () async {
       try {
-        final snap =
-            await FirebaseFirestore.instance.collection('users').doc(userId).get();
+        final snap = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(userId)
+            .get();
         final data = snap.data() ?? const <String, dynamic>{};
         final name = (data['name'] as String?)?.trim();
         final photoUrl = (data['photoUrl'] as String?)?.trim();
@@ -369,17 +371,16 @@ class _ActivityBookingDetailsScreenState
   }
 
   Widget _starRow(double rating, {double size = 16}) {
-    const gold = Color(0xFFF4B63D);
     final clamped = rating.clamp(0.0, 5.0);
     final full = clamped.floor();
     final half = (clamped - full) >= 0.5 ? 1 : 0;
     final empty = 5 - full - half;
     final stars = <Widget>[];
     for (var i = 0; i < full; i++) {
-      stars.add(Icon(Icons.star_rounded, size: size, color: gold));
+      stars.add(Icon(Icons.star_rounded, size: size, color: _accentGold));
     }
     if (half == 1) {
-      stars.add(Icon(Icons.star_half_rounded, size: size, color: gold));
+      stars.add(Icon(Icons.star_half_rounded, size: size, color: _accentGold));
     }
     for (var i = 0; i < empty; i++) {
       stars.add(
@@ -391,6 +392,126 @@ class _ActivityBookingDetailsScreenState
       );
     }
     return Row(mainAxisSize: MainAxisSize.min, children: stars);
+  }
+
+  Widget _ratingBar({
+    required int star,
+    required int count,
+    required int total,
+  }) {
+    final fraction = total <= 0 ? 0.0 : (count / total).clamp(0.0, 1.0);
+    return Row(
+      children: [
+        SizedBox(
+          width: 14,
+          child: Text(
+            star.toString(),
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: Colors.black.withValues(alpha: 0.72),
+            ),
+            textAlign: TextAlign.right,
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: SizedBox(
+              height: 6,
+              child: LinearProgressIndicator(
+                value: (total > 0 && count > 0)
+                    ? math.max(fraction, 0.03)
+                    : 0.0,
+                backgroundColor: Colors.black.withValues(alpha: 0.08),
+                valueColor: const AlwaysStoppedAnimation<Color>(_accentGold),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _filterChip({
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return TextButton(
+      onPressed: onTap,
+      style: TextButton.styleFrom(
+        foregroundColor: selected ? Colors.white : _profileDarkText,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        minimumSize: const Size(0, 28),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(999),
+          side: BorderSide(
+            color: selected
+                ? _accentBlue.withValues(alpha: 0.9)
+                : Colors.black.withValues(alpha: 0.08),
+          ),
+        ),
+        backgroundColor: selected ? _accentBlue : Colors.white,
+        textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
+      ),
+      child: Text(label),
+    );
+  }
+
+  Widget _buildCaregiverReply({
+    required String caregiverName,
+    required String? caregiverPhotoUrl,
+    required String reply,
+  }) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
+      ),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              DefaultProfileAvatar(
+                radius: 14,
+                photoUrl: caregiverPhotoUrl,
+                label: caregiverName,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  caregiverName,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                    color: Colors.black.withValues(alpha: 0.70),
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            reply,
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              height: 1.35,
+              color: _profileDarkText,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildHeroCover(String photoUrl) {
@@ -822,8 +943,8 @@ class _ActivityBookingDetailsScreenState
 
   Widget _buildServiceChip({required String label}) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      constraints: const BoxConstraints(minHeight: 30),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      constraints: const BoxConstraints(minHeight: 26),
       decoration: BoxDecoration(
         color: _accentBlue,
         borderRadius: BorderRadius.circular(12),
@@ -1062,6 +1183,7 @@ class _ActivityBookingDetailsScreenState
     );
   }
 
+  // ignore: unused_element
   Widget _buildLocationTab({
     required String caregiverAddress,
     required String bookingAddress,
@@ -1124,6 +1246,18 @@ class _ActivityBookingDetailsScreenState
   }
 
   Widget _buildReviewsTab(String caregiverId) {
+    final caregiverName =
+        normalizeString(_caregiverData?['name'])?.trim().isNotEmpty == true
+        ? normalizeString(_caregiverData?['name'])!.trim()
+        : 'Caregiver';
+    final caregiverPhotoUrl =
+        normalizeString(_caregiverData?['photoUrl'])?.trim().isNotEmpty == true
+        ? normalizeString(_caregiverData?['photoUrl'])!.trim()
+        : (normalizeString(_caregiverData?['imageUrl'])?.trim().isNotEmpty ==
+                  true
+              ? normalizeString(_caregiverData?['imageUrl'])!.trim()
+              : null);
+
     if (caregiverId.isEmpty) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1176,7 +1310,7 @@ class _ActivityBookingDetailsScreenState
           );
         }
 
-        final docs = snapshot.data!.docs.toList(growable: false)
+        final allDocs = snapshot.data!.docs.toList(growable: false)
           ..sort((a, b) {
             final ta = a.data()['createdAt'] as Timestamp?;
             final tb = b.data()['createdAt'] as Timestamp?;
@@ -1186,7 +1320,7 @@ class _ActivityBookingDetailsScreenState
             return tb.compareTo(ta);
           });
 
-        if (docs.isEmpty) {
+        if (allDocs.isEmpty) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -1201,40 +1335,157 @@ class _ActivityBookingDetailsScreenState
           );
         }
 
+        final counts = <int, int>{1: 0, 2: 0, 3: 0, 4: 0, 5: 0};
+        var totalRating = 0;
+        for (final doc in allDocs) {
+          final rating = _coerceRating(doc.data()['rating']);
+          if (rating <= 0) continue;
+          counts[rating] = (counts[rating] ?? 0) + 1;
+          totalRating += rating;
+        }
+        final totalCount = counts.values.fold<int>(0, (a, b) => a + b);
+        final average = totalCount == 0 ? 0.0 : totalRating / totalCount;
+
+        final selected = _selectedRatingFilter;
+        final docs = selected == null
+            ? allDocs
+            : allDocs
+                  .where((d) => _coerceRating(d.data()['rating']) == selected)
+                  .toList();
+
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: ListView.separated(
+            const SizedBox(height: 10),
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: Colors.black.withValues(alpha: 0.12),
+                  width: 1.2,
+                ),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x1A000000),
+                    blurRadius: 16,
+                    offset: Offset(0, 8),
+                  ),
+                ],
+              ),
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 124,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          average.toStringAsFixed(1),
+                          style: const TextStyle(
+                            fontSize: 36,
+                            fontWeight: FontWeight.w900,
+                            color: _profileDarkText,
+                            height: 1,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        _starRow(average, size: 16),
+                        const SizedBox(height: 10),
+                        Text(
+                          '$totalCount ratings',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.black.withValues(alpha: 0.55),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      children: [
+                        for (final star in const [5, 4, 3, 2, 1]) ...[
+                          _ratingBar(
+                            star: star,
+                            count: counts[star] ?? 0,
+                            total: totalCount,
+                          ),
+                          if (star != 1) const SizedBox(height: 10),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            _buildSectionHeader(title: 'Filters'),
+            const SizedBox(height: 4),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(),
+              child: Row(
+                children: [
+                  _filterChip(
+                    label: 'All ($totalCount)',
+                    selected: selected == null,
+                    onTap: () => setState(() => _selectedRatingFilter = null),
+                  ),
+                  const SizedBox(width: 6),
+                  for (final star in const [5, 4, 3, 2, 1]) ...[
+                    _filterChip(
+                      label: '$star (${counts[star] ?? 0})',
+                      selected: selected == star,
+                      onTap: () => setState(() => _selectedRatingFilter = star),
+                    ),
+                    const SizedBox(width: 6),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            if (docs.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 30),
+                child: Center(
+                  child: Text(
+                    'No reviews for this filter.',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.black.withValues(alpha: 0.55),
+                    ),
+                  ),
+                ),
+              )
+            else
+              ListView.separated(
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
                 itemCount: docs.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 8),
+                separatorBuilder: (_, __) => const SizedBox(height: 10),
                 itemBuilder: (context, index) {
                   final data = docs[index].data();
+                  final personName =
+                      (data['personName'] as String?)?.trim() ?? 'User';
+                  final userId = (data['userId'] as String?)?.trim() ?? '';
+                  final service = (data['service'] as String?)?.trim() ?? '';
+                  final feedback = (data['feedback'] as String?)?.trim() ?? '';
+                  final caregiverReply =
+                      (data['caregiverReply'] as String?)?.trim() ?? '';
                   final rating = _coerceRating(data['rating']);
-                  final feedbackRaw = (data['feedback'] as String?) ??
-                      (data['comment'] as String?) ??
-                      (data['message'] as String?) ??
-                      '';
-                  final feedback = feedbackRaw.trim();
                   final createdAt = data['createdAt'] as Timestamp?;
                   final relative = _formatRelative(createdAt);
                   final dateLabel = _formatReviewDate(createdAt);
-                  final service = ((data['service'] as String?) ?? '').trim();
-                  final userId = ((data['userId'] as String?) ?? '').trim();
-                  final personName =
-                      ((data['personName'] as String?) ??
-                              (data['userName'] as String?) ??
-                              'User')
-                          .trim();
 
                   return Container(
-                    margin: const EdgeInsets.only(top: 1),
                     decoration: BoxDecoration(
                       color: Colors.white,
-                      borderRadius: BorderRadius.circular(16),
+                      borderRadius: BorderRadius.circular(18),
                       border: Border.all(
                         color: Colors.black.withValues(alpha: 0.12),
                         width: 1.2,
@@ -1242,8 +1493,8 @@ class _ActivityBookingDetailsScreenState
                       boxShadow: const [
                         BoxShadow(
                           color: Color(0x1A000000),
-                          blurRadius: 14,
-                          offset: Offset(0, 6),
+                          blurRadius: 16,
+                          offset: Offset(0, 8),
                         ),
                       ],
                     ),
@@ -1254,29 +1505,22 @@ class _ActivityBookingDetailsScreenState
                         FutureBuilder<_UserMini>(
                           future: _fetchUserMini(
                             userId: userId,
-                            fallbackName:
-                                personName.isNotEmpty ? personName : 'User',
+                            fallbackName: personName,
                           ),
                           builder: (context, userSnap) {
-                            final user = userSnap.data ??
-                                _UserMini(
-                                  name: personName.isNotEmpty
-                                      ? personName
-                                      : 'User',
-                                  photoUrl: null,
-                                );
+                            final user =
+                                userSnap.data ??
+                                _UserMini(name: personName, photoUrl: null);
                             return Row(
                               crossAxisAlignment: CrossAxisAlignment.center,
                               children: [
                                 _reviewAvatar(user),
-                                const SizedBox(width: 9),
+                                const SizedBox(width: 8),
                                 Expanded(
                                   child: Text(
                                     user.name.trim().isNotEmpty
                                         ? user.name.trim()
-                                        : (personName.isNotEmpty
-                                            ? personName
-                                            : 'User'),
+                                        : personName,
                                     style: const TextStyle(
                                       fontSize: 13.5,
                                       fontWeight: FontWeight.w900,
@@ -1291,7 +1535,7 @@ class _ActivityBookingDetailsScreenState
                           },
                         ),
                         const SizedBox(height: 8),
-                        _starRow(rating.toDouble(), size: 15),
+                        _starRow(rating.toDouble(), size: 16),
                         if (service.isNotEmpty) ...[
                           const SizedBox(height: 6),
                           Text(
@@ -1305,7 +1549,9 @@ class _ActivityBookingDetailsScreenState
                         ],
                         const SizedBox(height: 10),
                         Text(
-                          feedback.isNotEmpty ? feedback : 'No written feedback.',
+                          feedback.isNotEmpty
+                              ? feedback
+                              : 'No written feedback.',
                           style: TextStyle(
                             fontSize: 13.5,
                             height: 1.35,
@@ -1315,6 +1561,14 @@ class _ActivityBookingDetailsScreenState
                                 : Colors.black.withValues(alpha: 0.52),
                           ),
                         ),
+                        if (caregiverReply.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          _buildCaregiverReply(
+                            caregiverName: caregiverName,
+                            caregiverPhotoUrl: caregiverPhotoUrl,
+                            reply: caregiverReply,
+                          ),
+                        ],
                         const SizedBox(height: 10),
                         Row(
                           children: [
@@ -1333,7 +1587,6 @@ class _ActivityBookingDetailsScreenState
                   );
                 },
               ),
-            ),
           ],
         );
       },
@@ -1350,7 +1603,9 @@ class _ActivityBookingDetailsScreenState
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
       decoration: BoxDecoration(
         border: Border(
-          bottom: showBorder ? const BorderSide(color: _cardBorder) : BorderSide.none,
+          bottom: showBorder
+              ? const BorderSide(color: _cardBorder)
+              : BorderSide.none,
         ),
       ),
       child: Row(
@@ -1361,15 +1616,9 @@ class _ActivityBookingDetailsScreenState
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  title,
-                  style: _fieldLabelTextStyle,
-                ),
+                Text(title, style: _fieldLabelTextStyle),
                 const SizedBox(height: 4),
-                Text(
-                  value,
-                  style: _fieldValueTextStyle,
-                ),
+                Text(value, style: _fieldValueTextStyle),
               ],
             ),
           ),
@@ -1398,12 +1647,7 @@ class _ActivityBookingDetailsScreenState
       padding: const EdgeInsets.fromLTRB(4, 6, 4, 8),
       child: Row(
         children: [
-          Expanded(
-            child: Text(
-              title,
-              style: _sectionHeaderTextStyle,
-            ),
-          ),
+          Expanded(child: Text(title, style: _sectionHeaderTextStyle)),
         ],
       ),
     );
@@ -1637,15 +1881,9 @@ class _ActivityBookingDetailsScreenState
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  title,
-                  style: _fieldLabelTextStyle,
-                ),
+                Text(title, style: _fieldLabelTextStyle),
                 const SizedBox(height: 4),
-                Text(
-                  value,
-                  style: _fieldValueTextStyle,
-                ),
+                Text(value, style: _fieldValueTextStyle),
               ],
             ),
           ),
@@ -1725,15 +1963,9 @@ class _ActivityBookingDetailsScreenState
               .map((snap) => snap.docs.length)
         : Stream<int>.value(0);
 
-    final bookingAddress =
-        normalizeString(booking['personAddress']) ??
-        normalizeString(booking['addressLabel']) ??
-        'Address not provided';
-
     final tabLabels = <String>[
       'Caregiver details',
       if (!widget.hideBookingDetailsTab) 'Booking details',
-      'Location',
       'Schedule',
       'Reviews',
     ];
@@ -1754,15 +1986,8 @@ class _ActivityBookingDetailsScreenState
       if (hasBookingTab && index == 1) {
         return _buildBookingDetailsTab();
       }
-      final locationIndex = hasBookingTab ? 2 : 1;
-      final scheduleIndex = hasBookingTab ? 3 : 2;
-      final reviewsIndex = hasBookingTab ? 4 : 3;
-      if (index == locationIndex) {
-        return _buildLocationTab(
-          caregiverAddress: caregiverDefaultAddress,
-          bookingAddress: bookingAddress,
-        );
-      }
+      final scheduleIndex = hasBookingTab ? 2 : 1;
+      final reviewsIndex = hasBookingTab ? 3 : 2;
       if (index == scheduleIndex) {
         return _buildScheduleTab(booking);
       }
@@ -1776,6 +2001,7 @@ class _ActivityBookingDetailsScreenState
         ? caregiverPhoto.trim()
         : _defaultAvatarUrl;
 
+    const double headerCardOverlap = 96;
     final headerWithMetrics = StreamBuilder<int>(
       stream: clientsCountStream,
       builder: (context, clientsSnap) {
@@ -1788,26 +2014,40 @@ class _ActivityBookingDetailsScreenState
               stream: reviewsCountStream,
               builder: (context, reviewsSnap) {
                 final reviewsCount = reviewsSnap.data ?? 0;
-                return Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    _buildHeroCover(coverPhoto),
-                    Positioned(
-                      left: 16,
-                      right: 16,
-                      bottom: -58,
-                      child: _buildHeaderCard(
-                        name: caregiverName,
-                        serviceLabel: service,
-                        servicePreferences: const [],
-                        defaultAddress: caregiverDefaultAddress,
-                        clientsCount: clientsCount,
-                        verifiedDocsCount: verifiedDocs,
-                        reviewsCount: reviewsCount,
-                        photoUrl: caregiverPhoto,
+                return SizedBox(
+                  height: 220 + headerCardOverlap,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      const Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        child: SizedBox(height: 220),
                       ),
-                    ),
-                  ],
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        child: _buildHeroCover(coverPhoto),
+                      ),
+                      Positioned(
+                        left: 16,
+                        right: 16,
+                        bottom: 0,
+                        child: _buildHeaderCard(
+                          name: caregiverName,
+                          serviceLabel: service,
+                          servicePreferences: const [],
+                          defaultAddress: caregiverDefaultAddress,
+                          clientsCount: clientsCount,
+                          verifiedDocsCount: verifiedDocs,
+                          reviewsCount: reviewsCount,
+                          photoUrl: caregiverPhoto,
+                        ),
+                      ),
+                    ],
+                  ),
                 );
               },
             );
@@ -1823,19 +2063,12 @@ class _ActivityBookingDetailsScreenState
       onSelected: _selectTab,
     );
 
-    const double sheetMinExtentRaw = _sheetMinExtentRaw;
     final sheetInitialExtentRaw =
         _autoInitialSheetExtent ?? _sheetFallbackInitialExtentRaw;
     const double sheetMaxExtentRaw = _sheetMaxExtentRaw;
 
-    final computedMinExtent = math.max(
-      sheetMinExtentRaw.clamp(0.0, 1.0),
-      (_autoInitialSheetExtent ?? 0.0),
-    );
-    final sheetMinExtent = computedMinExtent.clamp(0.0, 1.0);
-    final sheetInitialExtent = math
-        .max(sheetInitialExtentRaw, sheetMinExtent)
-        .clamp(sheetMinExtent, 1.0);
+    final sheetInitialExtent = sheetInitialExtentRaw.clamp(0.0, 1.0);
+    final sheetMinExtent = sheetInitialExtent;
     final sheetMaxExtent = math
         .max(sheetMaxExtentRaw.clamp(0.0, 1.0), sheetInitialExtent)
         .clamp(sheetInitialExtent, 1.0);
@@ -1845,9 +2078,7 @@ class _ActivityBookingDetailsScreenState
         ListView(
           padding: EdgeInsets.zero,
           physics: const NeverScrollableScrollPhysics(),
-          children: [
-            KeyedSubtree(key: _metricsKey, child: headerWithMetrics),
-          ],
+          children: [KeyedSubtree(key: _metricsKey, child: headerWithMetrics)],
         ),
         DraggableScrollableSheet(
           initialChildSize: sheetInitialExtent,
@@ -1857,15 +2088,16 @@ class _ActivityBookingDetailsScreenState
             final extentBase = _currentSheetExtent == 0.0
                 ? sheetInitialExtent
                 : _currentSheetExtent;
-            final t = ((extentBase - sheetInitialExtent) /
-                    (1 - sheetInitialExtent))
-                .clamp(0.0, 1.0);
+            final t =
+                ((extentBase - sheetInitialExtent) / (1 - sheetInitialExtent))
+                    .clamp(0.0, 1.0);
             final showAppBar = extentBase >= 0.96;
             final collapsedSpacing = 0.0;
             final interpolatedSpacing =
                 lerpDouble(collapsedSpacing, 15.0, t) ?? 0.0;
-            final topSpacing =
-                showAppBar ? (kToolbarHeight + 8.0) : interpolatedSpacing;
+            final topSpacing = showAppBar
+                ? (kToolbarHeight + 8.0)
+                : interpolatedSpacing;
 
             return NotificationListener<DraggableScrollableNotification>(
               onNotification: (notification) {

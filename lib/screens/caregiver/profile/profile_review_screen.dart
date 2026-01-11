@@ -33,21 +33,9 @@ class ProfileReviewScreen extends StatefulWidget {
 class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
   int? _selectedRatingFilter;
   final Map<String, Future<_UserMini>> _userCache = <String, Future<_UserMini>>{};
+  final Map<String, Future<_UserMini>> _caregiverCache =
+      <String, Future<_UserMini>>{};
   String? _savingReplyForReviewId;
-
-  String _formatRelative(Timestamp? timestamp) {
-    if (timestamp == null) return '';
-    final dt = timestamp.toDate();
-    final now = DateTime.now();
-    final diff = now.difference(dt);
-    if (diff.inDays >= 365) return '${diff.inDays ~/ 365}y';
-    if (diff.inDays >= 30) return '${diff.inDays ~/ 30}mo';
-    if (diff.inDays >= 7) return '${diff.inDays ~/ 7}w';
-    if (diff.inDays >= 1) return '${diff.inDays}d';
-    if (diff.inHours >= 1) return '${diff.inHours}h';
-    if (diff.inMinutes >= 1) return '${diff.inMinutes}m';
-    return 'Now';
-  }
 
   String _formatDate(Timestamp? timestamp) {
     if (timestamp == null) return '';
@@ -90,6 +78,36 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
     });
   }
 
+  Future<_UserMini> _fetchCaregiverMini({
+    required String caregiverId,
+    required String fallbackName,
+  }) {
+    if (caregiverId.trim().isEmpty) {
+      return Future<_UserMini>.value(_UserMini(name: fallbackName, photoUrl: null));
+    }
+    return _caregiverCache.putIfAbsent(caregiverId, () async {
+      try {
+        final snap = await FirebaseFirestore.instance
+            .collection('caregivers')
+            .doc(caregiverId)
+            .get();
+        final data = snap.data() ?? const <String, dynamic>{};
+        final name = (data['name'] as String?)?.trim();
+        final photoUrl = (data['photoUrl'] as String?)?.trim() ??
+            (data['avatarUrl'] as String?)?.trim();
+        final fallbackPhoto = FirebaseAuth.instance.currentUser?.photoURL?.trim();
+        return _UserMini(
+          name: (name?.isNotEmpty == true) ? name! : fallbackName,
+          photoUrl: (photoUrl?.isNotEmpty == true)
+              ? photoUrl!
+              : (fallbackPhoto?.isNotEmpty == true ? fallbackPhoto : null),
+        );
+      } catch (_) {
+        return _UserMini(name: fallbackName, photoUrl: null);
+      }
+    });
+  }
+
   Future<void> _openReplySheet({
     required String reviewId,
     required String caregiverId,
@@ -107,11 +125,17 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
       if (_savingReplyForReviewId == reviewId) return;
       setState(() => _savingReplyForReviewId = reviewId);
       try {
-        await FirebaseFirestore.instance.collection('reviews').doc(reviewId).set({
+        final payload = <String, dynamic>{
           'caregiverReply': reply,
           'caregiverReplyUpdatedAt': FieldValue.serverTimestamp(),
-          'caregiverReplyAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
+        };
+        if (initialReply.trim().isEmpty) {
+          payload['caregiverReplyAt'] = FieldValue.serverTimestamp();
+        }
+        await FirebaseFirestore.instance
+            .collection('reviews')
+            .doc(reviewId)
+            .set(payload, SetOptions(merge: true));
         if (mounted) {
           Navigator.of(sheetContext).maybePop();
         }
@@ -735,10 +759,14 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
                   final feedback = (data['feedback'] as String?)?.trim() ?? '';
                   final caregiverReply =
                       (data['caregiverReply'] as String?)?.trim() ?? '';
+                  final caregiverReplyAt = data['caregiverReplyAt'] as Timestamp?;
+                  final caregiverReplyUpdatedAt =
+                      data['caregiverReplyUpdatedAt'] as Timestamp?;
                   final rating = _coerceRating(data['rating']);
                   final createdAt = data['createdAt'] as Timestamp?;
-                  final relative = _formatRelative(createdAt);
                   final dateLabel = _formatDate(createdAt);
+                  final replyDate = caregiverReplyUpdatedAt ?? caregiverReplyAt;
+                  final replyDateLabel = _formatDate(replyDate);
 
                   return Padding(
                     padding: const EdgeInsets.only(bottom: 10),
@@ -824,24 +852,62 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text(
-                                    'From caregiver',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w900,
-                                      color: Colors.black.withValues(alpha: 0.62),
-                                    ),
+                                  Row(
+                                    children: [
+                                      FutureBuilder<_UserMini>(
+                                        future: _fetchCaregiverMini(
+                                          caregiverId: caregiverId,
+                                          fallbackName: 'You',
+                                        ),
+                                        builder: (context, meSnap) {
+                                          final me = meSnap.data ??
+                                              const _UserMini(
+                                                name: 'You',
+                                                photoUrl: null,
+                                              );
+                                          return Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              _reviewAvatar(me),
+                                              const SizedBox(width: 8),
+                                              const Text(
+                                                'You',
+                                                style: TextStyle(
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight.w900,
+                                                  color: _profileDarkText,
+                                                ),
+                                              ),
+                                            ],
+                                          );
+                                        },
+                                      ),
+                                    ],
                                   ),
-                                  const SizedBox(height: 6),
+                                  const SizedBox(height: 8),
                                   Text(
                                     caregiverReply,
                                     style: const TextStyle(
                                       fontSize: 13,
                                       fontWeight: FontWeight.w700,
                                       height: 1.35,
-                                      color: _profileDarkText,
+                                      color: Colors.black,
                                     ),
                                   ),
+                                  if (replyDateLabel.isNotEmpty) ...[
+                                    const SizedBox(height: 8),
+                                    Align(
+                                      alignment: Alignment.centerRight,
+                                      child: Text(
+                                        replyDateLabel,
+                                        style: TextStyle(
+                                          fontSize: 11.5,
+                                          fontWeight: FontWeight.w800,
+                                          color: Colors.black.withValues(alpha: 0.55),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 ],
                               ),
                             ),
@@ -850,7 +916,7 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
                           Row(
                             children: [
                               Text(
-                                relative.isNotEmpty ? relative : dateLabel,
+                                dateLabel,
                                 style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w700,
@@ -867,7 +933,7 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
                                           initialReply: caregiverReply,
                                         ),
                                 style: TextButton.styleFrom(
-                                  foregroundColor: _accentGold,
+                                  foregroundColor: Colors.black87,
                                   minimumSize: const Size(0, 28),
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 10,

@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'package:emergencies_disability_assistance_app/models/caregiver_model.dart';
+import 'package:emergencies_disability_assistance_app/models/recommendation_rules.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_booking_details_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/booking/booking_caregiver_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/booking/booking_person_screen.dart';
@@ -68,6 +69,7 @@ class _HomeAddressItem {
     required this.name,
     required this.label,
     required this.address,
+    this.isUser = false,
     this.photoUrl,
     this.lat,
     this.lng,
@@ -76,6 +78,7 @@ class _HomeAddressItem {
   final String name;
   final String label;
   final String address;
+  final bool isUser;
   final String? photoUrl;
   final double? lat;
   final double? lng;
@@ -88,7 +91,7 @@ class _HomeAddressItem {
     return null;
   }
 
-  factory _HomeAddressItem.fromMap(Map<String, dynamic> map) {
+  factory _HomeAddressItem.fromMap(Map<String, dynamic> map, {bool isUser = false}) {
     final lat = _safeDouble(map['lat']) ?? _safeDouble(map['latitude']);
     final lng =
         _safeDouble(map['long']) ??
@@ -109,9 +112,10 @@ class _HomeAddressItem {
         map['city'] ??
         '';
     return _HomeAddressItem(
-      name: '$nameValue'.trim().isNotEmpty ? '$nameValue'.trim() : 'Person',
-      label: '$labelValue'.trim(),
+      name: isUser ? 'You' : ('$nameValue'.trim().isNotEmpty ? '$nameValue'.trim() : 'Person'),
+      label: isUser ? '' : '$labelValue'.trim(),
       address: '$addressValue'.trim(),
+      isUser: isUser,
       photoUrl: photoUrl?.trim().isNotEmpty == true ? photoUrl!.trim() : null,
       lat: lat,
       lng: lng,
@@ -196,7 +200,7 @@ class _HomeAddressPickerSheetState extends State<_HomeAddressPickerSheet> {
                   TextButton(
                     onPressed: widget.onEditPressed,
                     style: TextButton.styleFrom(
-                      foregroundColor: _primaryBlue,
+                      foregroundColor: Colors.black87,
                       minimumSize: const Size(44, 32),
                       padding: const EdgeInsets.symmetric(horizontal: 10),
                       textStyle: const TextStyle(fontWeight: FontWeight.w800),
@@ -325,7 +329,8 @@ class _HomeAddressCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final label = item.label.trim();
+    final label = item.isUser ? '' : item.label.trim();
+    final displayName = item.isUser ? 'You' : item.name;
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -347,14 +352,14 @@ class _HomeAddressCard extends StatelessWidget {
             children: [
               _buildPersonAvatar(),
               const SizedBox(width: 7),
-              Expanded(
-                child: Text(
-                  item.name,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                    color: _homeHeadingTextColor,
-                  ),
+                Expanded(
+                  child: Text(
+                    displayName,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                      color: _homeHeadingTextColor,
+                    ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -433,6 +438,8 @@ class _UserHomeScreenState extends State<UserHomeScreen>
   final _auth = FirebaseAuth.instance;
   final _headerKey = GlobalKey();
   final Map<String, CaregiverModel> _caregiverCache = {};
+  RecommendationRules _recommendationRules = RecommendationRules.defaults();
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _rulesSub;
 
   AnimationController? _entryController;
   Animation<double>? _entryFade;
@@ -448,6 +455,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
   bool _manualLocationLock = false;
   List<_HomeAddressItem> _homeAddresses = [];
   int _selectedHomeAddressIndex = 0;
+  bool _didForceInitialYouSelection = false;
   String? _userPhoneNumber;
   final double _sheetMaxExtent = 1.0;
   double _sheetMinExtent = _sheetInitialExtent;
@@ -578,6 +586,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     _previousCaregiversFuture = _loadPreviousCaregivers();
     _recommendedCaregiversFuture = _loadRecommendedCaregivers();
     _nearbyCaregiversStream = _caregiverService.streamCaregivers();
+    _listenForRecommendationRules();
     _loadUserLocation();
     _subscribeToUserDocStream();
     _updateGreeting();
@@ -682,13 +691,55 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     final addressPosition = _positionsFromDocument(firestoreData);
     final addresses = _extractAddressList(firestoreData);
     final phone = (firestoreData?['phone'] as String?)?.trim();
-    final resolvedAddresses = addresses
-        .map(_HomeAddressItem.fromMap)
-        .where((item) => item.address.isNotEmpty)
-        .toList();
-    final nextSelectedIndex = resolvedAddresses.isEmpty
-        ? 0
-        : _selectedHomeAddressIndex.clamp(0, resolvedAddresses.length - 1);
+    final hadUserCard = _homeAddresses.isNotEmpty && _homeAddresses.first.isUser;
+    final resolvedAddresses = <_HomeAddressItem>[];
+
+    final userDefaultAddress = firestoreData?['defaultAddress']?.toString().trim();
+    final userLat = _safeDouble(firestoreData?['lat']) ??
+        _safeDouble(firestoreData?['latitude']);
+    final userLng =
+        _safeDouble(firestoreData?['long']) ??
+        _safeDouble(firestoreData?['lng']) ??
+        _safeDouble(firestoreData?['longitude']);
+    if (userDefaultAddress != null && userDefaultAddress.isNotEmpty) {
+      resolvedAddresses.add(
+        _HomeAddressItem.fromMap(
+          <String, dynamic>{
+            'name': displayName,
+            'label': '',
+            'addressLine': userDefaultAddress,
+            'lat': userLat,
+            'lng': userLng,
+            'photoUrl': photoUrl ?? fallbackPhoto,
+          },
+          isUser: true,
+        ),
+      );
+    }
+
+    resolvedAddresses.addAll(
+      addresses
+          .map((m) => _HomeAddressItem.fromMap(m))
+          .where((item) => item.address.isNotEmpty)
+          .toList(),
+    );
+
+    resolvedAddresses.removeWhere((item) => item.address.isEmpty);
+    final baseIndex = _selectedHomeAddressIndex;
+    final adjustedIndex = (!hadUserCard && resolvedAddresses.isNotEmpty && resolvedAddresses.first.isUser)
+        ? baseIndex + 1
+        : baseIndex;
+    final bool forceYouThisTime =
+        !_didForceInitialYouSelection && resolvedAddresses.isNotEmpty;
+    final int nextSelectedIndex;
+    if (resolvedAddresses.isEmpty) {
+      nextSelectedIndex = 0;
+    } else if (forceYouThisTime) {
+      final youIndex = resolvedAddresses.indexWhere((e) => e.isUser);
+      nextSelectedIndex = (youIndex == -1) ? 0 : youIndex;
+    } else {
+      nextSelectedIndex = adjustedIndex.clamp(0, resolvedAddresses.length - 1);
+    }
     setState(() {
       _headerDisplayName = displayName;
       _headerPhotoUrl = photoUrl ?? fallbackPhoto;
@@ -696,7 +747,29 @@ class _UserHomeScreenState extends State<UserHomeScreen>
       _userPhoneNumber = phone?.isNotEmpty == true ? phone : _userPhoneNumber;
       _homeAddresses = resolvedAddresses;
       _selectedHomeAddressIndex = nextSelectedIndex;
-      if (!_manualLocationLock && addressPosition != null) {
+      if (forceYouThisTime) {
+        _didForceInitialYouSelection = true;
+        final item = resolvedAddresses[nextSelectedIndex];
+        final lat = item.lat;
+        final lng = item.lng;
+        if (!_manualLocationLock && lat != null && lng != null) {
+          _manualLocationLock = true;
+          _currentPosition = Position(
+            longitude: lng,
+            latitude: lat,
+            timestamp: DateTime.now(),
+            accuracy: 10,
+            altitude: 0,
+            heading: 0,
+            speed: 0,
+            speedAccuracy: 0,
+            altitudeAccuracy: 0,
+            headingAccuracy: 0,
+          );
+        } else if (!_manualLocationLock && addressPosition != null) {
+          _currentPosition = addressPosition;
+        }
+      } else if (!_manualLocationLock && addressPosition != null) {
         _currentPosition = addressPosition;
       }
     });
@@ -739,14 +812,29 @@ class _UserHomeScreenState extends State<UserHomeScreen>
 
   List<Map<String, dynamic>> _extractAddressList(Map<String, dynamic>? data) {
     if (data == null) return [];
-    final raw = data['address'] ?? data['addresses'];
-    if (raw is List) {
-      return raw
-          .whereType<Map<String, dynamic>>()
-          .map((entry) => Map<String, dynamic>.from(entry))
-          .toList();
+    final list = <Map<String, dynamic>>[];
+
+    final rawAddresses = data['addresses'];
+    if (rawAddresses is List) {
+      list.addAll(
+        rawAddresses
+            .whereType<Map<String, dynamic>>()
+            .map((entry) => Map<String, dynamic>.from(entry)),
+      );
     }
-    return [];
+
+    final rawAddress = data['address'];
+    if (rawAddress is List) {
+      list.addAll(
+        rawAddress
+            .whereType<Map<String, dynamic>>()
+            .map((entry) => Map<String, dynamic>.from(entry)),
+      );
+    } else if (rawAddress is Map) {
+      list.add(Map<String, dynamic>.from(rawAddress));
+    }
+
+    return list;
   }
 
   double? _safeDouble(dynamic value) {
@@ -879,6 +967,82 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     return caregivers;
   }
 
+  void _listenForRecommendationRules() {
+    _rulesSub?.cancel();
+    _rulesSub = FirebaseFirestore.instance
+        .collection('recommendationRules')
+        .doc('current')
+        .snapshots()
+        .listen((doc) {
+      if (!mounted) return;
+      setState(() {
+        _recommendationRules = RecommendationRules.fromFirestore(
+          doc,
+          fallback: _recommendationRules,
+        );
+      });
+    });
+  }
+
+  double _priceValue({required double distanceKm, required bool available}) {
+    return (6.0 + distanceKm * 1.6 - (available ? 0 : -2))
+        .clamp(0.0, double.infinity);
+  }
+
+  double _score({
+    required double distanceKm,
+    required double rating,
+    required int serviceCount,
+    required double price,
+    required int matchCount,
+  }) {
+    final rules = _recommendationRules;
+    final double normalizedDistance = math.max(
+      0,
+      rules.preferredDistanceKm - math.min(distanceKm, rules.preferredDistanceKm),
+    );
+    final double distanceScore = normalizedDistance * rules.distanceScoreMultiplier;
+    final double ratingScore = rating * rules.ratingScoreMultiplier;
+    final double matchScore = matchCount * rules.matchScoreMultiplier;
+    final double serviceScore =
+        math.min(serviceCount, rules.serviceScoreCap) * rules.serviceScoreMultiplier;
+    final double priceScore = price * rules.priceScoreMultiplier;
+    final double ratingPenalty =
+        rating < rules.ratingPenaltyThreshold ? rules.ratingPenaltyValue : 0;
+    final double distancePenalty = distanceKm > rules.preferredDistanceKm
+        ? (distanceKm - rules.preferredDistanceKm) * rules.distancePenaltyMultiplier
+        : 0;
+    return distanceScore +
+        ratingScore +
+        serviceScore +
+        priceScore +
+        matchScore +
+        ratingPenalty +
+        distancePenalty;
+  }
+
+  bool _shouldExcludeCaregiver({required double rating, required double distanceKm}) {
+    if (rating < _recommendationRules.minAcceptableRating) return true;
+    if (distanceKm > _recommendationRules.maxRuleDistanceKm) return true;
+    return false;
+  }
+
+  int _recommendationClassFromScore(
+    double score, {
+    required double caregiverRating,
+    required double caregiverDistanceKm,
+  }) {
+    if (_shouldExcludeCaregiver(
+      rating: caregiverRating,
+      distanceKm: caregiverDistanceKm,
+    )) {
+      return 3;
+    }
+    if (score >= _recommendationRules.recommendationTier1MinScore) return 1;
+    if (score >= _recommendationRules.recommendationTier2MinScore) return 2;
+    return 3;
+  }
+
   double? _distanceToCaregiver(CaregiverModel model) {
     final position = _currentPosition;
     if (position == null) return null;
@@ -920,6 +1084,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     String? distance,
     String? eta,
     int matchedPreferences = 0,
+    int? recommendationClass,
     String? statusLabel,
     bool statusIsActive = false,
     String? bookingId,
@@ -946,6 +1111,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
       statusLabel: statusLabel,
       statusIsActive: statusIsActive,
       bookingId: bookingId,
+      recommendationClass: recommendationClass,
     );
   }
 
@@ -1047,6 +1213,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
                   model,
                   isMatch: true,
                   matchedPreferences: matchedCount,
+                  recommendationClass: matchedCount > 0 ? 2 : 3,
                 );
               }).toList()..sort((a, b) {
                 final matchCmp = b.matchedPreferences.compareTo(
@@ -1082,44 +1249,15 @@ class _UserHomeScreenState extends State<UserHomeScreen>
           );
         }
 
-        const double recommendationScoreThreshold = 2200.0;
-        const double preferredDistanceKm = 8.0;
-        const double maxRecommendDistanceMeters = 15000.0;
-        const double minAcceptableRating = 3.5;
-
-        double score({
-          required double distanceKm,
-          required double rating,
-          required int matchCount,
-          required int serviceCount,
-        }) {
-          final normalizedDistance = math.max(
-            0,
-            preferredDistanceKm - math.min(distanceKm, preferredDistanceKm),
-          );
-          final distanceScore = normalizedDistance * 8;
-          final ratingScore = rating * 15;
-          final matchScore = matchCount * 1200;
-          final serviceScore = math.min(serviceCount, 6) * 3;
-          final ratingPenalty = rating < 4.4 ? -10 : 0;
-          final distancePenalty = distanceKm > preferredDistanceKm
-              ? -(distanceKm - preferredDistanceKm) * 2
-              : 0;
-          return distanceScore +
-              ratingScore +
-              serviceScore +
-              matchScore +
-              ratingPenalty +
-              distancePenalty;
-        }
-
         final ranked =
-            <({CaregiverProfile profile, double score, double meters})>[];
+            <({CaregiverProfile profile, double meters, int matchCount, int cls, double price, double distanceKm, double score})>[];
         for (final model in models) {
           final distanceMeters = _distanceToCaregiver(model);
           if (distanceMeters == null) continue;
-          if (distanceMeters > maxRecommendDistanceMeters) continue;
-          if (model.rating < minAcceptableRating) continue;
+          final distanceKm = distanceMeters / 1000;
+          if (_shouldExcludeCaregiver(rating: model.rating, distanceKm: distanceKm)) {
+            continue;
+          }
           final matchedCount = prefs.isEmpty
               ? 0
               : model.services
@@ -1127,6 +1265,22 @@ class _UserHomeScreenState extends State<UserHomeScreen>
                     .length;
           final distance = _formatDistance(distanceMeters);
           final eta = _estimateEta(distanceMeters);
+          final price = _priceValue(
+            distanceKm: distanceKm,
+            available: model.availability,
+          );
+          final s = _score(
+            distanceKm: distanceKm,
+            rating: model.rating,
+            matchCount: matchedCount,
+            serviceCount: model.services.length,
+            price: price,
+          );
+          final cls = _recommendationClassFromScore(
+            s,
+            caregiverRating: model.rating,
+            caregiverDistanceKm: distanceKm,
+          );
           ranked.add((
             profile: _mapModelToProfile(
               model,
@@ -1134,32 +1288,34 @@ class _UserHomeScreenState extends State<UserHomeScreen>
               eta: eta,
               isMatch: true,
               matchedPreferences: matchedCount,
-            ),
-            score: score(
-              distanceKm: distanceMeters / 1000,
-              rating: model.rating,
-              matchCount: matchedCount,
-              serviceCount: model.services.length,
+              recommendationClass: cls,
             ),
             meters: distanceMeters,
+            matchCount: matchedCount,
+            cls: cls,
+            price: price,
+            distanceKm: distanceKm,
+            score: s,
           ));
         }
 
         ranked.sort((a, b) {
-          final matchCmp = b.profile.matchedPreferences.compareTo(
-            a.profile.matchedPreferences,
-          );
+          final classCmp = a.cls.compareTo(b.cls);
+          if (classCmp != 0) return classCmp;
+          final matchCmp = b.matchCount.compareTo(a.matchCount);
           if (matchCmp != 0) return matchCmp;
           final ratingCmp = b.profile.rating.compareTo(a.profile.rating);
           if (ratingCmp != 0) return ratingCmp;
-          final metersCmp = a.meters.compareTo(b.meters);
-          if (metersCmp != 0) return metersCmp;
+          final priceCmp = a.price.compareTo(b.price);
+          if (priceCmp != 0) return priceCmp;
+          final distanceCmp = a.distanceKm.compareTo(b.distanceKm);
+          if (distanceCmp != 0) return distanceCmp;
           return b.score.compareTo(a.score);
         });
 
-        final recommended = ranked
-            .where((e) => e.score >= recommendationScoreThreshold)
-            .toList();
+        final class1 = ranked.where((e) => e.cls == 1).toList();
+        final class2 = ranked.where((e) => e.cls == 2).toList();
+        final recommended = [...class1, ...class2];
         final pool = recommended.isNotEmpty ? recommended : ranked;
         final caregivers = pool.take(4).map((e) => e.profile).toList();
         return _CaregiverSection(
@@ -1508,6 +1664,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     widget.addressPickerOpener?.value = null;
     _greetingTimer?.cancel();
     _userDocSubscription?.cancel();
+    _rulesSub?.cancel();
     widget.tabIndexListenable?.removeListener(_handleTabChange);
     _entryController?.dispose();
     super.dispose();
@@ -2161,23 +2318,12 @@ class _CaregiverTile extends StatelessWidget {
     return _serviceTags.take(2).toList();
   }
 
-  String _metaLine() {
-    final parts = <String>[];
-    if (caregiver.distance?.trim().isNotEmpty == true) {
-      parts.add(caregiver.distance!.trim());
-    }
-    if (caregiver.eta?.trim().isNotEmpty == true) {
-      parts.add(caregiver.eta!.trim());
-    }
-    return parts.join(' • ');
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final meta = _metaLine();
     final ratingLabel = caregiver.rating.toStringAsFixed(1);
-    final summaryLabel = meta.isNotEmpty ? '$ratingLabel • $meta' : ratingLabel;
+    final eta = caregiver.eta?.trim() ?? '';
+    final distance = caregiver.distance?.trim() ?? '';
     final statusText = caregiver.statusLabel?.trim().isNotEmpty == true
         ? caregiver.statusLabel!.trim()
         : (caregiver.availability ? 'Available' : 'Offline');
@@ -2255,16 +2401,28 @@ class _CaregiverTile extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        caregiver.name,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w900,
-                          color: _homeHeadingTextColor,
-                          letterSpacing: -0.1,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              caregiver.name,
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w900,
+                                color: _homeHeadingTextColor,
+                                letterSpacing: -0.1,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (caregiver.recommendationClass != null) ...[
+                            const SizedBox(width: 8),
+                            _RecommendationClassChip(
+                              classLevel: caregiver.recommendationClass!,
+                            ),
+                          ],
+                        ],
                       ),
                       const SizedBox(height: 2),
                       Text(
@@ -2304,31 +2462,72 @@ class _CaregiverTile extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 8),
-                      if (summaryLabel.isNotEmpty)
-                        Row(
-                          children: [
-                            const Icon(
-                              Icons.star_rounded,
-                              size: 14,
-                              color: Colors.amber,
-                            ),
-                            const SizedBox(width: 3),
-                            Expanded(
-                              child: Text(
-                                summaryLabel,
-                                style: theme.textTheme.bodySmall?.copyWith(
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.star,
+                                size: 13,
+                                color: Color(0xFFF4B63D),
+                              ),
+                              const SizedBox(width: 3),
+                              Text(
+                                ratingLabel,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
                                   fontSize: 10,
-                                  fontWeight: FontWeight.w700,
-                                  color: _homeHeadingTextColor.withAlpha(
-                                    _alphaFromOpacity(0.6),
+                                  color: Colors.black87,
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (eta.isNotEmpty)
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.timer,
+                                  size: 13,
+                                  color: Color(0xFFF4B63D),
+                                ),
+                                const SizedBox(width: 3),
+                                Text(
+                                  eta,
+                                  style: const TextStyle(
+                                    color: Colors.black87,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
                                   ),
                                 ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
+                              ],
                             ),
-                          ],
-                        ),
+                          if (distance.isNotEmpty)
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.place,
+                                  size: 13,
+                                  color: Color(0xFFF4B63D),
+                                ),
+                                const SizedBox(width: 3),
+                                Text(
+                                  distance,
+                                  style: const TextStyle(
+                                    color: Colors.black87,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                        ],
+                      ),
                     ],
                   ),
                 ),
@@ -2440,6 +2639,7 @@ class CaregiverProfile {
     this.bio,
     this.isRecommended = false,
     this.matchedPreferences = 0,
+    this.recommendationClass,
     this.statusLabel,
     this.statusIsActive = false,
     this.bookingId,
@@ -2460,8 +2660,50 @@ class CaregiverProfile {
   final String? bio;
   final bool isRecommended;
   final int matchedPreferences;
+  final int? recommendationClass;
   final List<String> services;
   final String? statusLabel;
   final bool statusIsActive;
   final String? bookingId;
+}
+
+class _RecommendationClassChip extends StatelessWidget {
+  const _RecommendationClassChip({required this.classLevel});
+
+  final int classLevel;
+
+  String get _label {
+    final safe = classLevel.clamp(1, 3);
+    if (safe == 1) return 'Best match';
+    if (safe == 2) return 'Recommended';
+    return 'Not ideal';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final safe = classLevel.clamp(1, 3);
+    final Color background;
+    final Color border;
+    final Color foreground;
+    if (safe == 1) {
+      background = const Color(0xFFF4B63D);
+      border = const Color(0xFFF4B63D);
+      foreground = Colors.black87;
+    } else if (safe == 2) {
+      background = const Color(0x2E00A8A7);
+      border = _serviceTagBlue;
+      foreground = _serviceTagBlue;
+    } else {
+      background = const Color(0x14000000);
+      border = Colors.black26;
+      foreground = Colors.black54;
+    }
+
+    return ServiceTagChip(
+      label: _label,
+      backgroundColor: background,
+      foregroundColor: foreground,
+      borderColor: border,
+    );
+  }
 }
