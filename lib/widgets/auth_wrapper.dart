@@ -27,16 +27,27 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
         final uid = snapshot.data!.uid;
 
-        return FutureBuilder<DocumentSnapshot>(
-          future: FirebaseFirestore.instance.collection("users").doc(uid).get(),
-          builder: (context, userSnap) {
-            if (userSnap.connectionState == ConnectionState.waiting) {
+        final db = FirebaseFirestore.instance;
+        return FutureBuilder<({bool caregiverExists, bool userExists})>(
+          future: Future.wait([
+            db.collection("caregivers").doc(uid).get(),
+            db.collection("users").doc(uid).get(),
+          ]).then((snaps) {
+            final caregiverSnap = snaps[0] as DocumentSnapshot;
+            final userSnap = snaps[1] as DocumentSnapshot;
+            return (
+              caregiverExists: caregiverSnap.exists,
+              userExists: userSnap.exists,
+            );
+          }),
+          builder: (context, accountSnap) {
+            if (accountSnap.connectionState == ConnectionState.waiting) {
               return const Scaffold(
                 body: Center(child: CircularProgressIndicator()),
               );
             }
 
-            if (userSnap.hasError) {
+            if (accountSnap.hasError) {
               return _AuthLoadError(
                 title: 'Unable to load account',
                 message:
@@ -46,43 +57,18 @@ class _AuthWrapperState extends State<AuthWrapper> {
               );
             }
 
-            if (userSnap.data?.exists == true) {
+            final caregiverExists = accountSnap.data?.caregiverExists == true;
+            final userExists = accountSnap.data?.userExists == true;
+
+            if (caregiverExists) {
+              return const CaregiverRootScreen();
+            }
+            if (userExists) {
               return const UserRootScreen();
             }
 
-            return FutureBuilder<DocumentSnapshot>(
-              future: FirebaseFirestore.instance
-                  .collection("caregivers")
-                  .doc(uid)
-                  .get(),
-              builder: (context, cgSnap) {
-                if (cgSnap.connectionState == ConnectionState.waiting) {
-                  return const Scaffold(
-                    body: Center(child: CircularProgressIndicator()),
-                  );
-                }
-
-                if (cgSnap.hasError) {
-                  return _AuthLoadError(
-                    title: 'Unable to load account',
-                    message:
-                        'You are signed in, but we can’t reach Firebase right now.\n\nCheck your internet/DNS, and if you enabled Firebase App Check enforcement make sure your debug token is allowlisted.',
-                    onRetry: _retry,
-                    onSignOut: FirebaseAuth.instance.signOut,
-                  );
-                }
-
-                if (cgSnap.data?.exists == true) {
-                  return const CaregiverRootScreen();
-                }
-
-                if (cgSnap.hasData && cgSnap.data?.exists == false) {
-                  FirebaseAuth.instance.signOut();
-                }
-
-                return const TouchdownScreen();
-              },
-            );
+            FirebaseAuth.instance.signOut();
+            return const TouchdownScreen();
           },
         );
       },
@@ -153,4 +139,3 @@ class _AuthLoadError extends StatelessWidget {
     );
   }
 }
-

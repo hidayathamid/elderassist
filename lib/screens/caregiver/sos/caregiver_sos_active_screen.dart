@@ -108,6 +108,15 @@ class _CaregiverSOSActiveScreenState extends State<CaregiverSOSActiveScreen>
     setState(() => _isProcessing = true);
 
     try {
+      final sosSnap = await FirebaseFirestore.instance
+          .collection('sos')
+          .doc(widget.sosId)
+          .get();
+      final sosData = sosSnap.data();
+      final userId =
+          (sosData?['userId'] as String?)?.trim() ??
+          (sosData?['ownerUserId'] as String?)?.trim() ??
+          '';
       await FirebaseFirestore.instance
           .collection('sos')
           .doc(widget.sosId)
@@ -115,6 +124,22 @@ class _CaregiverSOSActiveScreenState extends State<CaregiverSOSActiveScreen>
             'status': 'RESOLVED',
             'resolvedAt': FieldValue.serverTimestamp(),
           });
+      await FirebaseFirestore.instance.collection('caregivers').doc(caregiverId).set(
+        {
+          'activeSosId': FieldValue.delete(),
+          'activeSosUpdatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+      if (userId.isNotEmpty) {
+        await FirebaseFirestore.instance.collection('users').doc(userId).set(
+          {
+            'activeSosId': FieldValue.delete(),
+            'activeSosUpdatedAt': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
+      }
       LocationService.instance.stopLiveLocationUpdates();
       if (!mounted) return;
       setState(() => _isProcessing = false);

@@ -31,6 +31,8 @@ class _UserRootScreenState extends State<UserRootScreen> {
   final ValueNotifier<int> _tabIndexNotifier = ValueNotifier<int>(0);
   final ValueNotifier<VoidCallback?> _homeAddressPickerOpener =
       ValueNotifier<VoidCallback?>(null);
+  final ValueNotifier<VoidCallback?> _sosAddressPickerOpener =
+      ValueNotifier<VoidCallback?>(null);
   final ChatService _chatService = ChatService();
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
@@ -79,6 +81,7 @@ class _UserRootScreenState extends State<UserRootScreen> {
     _pages[2] = SosActivateScreen(
       tabIndexListenable: _tabIndexNotifier,
       tabIndex: 2,
+      addressPickerOpener: _sosAddressPickerOpener,
     );
     _pages[3] = ActivityScreen(
       tabIndexListenable: _tabIndexNotifier,
@@ -95,6 +98,7 @@ class _UserRootScreenState extends State<UserRootScreen> {
   void dispose() {
     _tabIndexNotifier.dispose();
     _homeAddressPickerOpener.dispose();
+    _sosAddressPickerOpener.dispose();
     super.dispose();
   }
 
@@ -172,6 +176,51 @@ class _UserRootScreenState extends State<UserRootScreen> {
                       duration: const Duration(milliseconds: 180),
                       curve: Curves.easeOut,
                       opacity: enabled ? 1 : 0.55,
+                      child: GestureDetector(
+                        onTap: openSheet,
+                        child: Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: Colors.black.withValues(alpha: 0.08),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.18),
+                                blurRadius: 10,
+                                offset: const Offset(0, 6),
+                              ),
+                            ],
+                          ),
+                          child: const Icon(
+                            Icons.place_outlined,
+                            color: Color(0xFF00A8A7),
+                            size: 20,
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          if (_selectedIndex == 2)
+            Positioned(
+              right: 16,
+              bottom: bottomInset + 88,
+              child: ValueListenableBuilder<VoidCallback?>(
+                valueListenable: _sosAddressPickerOpener,
+                builder: (context, openSheet, _) {
+                  final enabled = openSheet != null;
+                  return AnimatedOpacity(
+                    duration: const Duration(milliseconds: 180),
+                    curve: Curves.easeOut,
+                    opacity: enabled ? 1 : 0,
+                    child: IgnorePointer(
+                      ignoring: !enabled,
                       child: GestureDetector(
                         onTap: openSheet,
                         child: Container(

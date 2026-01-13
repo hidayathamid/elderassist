@@ -9,6 +9,7 @@ import 'package:emergencies_disability_assistance_app/widgets/caregiver_job_card
 import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.dart';
 
 import 'package:emergencies_disability_assistance_app/models/caregiver_job.dart';
+import 'package:emergencies_disability_assistance_app/utils/booking_due_status.dart';
 
 const List<String> _tabs = ['Active', 'Upcoming', 'History'];
 
@@ -247,6 +248,7 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
               job.caregiverId.trim().isNotEmpty ? job.caregiverId.trim() : caregiverId,
           personId: job.personId.trim().isNotEmpty ? job.personId.trim() : null,
           showStatusUpdateButton: true,
+          showActionFrontSheet: true,
         ),
       ),
     );
@@ -301,15 +303,23 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
                 .whereType<CaregiverJob>()
                 .toList();
             final active = jobs.where((job) {
-              final status = job.status.toUpperCase();
+              final status = deriveDueAwareStatus(
+                status: job.status,
+                date: job.scheduledDate,
+                time: job.startTime.trim().isNotEmpty ? job.startTime : job.time,
+              );
               return status == 'ASSIGNED';
             }).toList();
             final upcoming = jobs.where((job) {
-              final status = job.status.toUpperCase();
+              final status = deriveDueAwareStatus(
+                status: job.status,
+                date: job.scheduledDate,
+                time: job.startTime.trim().isNotEmpty ? job.startTime : job.time,
+              );
               return status == 'SCHEDULED';
             }).toList();
             final history = jobs.where((job) {
-              final status = job.status.toUpperCase();
+              final status = normalizeBookingStatus(job.status);
               return _isHistoryStatus(status);
             }).toList();
 
@@ -439,7 +449,10 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
               context,
               MaterialPageRoute(
                 builder: (_) =>
-                    ActivityBookingDetailsScreen(bookingId: job.bookingId),
+                    ActivityBookingDetailsScreen(
+                      bookingId: job.bookingId,
+                      caregiverView: true,
+                    ),
               ),
             );
           },
@@ -627,7 +640,10 @@ class _JobTabContent extends StatelessWidget {
               context,
               MaterialPageRoute(
                 builder: (_) =>
-                    ActivityBookingDetailsScreen(bookingId: job.bookingId),
+                    ActivityBookingDetailsScreen(
+                      bookingId: job.bookingId,
+                      caregiverView: true,
+                    ),
               ),
             );
           },

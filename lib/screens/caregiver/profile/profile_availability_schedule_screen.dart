@@ -17,10 +17,43 @@ class ProfileAvailabilityScheduleScreen extends StatefulWidget {
 
 class _ProfileAvailabilityScheduleScreenState
     extends State<ProfileAvailabilityScheduleScreen> {
+  bool _cleanupBlockedDatesInFlight = false;
+
   DocumentReference<Map<String, dynamic>>? get _docRef {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) return null;
     return FirebaseFirestore.instance.collection('availability').doc(uid);
+  }
+
+  DateTime _normalizeDay(DateTime value) {
+    final local = value.toLocal();
+    return DateTime(local.year, local.month, local.day);
+  }
+
+  List<BlockedDate> _removeExpiredBlockedDates(List<BlockedDate> current) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return current.where((entry) {
+      final end = entry.end;
+      if (end == null) return true;
+      return !_normalizeDay(end).isBefore(today);
+    }).toList();
+  }
+
+  void _scheduleExpiredBlockedDatesCleanup(List<BlockedDate> current) {
+    if (_cleanupBlockedDatesInFlight) return;
+    final cleaned = _removeExpiredBlockedDates(current);
+    if (cleaned.length == current.length) return;
+
+    _cleanupBlockedDatesInFlight = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      try {
+        await _updateAvailability(blockedDates: cleaned);
+      } finally {
+        _cleanupBlockedDatesInFlight = false;
+      }
+    });
   }
 
   @override
@@ -111,13 +144,14 @@ class _ProfileAvailabilityScheduleScreenState
               );
             }
 
-            final data = snapshot.data?.data();
-            final weeklySchedule = _weeklyFromSnapshot(data);
-            final blockedDates = _blockedDatesFromSnapshot(data);
+             final data = snapshot.data?.data();
+             final weeklySchedule = _weeklyFromSnapshot(data);
+             final blockedDates = _blockedDatesFromSnapshot(data);
+             _scheduleExpiredBlockedDatesCleanup(blockedDates);
 
-            return SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(
-                UiTokens.s16,
+             return SingleChildScrollView(
+               padding: const EdgeInsets.fromLTRB(
+                 UiTokens.s16,
                 UiTokens.s12,
                 UiTokens.s16,
                 UiTokens.s24,

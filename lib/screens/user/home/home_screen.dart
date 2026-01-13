@@ -64,6 +64,18 @@ enum _CaregiverSectionType { previous, nearby, recommended, activeBookings }
 
 enum _ActiveBookingStatus { ongoing, assigned, scheduled }
 
+class _AddressSelectionKey {
+  const _AddressSelectionKey({
+    required this.address,
+    this.lat,
+    this.lng,
+  });
+
+  final String address;
+  final double? lat;
+  final double? lng;
+}
+
 class _HomeAddressItem {
   const _HomeAddressItem({
     required this.name,
@@ -216,22 +228,37 @@ class _HomeAddressPickerSheetState extends State<_HomeAddressPickerSheet> {
               child: Stack(
                 alignment: Alignment.center,
                 children: [
-                  PageView.builder(
-                    controller: _controller,
-                    itemCount: widget.items.length,
-                    onPageChanged: widget.onIndexChanged,
-                    physics: const BouncingScrollPhysics(),
-                    itemBuilder: (context, index) {
-                      final item = widget.items[index];
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
-                        child: _HomeAddressCard(
-                          item: item,
-                          phoneNumber: widget.phoneNumber,
-                          onEditPressed: widget.onEditPressed,
-                        ),
+                  NotificationListener<ScrollEndNotification>(
+                    onNotification: (_) {
+                      final page = _controller.page;
+                      if (page == null) return false;
+                      final target = page.round();
+                      if ((page - target).abs() < 0.0001) return false;
+                      _controller.animateToPage(
+                        target,
+                        duration: const Duration(milliseconds: 180),
+                        curve: Curves.easeOut,
                       );
+                      return false;
                     },
+                    child: PageView.builder(
+                      controller: _controller,
+                      itemCount: widget.items.length,
+                      onPageChanged: widget.onIndexChanged,
+                      pageSnapping: true,
+                      physics: const PageScrollPhysics(),
+                      itemBuilder: (context, index) {
+                        final item = widget.items[index];
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          child: _HomeAddressCard(
+                            item: item,
+                            phoneNumber: widget.phoneNumber,
+                            onEditPressed: widget.onEditPressed,
+                          ),
+                        );
+                      },
+                    ),
                   ),
                   IgnorePointer(
                     child: FractionallySizedBox(
@@ -456,6 +483,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
   List<_HomeAddressItem> _homeAddresses = [];
   int _selectedHomeAddressIndex = 0;
   bool _didForceInitialYouSelection = false;
+  _AddressSelectionKey? _selectionKey;
   String? _userPhoneNumber;
   final double _sheetMaxExtent = 1.0;
   double _sheetMinExtent = _sheetInitialExtent;
@@ -510,6 +538,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     return (person: person, address: address);
   }
 
+  // ignore: unused_element
   void _openBookingCaregiverScreenFromHome() {
     final ctx = _selectedBookingContext();
     if (ctx == null) return;
@@ -523,9 +552,65 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     );
   }
 
-  void _openAllCaregiversScreen({required AllCaregiverCategory initialCategory}) {
+  int? _findAddressIndexFromKey(
+    List<_HomeAddressItem> items,
+    _AddressSelectionKey key,
+  ) {
+    if (items.isEmpty) return null;
+    final desiredAddress = key.address.trim();
+    final lat = key.lat;
+    final lng = key.lng;
+    if (lat != null && lng != null) {
+      final idx = items.indexWhere((e) {
+        if (e.lat == null || e.lng == null) return false;
+        return (e.lat! - lat).abs() < 0.000001 && (e.lng! - lng).abs() < 0.000001;
+      });
+      if (idx != -1) return idx;
+    }
+    if (desiredAddress.isNotEmpty) {
+      final idx = items.indexWhere((e) => e.address.trim() == desiredAddress);
+      if (idx != -1) return idx;
+    }
+    return null;
+  }
+
+  void _applyAddressSelectionKey(_AddressSelectionKey key) {
+    final idx =
+        _findAddressIndexFromKey(_homeAddresses, key) ?? _selectedHomeAddressIndex;
+    final safeIndex =
+        _homeAddresses.isEmpty ? 0 : idx.clamp(0, _homeAddresses.length - 1);
+    final item = _homeAddresses.isEmpty ? null : _homeAddresses[safeIndex];
+    final lat = item?.lat ?? key.lat;
+    final lng = item?.lng ?? key.lng;
+
+    setState(() {
+      _selectionKey = key;
+      _didForceInitialYouSelection = true;
+      _selectedHomeAddressIndex = safeIndex;
+      if (lat != null && lng != null) {
+        _manualLocationLock = true;
+        _currentPosition = Position(
+          longitude: lng,
+          latitude: lat,
+          timestamp: DateTime.now(),
+          accuracy: 10,
+          altitude: 0,
+          heading: 0,
+          speed: 0,
+          speedAccuracy: 0,
+          altitudeAccuracy: 0,
+          headingAccuracy: 0,
+        );
+        _previousCaregiversFuture = _loadPreviousCaregivers();
+      }
+    });
+  }
+
+  Future<void> _openAllCaregiversScreen({
+    required AllCaregiverCategory initialCategory,
+  }) async {
     final ctx = _selectedBookingContext();
-    Navigator.of(context).push(
+    final result = await Navigator.of(context).push<Map<String, dynamic>?>(
       MaterialPageRoute(
         builder: (_) => AllCaregiverScreen(
           person: ctx?.person,
@@ -537,6 +622,16 @@ class _UserHomeScreenState extends State<UserHomeScreen>
         ),
       ),
     );
+
+    if (!mounted) return;
+    if (result == null) return;
+    final selectedAddress =
+        (result['address'] ?? result['addressLine'] ?? '').toString().trim();
+    final lat = _safeDouble(result['lat']);
+    final lng = _safeDouble(result['lng']);
+    _applyAddressSelectionKey(
+      _AddressSelectionKey(address: selectedAddress, lat: lat, lng: lng),
+    );
   }
 
   void _openBookingDetailsForCaregiverTile(CaregiverProfile caregiver) {
@@ -547,13 +642,41 @@ class _UserHomeScreenState extends State<UserHomeScreen>
           builder:
               (_) => ActivityBookingDetailsScreen(
                 bookingId: bookingId,
-                hideBookingDetailsTab: true,
               ),
         ),
       );
       return;
     }
-    _openBookingCaregiverScreenFromHome();
+    final ctx = _selectedBookingContext();
+    if (ctx == null) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ActivityBookingDetailsScreen(
+          bookingId: '',
+          hideBookingDetailsTab: true,
+          caregiverId: caregiver.id,
+          person: ctx.person,
+          selectedAddress: ctx.address,
+          initialTabIndex: 1,
+        ),
+      ),
+    );
+  }
+
+  void _openActiveBookingDetailsForCaregiverTile(CaregiverProfile caregiver) {
+    final bookingId = caregiver.bookingId?.trim() ?? '';
+    if (bookingId.isNotEmpty) {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ActivityBookingDetailsScreen(
+            bookingId: bookingId,
+            showTrackFrontSheet: true,
+          ),
+        ),
+      );
+      return;
+    }
+    _openBookingDetailsForCaregiverTile(caregiver);
   }
 
   Widget _buildSectionDivider({double spacing = _sheetSectionSpacing}) {
@@ -738,7 +861,10 @@ class _UserHomeScreenState extends State<UserHomeScreen>
       final youIndex = resolvedAddresses.indexWhere((e) => e.isUser);
       nextSelectedIndex = (youIndex == -1) ? 0 : youIndex;
     } else {
-      nextSelectedIndex = adjustedIndex.clamp(0, resolvedAddresses.length - 1);
+      final key = _selectionKey;
+      final mapped = key == null ? null : _findAddressIndexFromKey(resolvedAddresses, key);
+      nextSelectedIndex =
+          (mapped ?? adjustedIndex).clamp(0, resolvedAddresses.length - 1);
     }
     setState(() {
       _headerDisplayName = displayName;
@@ -750,6 +876,11 @@ class _UserHomeScreenState extends State<UserHomeScreen>
       if (forceYouThisTime) {
         _didForceInitialYouSelection = true;
         final item = resolvedAddresses[nextSelectedIndex];
+        _selectionKey = _AddressSelectionKey(
+          address: item.address,
+          lat: item.lat,
+          lng: item.lng,
+        );
         final lat = item.lat;
         final lng = item.lng;
         if (!_manualLocationLock && lat != null && lng != null) {
@@ -832,6 +963,17 @@ class _UserHomeScreenState extends State<UserHomeScreen>
       );
     } else if (rawAddress is Map) {
       list.add(Map<String, dynamic>.from(rawAddress));
+    }
+
+    final rawPersonAddress = data['personAddress'];
+    if (rawPersonAddress is List) {
+      list.addAll(
+        rawPersonAddress
+            .whereType<Map<String, dynamic>>()
+            .map((entry) => Map<String, dynamic>.from(entry)),
+      );
+    } else if (rawPersonAddress is Map) {
+      list.add(Map<String, dynamic>.from(rawPersonAddress));
     }
 
     return list;
@@ -927,6 +1069,11 @@ class _UserHomeScreenState extends State<UserHomeScreen>
                   _manualLocationLock = true;
                   setState(() {
                     _selectedHomeAddressIndex = index;
+                    _selectionKey = _AddressSelectionKey(
+                      address: item.address,
+                      lat: lat,
+                      lng: lng,
+                    );
                     _currentPosition = Position(
                       longitude: lng,
                       latitude: lat,
@@ -942,7 +1089,10 @@ class _UserHomeScreenState extends State<UserHomeScreen>
                     _previousCaregiversFuture = _loadPreviousCaregivers();
                   });
                 } else {
-                  setState(() => _selectedHomeAddressIndex = index);
+                  setState(() {
+                    _selectedHomeAddressIndex = index;
+                    _selectionKey = _AddressSelectionKey(address: item.address);
+                  });
                 }
               },
               onEditPressed: () {
@@ -1597,7 +1747,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
                   trailing: _SectionInfoIcon(
                     message: 'Ongoing > assigned > scheduled.',
                   ),
-                  onCaregiverTap: _openBookingDetailsForCaregiverTile,
+                  onCaregiverTap: _openActiveBookingDetailsForCaregiverTile,
                   emptyMessage: caregivers.isEmpty
                       ? 'No active bookings yet'
                       : null,

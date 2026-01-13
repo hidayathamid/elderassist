@@ -3,16 +3,24 @@ import 'dart:math' as math;
 import 'dart:ui' show lerpDouble;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
 
 import '../../../widgets/default_profile_avatar.dart';
 import '../../../widgets/safe_network_image.dart';
 import '../../../widgets/standard_app_bar.dart';
 import 'activity_tracking_helpers.dart';
+import '../../../utils/phone_caller.dart';
 import '../../../utils/service_preferences.dart';
 import 'track_caregiver_screen.dart';
+import '../booking/booking_person_screen.dart';
+import '../booking/booking_summary_screen.dart';
+import '../../../models/caregiver_model.dart';
+import '../../../widgets/schedule_booking_telegram_sheet.dart';
 
 const Color _cardBorder = Color(0xFFEBEDF0);
 const Color _accentGreen = Color(0xFF00A8A7);
@@ -47,15 +55,423 @@ const TextStyle _fieldValueTextStyle = TextStyle(
 const String _defaultAvatarUrl =
     'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=400&q=80';
 
+class _EmergencyAlertError implements Exception {
+  const _EmergencyAlertError({required this.message});
+
+  final String message;
+}
+
+class _TimeRange {
+  const _TimeRange({required this.start, required this.end});
+
+  final TimeOfDay start;
+  final TimeOfDay end;
+}
+
+class _EmergencyAlertBottomSheet extends StatefulWidget {
+  const _EmergencyAlertBottomSheet({
+    required this.contacts,
+    required this.onSubmit,
+    required this.onCompleted,
+  });
+
+  final List<Map<String, dynamic>> contacts;
+  final Future<void> Function(Set<String> selectedIds, String reason) onSubmit;
+  final VoidCallback onCompleted;
+
+  @override
+  State<_EmergencyAlertBottomSheet> createState() =>
+      _EmergencyAlertBottomSheetState();
+}
+
+class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> {
+  final TextEditingController _reasonController = TextEditingController();
+  late Set<String> _selectedIds;
+  bool _submitting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedIds = <String>{
+      for (final c in widget.contacts)
+        if ((c['id']?.toString().trim() ?? '').isNotEmpty)
+          c['id'].toString().trim(),
+    };
+  }
+
+  @override
+  void dispose() {
+    _reasonController.dispose();
+    super.dispose();
+  }
+
+  String _contactName(Map<String, dynamic> c) {
+    final raw = c['name']?.toString().trim() ?? '';
+    return raw.isNotEmpty ? raw : 'Emergency contact';
+  }
+
+  String _contactMeta(Map<String, dynamic> c) {
+    final label = c['relationship']?.toString().trim() ??
+        c['label']?.toString().trim() ??
+        '';
+    final phone = c['phone']?.toString().trim() ??
+        c['contact']?.toString().trim() ??
+        '';
+    return [if (label.isNotEmpty) label, if (phone.isNotEmpty) phone].join(' • ');
+  }
+
+  String _contactId(Map<String, dynamic> c) =>
+      c['id']?.toString().trim() ?? '';
+
+  Future<void> _submit() async {
+    if (_submitting) return;
+    if (_selectedIds.isEmpty) return;
+    setState(() => _submitting = true);
+    try {
+      await widget.onSubmit(_selectedIds, _reasonController.text);
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      widget.onCompleted();
+    } on _EmergencyAlertError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
+    } on FirebaseFunctionsException catch (e) {
+      if (!mounted) return;
+      final msg = e.message?.trim();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            msg != null && msg.isNotEmpty
+                ? msg
+                : 'Unable to start emergency alert.',
+          ),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to start emergency alert.')),
+      );
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  Widget _contactRow(Map<String, dynamic> contact) {
+    final id = _contactId(contact);
+    final selected = id.isNotEmpty && _selectedIds.contains(id);
+    return InkWell(
+      onTap: (id.isEmpty || _submitting)
+          ? null
+          : () {
+              setState(() {
+                if (selected) {
+                  _selectedIds.remove(id);
+                } else {
+                  _selectedIds.add(id);
+                }
+              });
+            },
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: selected
+                ? Colors.red.withValues(alpha: 0.35)
+                : Colors.black.withValues(alpha: 0.08),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.05),
+              blurRadius: 14,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 18,
+              height: 18,
+              decoration: BoxDecoration(
+                color: selected ? Colors.red : Colors.transparent,
+                borderRadius: BorderRadius.circular(5),
+                border: Border.all(
+                  color: selected
+                      ? Colors.red
+                      : Colors.black.withValues(alpha: 0.22),
+                  width: 1.2,
+                ),
+              ),
+              child: selected
+                  ? const Icon(Icons.check, size: 14, color: Colors.white)
+                  : null,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _contactName(contact),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w900,
+                      color: _profileDarkText,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    _contactMeta(contact),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.black.withValues(alpha: 0.58),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+    final maxHeight = MediaQuery.of(context).size.height * 0.86;
+
+    return AnimatedPadding(
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+      padding: EdgeInsets.only(bottom: bottomInset),
+      child: Material(
+        color: Colors.white,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: SafeArea(
+          top: false,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: maxHeight),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const SizedBox(height: 10),
+                Center(
+                  child: Container(
+                    width: 44,
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 8, 0),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Emergency alert',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w900,
+                            color: _profileDarkText,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: _submitting ? null : () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.close_rounded, size: 20),
+                        color: Colors.black.withValues(alpha: 0.7),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                      ),
+                    ],
+                  ),
+                ),
+                Flexible(
+                  fit: FlexFit.loose,
+                  child: ScrollConfiguration(
+                    behavior: const _NoOverscrollScrollBehavior(),
+                    child: ListView(
+                      shrinkWrap: true,
+                      padding: const EdgeInsets.fromLTRB(16, 6, 16, 8),
+                      physics: const ClampingScrollPhysics(),
+                      children: [
+                        Text(
+                          'Select who to notify',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: Colors.black.withValues(alpha: 0.7),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        if (widget.contacts.isEmpty)
+                          Container(
+                            padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.03),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: Colors.black.withValues(alpha: 0.08),
+                              ),
+                            ),
+                            child: Text(
+                              'No emergency contacts available.',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.black.withValues(alpha: 0.62),
+                              ),
+                            ),
+                          )
+                        else
+                          ...[
+                            for (var i = 0; i < widget.contacts.length; i++) ...[
+                              _contactRow(widget.contacts[i]),
+                              if (i != widget.contacts.length - 1)
+                                const SizedBox(height: 10),
+                            ],
+                          ],
+                        const SizedBox(height: 14),
+                        Text(
+                          'Reason',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: Colors.black.withValues(alpha: 0.7),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: _reasonController,
+                          minLines: 2,
+                          maxLines: 4,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: _profileDarkText,
+                          ),
+                          decoration: InputDecoration(
+                            hintText: 'What happened?',
+                            hintStyle: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.black.withValues(alpha: 0.38),
+                            ),
+                            filled: true,
+                            fillColor: Colors.black.withValues(alpha: 0.03),
+                            contentPadding: const EdgeInsets.fromLTRB(
+                              12,
+                              12,
+                              12,
+                              12,
+                            ),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(14),
+                              borderSide: BorderSide(
+                                color: Colors.black.withValues(alpha: 0.08),
+                              ),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(14),
+                              borderSide: BorderSide(
+                                color: Colors.black.withValues(alpha: 0.08),
+                              ),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(14),
+                              borderSide: BorderSide(
+                                color: Colors.black.withValues(alpha: 0.18),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  child: ElevatedButton(
+                    onPressed: (_submitting ||
+                            widget.contacts.isEmpty ||
+                            _selectedIds.isEmpty)
+                        ? null
+                        : _submit,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                      textStyle: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    child: _submitting
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.2,
+                              valueColor:
+                                  AlwaysStoppedAnimation<Color>(Colors.white),
+                            ),
+                          )
+                        : const Text('Start emergency alert'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class ActivityBookingDetailsScreen extends StatefulWidget {
   const ActivityBookingDetailsScreen({
     super.key,
     required this.bookingId,
     this.hideBookingDetailsTab = false,
+    this.caregiverId,
+    this.person,
+    this.selectedAddress,
+    this.initialTabIndex = 0,
+    this.showTrackFrontSheet = false,
+    this.caregiverView = false,
   });
 
   final String bookingId;
   final bool hideBookingDetailsTab;
+  final String? caregiverId;
+  final PersonProfile? person;
+  final AddressItem? selectedAddress;
+  final int initialTabIndex;
+  final bool showTrackFrontSheet;
+  final bool caregiverView;
 
   @override
   State<ActivityBookingDetailsScreen> createState() =>
@@ -84,7 +500,9 @@ class _ActivityBookingDetailsScreenState
     extends State<ActivityBookingDetailsScreen>
     with TickerProviderStateMixin {
   static const double _sheetMaxExtentRaw = 1.0;
-  static const double _sheetFallbackInitialExtentRaw = 0.78;
+  static const double _sheetFallbackInitialExtentRaw = 0.62;
+  static const double _sheetDefaultMinExtentRaw = 0.42;
+  static const double _sheetDefaultMaxInitialExtentRaw = 0.74;
 
   bool _isLoading = true;
   String? _error;
@@ -100,15 +518,433 @@ class _ActivityBookingDetailsScreenState
   late final Animation<Offset> _tabSlide;
   int _selectedTabIndex = 0;
   int? _selectedRatingFilter;
-  double _currentSheetExtent = 0.0;
+  DateTime? _scheduleSelectedDay;
+  final Map<String, List<_TimeRange>> _scheduleTakenCache =
+      <String, List<_TimeRange>>{};
+  final Set<String> _scheduleLoadingTaken = <String>{};
   final GlobalKey _metricsKey = GlobalKey();
   double? _autoInitialSheetExtent;
   final Map<String, Future<_UserMini>> _reviewUserCache =
       <String, Future<_UserMini>>{};
+  bool get _isPreviewMode => widget.bookingId.trim().isEmpty;
+  bool get _canBookFromSchedule =>
+      _isPreviewMode &&
+      (widget.caregiverId?.trim().isNotEmpty == true) &&
+      widget.person != null &&
+      widget.selectedAddress != null;
+  bool _showTrackButton = false;
+  late final AnimationController _panelController;
+  final ScrollController _panelScrollController = ScrollController();
+  bool _panelSeeded = false;
+  bool _panelUserInteracted = false;
+  double? _pendingPanelSeedValue;
+  double _panelMinExtent = 0.0;
+  double _panelMaxExtent = 1.0;
+
+  // ignore: unused_element
+  void _callEmergencyContact(BuildContext context, String phone) async {
+    final trimmed = phone.trim();
+    if (trimmed.isEmpty) return;
+    try {
+      await callNumber(trimmed);
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to place the call.')),
+      );
+    }
+  }
+
+  List<Map<String, dynamic>> _addressEntries(Map<String, dynamic>? data) {
+    if (data == null) return const [];
+    final raw = data['address'] ?? data['addresses'] ?? data['addressList'];
+    if (raw is Map) {
+      return [Map<String, dynamic>.from(raw)];
+    }
+    if (raw is Iterable) {
+      return raw
+          .whereType<Map>()
+          .map((entry) => Map<String, dynamic>.from(entry))
+          .toList(growable: false);
+    }
+    return const [];
+  }
+
+  Map<String, dynamic>? _primaryAddressMap(Map<String, dynamic>? data) {
+    final entries = _addressEntries(data);
+    if (entries.isEmpty) return null;
+    final defaultEntry = entries.firstWhere(
+      (entry) => entry['isDefault'] == true,
+      orElse: () => entries.first,
+    );
+    return defaultEntry;
+  }
+
+  Map<String, dynamic>? _addressEntryForPerson({
+    required Map<String, dynamic>? userData,
+    required String personId,
+    required String bookingId,
+    required String addressId,
+  }) {
+    final entries = _addressEntries(userData);
+    if (addressId.trim().isNotEmpty) {
+      for (final entry in entries) {
+        final entryId = entry['id']?.toString();
+        if (entryId != null && entryId == addressId.trim()) {
+          return entry;
+        }
+      }
+    }
+    if (personId.trim().isNotEmpty) {
+      for (final entry in entries) {
+        final entryId = entry['id']?.toString();
+        if (entryId != null && entryId == personId.trim()) {
+          return entry;
+        }
+      }
+    } else if (bookingId.trim().isNotEmpty) {
+      for (final entry in entries) {
+        final entryBookingId = entry['bookingId']?.toString();
+        if (entryBookingId != null && entryBookingId == bookingId.trim()) {
+          return entry;
+        }
+      }
+    }
+    return null;
+  }
+
+  String? _stringValue(dynamic value) {
+    if (value is String && value.trim().isNotEmpty) return value.trim();
+    if (value is Iterable) {
+      final joinable = value.whereType<String>().toList();
+      if (joinable.isNotEmpty) return joinable.join(', ');
+    }
+    if (value != null) return value.toString();
+    return null;
+  }
+
+  ({
+    String name,
+    String label,
+    String address,
+    String phone,
+    String? photoUrl,
+  }) _resolvePersonDisplay(
+    Map<String, dynamic> booking,
+  ) {
+    final userData = _userData;
+    final personId = normalizeString(booking['personId']) ?? '';
+    final addressId = normalizeString(booking['addressId']) ?? '';
+    final selectedEntry =
+        _addressEntryForPerson(
+          userData: userData,
+          personId: personId,
+          bookingId: widget.bookingId,
+          addressId: addressId,
+        ) ??
+        _primaryAddressMap(userData);
+
+    final rawName =
+        _stringValue(selectedEntry?['name']) ??
+        normalizeString(booking['personName']) ??
+        'Selected person';
+    final rawLabel =
+        _stringValue(selectedEntry?['label']) ??
+        _stringValue(selectedEntry?['forWho']) ??
+        normalizeString(booking['personLabel']) ??
+        'Care recipient';
+    final rawPhone =
+        _stringValue(selectedEntry?['phone']) ??
+        normalizeString(booking['personPhone']) ??
+        normalizeString(booking['phone']) ??
+        '-';
+    final addressText =
+        _stringValue(
+          selectedEntry?['address'] ??
+              selectedEntry?['addressLine'] ??
+              selectedEntry?['location'] ??
+              selectedEntry?['street'],
+        ) ??
+        normalizeString(booking['personAddress']) ??
+        normalizeString(booking['address']) ??
+        normalizeString(_userData?['defaultAddress']) ??
+        'Location not provided';
+    final photoUrl =
+        normalizeString(selectedEntry?['photoUrl']) ??
+        normalizeString(booking['personPhotoUrl']) ??
+        normalizeString(booking['personPhoto']);
+
+    return (
+      name: rawName,
+      label: rawLabel,
+      address: addressText,
+      phone: rawPhone,
+      photoUrl: (photoUrl?.trim().isNotEmpty == true) ? photoUrl!.trim() : null,
+    );
+  }
+
+  Widget _previewCalendarButton() {
+    return Container(
+      height: 48,
+      width: 48,
+      decoration: const BoxDecoration(
+        color: _accentGold,
+        shape: BoxShape.circle,
+        boxShadow: [
+          BoxShadow(
+            color: Color(0x22000000),
+            blurRadius: 8,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: IconButton(
+        tooltip: 'Schedule',
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+        icon: const Icon(
+          Icons.calendar_today_rounded,
+          size: 18,
+          color: Colors.black,
+        ),
+        splashRadius: 24,
+        onPressed: _bookInAdvance,
+      ),
+    );
+  }
+
+  Widget _trackFrontSheet({
+    required String caregiverName,
+    required String? caregiverPhotoUrl,
+    required String serviceLabel,
+    String? metaLine,
+  }) {
+    final name = caregiverName.trim().isNotEmpty
+        ? caregiverName.trim()
+        : 'Caregiver';
+    final subtitleBase = serviceLabel.trim().isNotEmpty
+        ? serviceLabel.trim()
+        : 'Caregiver assigned';
+    final subtitle =
+        (metaLine != null && metaLine.trim().isNotEmpty)
+            ? '$subtitleBase • ${metaLine.trim()}'
+            : subtitleBase;
+
+    return Material(
+      color: Colors.white,
+      elevation: 12,
+      shadowColor: Colors.black.withValues(alpha: 0.2),
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(2),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: _accentGold, width: 2.2),
+                  ),
+                  child: DefaultProfileAvatar(
+                    radius: 22,
+                    photoUrl: caregiverPhotoUrl,
+                    label: name,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 13,
+                          color: Colors.black87,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.black54,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: _openTracker,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _accentGold,
+                        foregroundColor: const Color.fromARGB(255, 20, 20, 20),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        textStyle: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        elevation: 0,
+                      ),
+                      child: const Text('Track caregiver'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _previewFrontSheet() {
+    final person = widget.person;
+    final selectedAddress = widget.selectedAddress;
+    if (person == null || selectedAddress == null) {
+      return const SizedBox.shrink();
+    }
+
+    final name = person.name.trim().isNotEmpty ? person.name.trim() : 'Person';
+    final labelFallback = person.label?.trim() ?? '';
+    final addressLabel = selectedAddress.label?.trim().isNotEmpty == true
+        ? selectedAddress.label!.trim()
+        : labelFallback;
+    final baseSubtitle = person.address.trim().isNotEmpty
+        ? person.address.trim()
+        : 'Care location';
+    final trimmedAddressLine =
+        selectedAddress.addressLine?.trim().isNotEmpty == true
+        ? selectedAddress.addressLine!.trim()
+        : (selectedAddress.subtitle.trim().isNotEmpty
+              ? selectedAddress.subtitle.trim()
+              : baseSubtitle);
+    final frontSubtitle = addressLabel.isNotEmpty
+        ? '$addressLabel • $trimmedAddressLine'
+        : (trimmedAddressLine.isNotEmpty ? trimmedAddressLine : baseSubtitle);
+
+    return Material(
+      color: Colors.white,
+      elevation: 12,
+      shadowColor: Colors.black.withValues(alpha: 0.2),
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(2),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: _accentGold, width: 2.2),
+                  ),
+                  child: DefaultProfileAvatar(
+                    radius: 22,
+                    photoUrl: person.photoUrl,
+                    label: name,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 13,
+                          color: Colors.black87,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        frontSubtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.black54,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _previewCalendarButton(),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: _bookCaregiverNow,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _accentGold,
+                        foregroundColor: const Color.fromARGB(255, 20, 20, 20),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        textStyle: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        elevation: 0,
+                      ),
+                      child: const Text('Book caregiver'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   void initState() {
     super.initState();
+    _selectedTabIndex = widget.initialTabIndex;
+    _panelController = AnimationController(
+      vsync: this,
+      value: 0.0,
+      duration: const Duration(milliseconds: 220),
+    )..addListener(() {
+        if (!mounted) return;
+        setState(() {});
+      });
     _entryController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 220),
@@ -146,14 +982,18 @@ class _ActivityBookingDetailsScreenState
 
   void _selectTab(int index) {
     if (_selectedTabIndex == index) return;
-    setState(() => _selectedTabIndex = index);
+    final today = DateTime.now();
+    final normalizedToday = DateTime(today.year, today.month, today.day);
+    final hasBookingTab = !_isPreviewMode && !widget.hideBookingDetailsTab;
+    final showScheduleTab = _isPreviewMode && !widget.caregiverView;
+    final scheduleIndex = showScheduleTab ? (hasBookingTab ? 2 : 1) : -1;
+    setState(() {
+      _selectedTabIndex = index;
+      if (scheduleIndex >= 0 && index == scheduleIndex) {
+        _scheduleSelectedDay = normalizedToday;
+      }
+    });
     _tabEntryController.forward(from: 0);
-  }
-
-  void _onSheetExtentChanged(double extent) {
-    final normalized = extent.clamp(0.0, 1.0);
-    if ((_currentSheetExtent - normalized).abs() < 0.001) return;
-    setState(() => _currentSheetExtent = normalized);
   }
 
   void _scheduleAutoSheetExtentUpdate() {
@@ -180,10 +1020,38 @@ class _ActivityBookingDetailsScreenState
     });
   }
 
+  void _onPanelHandleDragUpdate(double delta, double rangePx) {
+    if (rangePx <= 0) return;
+    _panelUserInteracted = true;
+    final next =
+        (_panelController.value - (delta / rangePx)).clamp(0.0, 1.0).toDouble();
+    _panelController.value = next;
+  }
+
+  void _onPanelHandleDragEnd(double velocityPxPerSecond) {
+    const flingVelocityThreshold = 520.0;
+    if ((_panelMaxExtent - _panelMinExtent).abs() < 0.001) return;
+    _panelUserInteracted = true;
+    final current = _panelController.value;
+    final bool shouldExpand;
+    if (velocityPxPerSecond.abs() > flingVelocityThreshold) {
+      shouldExpand = velocityPxPerSecond < 0;
+    } else {
+      shouldExpand = current >= 0.5;
+    }
+    _panelController.animateTo(
+      shouldExpand ? 1.0 : 0.0,
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
   @override
   void dispose() {
     _entryController.dispose();
     _tabEntryController.dispose();
+    _panelController.dispose();
+    _panelScrollController.dispose();
     super.dispose();
   }
 
@@ -197,10 +1065,23 @@ class _ActivityBookingDetailsScreenState
       return;
     }
 
+    final bookingId = widget.bookingId.trim();
+    if (bookingId.isEmpty) {
+      final caregiverId = widget.caregiverId?.trim() ?? '';
+      if (caregiverId.isNotEmpty) {
+        await _loadCaregiver(caregiverId);
+      }
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+      });
+      return;
+    }
+
     try {
       final doc = await FirebaseFirestore.instance
           .collection('bookings')
-          .doc(widget.bookingId)
+          .doc(bookingId)
           .get();
       if (!doc.exists) {
         setState(() {
@@ -222,12 +1103,28 @@ class _ActivityBookingDetailsScreenState
       if (userId.isNotEmpty) {
         _loadUser(userId);
       }
+
+      _computeTrackButtonVisibility(data);
     } catch (e) {
       setState(() {
         _error = e.toString();
         _isLoading = false;
       });
     }
+  }
+
+  void _computeTrackButtonVisibility(Map<String, dynamic>? booking) {
+    final status = normalizeString(booking?['status'])?.toUpperCase() ?? '';
+    final normalized = status.trim().toUpperCase();
+    final isTerminal =
+        normalized == 'COMPLETED' ||
+        normalized == 'SCHEDULED' ||
+        normalized == 'PENDING' ||
+        normalized == 'CANCELLED' ||
+        normalized == 'CANCELED' ||
+        normalized.startsWith('CANCEL');
+    if (!mounted) return;
+    setState(() => _showTrackButton = !isTerminal);
   }
 
   Future<void> _loadCaregiver(String caregiverId) async {
@@ -276,6 +1173,191 @@ class _ActivityBookingDetailsScreenState
     } catch (_) {
       return raw;
     }
+  }
+
+  String _formatTime24(TimeOfDay t) {
+    final h = t.hour.toString().padLeft(2, '0');
+    final m = t.minute.toString().padLeft(2, '0');
+    return '$h:$m';
+  }
+
+  TimeOfDay? _parseStoredTime(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    final hhmm = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(trimmed);
+    if (hhmm != null) {
+      final h = int.tryParse(hhmm.group(1)!);
+      final m = int.tryParse(hhmm.group(2)!);
+      if (h == null || m == null) return null;
+      if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+      return TimeOfDay(hour: h, minute: m);
+    }
+    try {
+      final t = DateFormat('HH:mm').parseLoose(trimmed);
+      return TimeOfDay(hour: t.hour, minute: t.minute);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _ymd(DateTime d) {
+    final y = d.year.toString().padLeft(4, '0');
+    final m = d.month.toString().padLeft(2, '0');
+    final dd = d.day.toString().padLeft(2, '0');
+    return '$y-$m-$dd';
+  }
+
+  Future<List<_TimeRange>> _fetchTakenRanges({
+    required String caregiverId,
+    required DateTime day,
+    required String? excludeBookingId,
+  }) async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('bookings')
+          .where('caregiverId', isEqualTo: caregiverId)
+          .where('date', isEqualTo: _ymd(day))
+          .where('paymentStatus', isEqualTo: 'PAID')
+          .where('status', whereIn: const ['ASSIGNED', 'SCHEDULED'])
+          .get();
+      final ranges = <_TimeRange>[];
+      for (final doc in snap.docs) {
+        if (excludeBookingId != null && doc.id == excludeBookingId) continue;
+        final data = doc.data();
+        final start = _parseStoredTime(data['startTime']?.toString() ?? '');
+        final end = _parseStoredTime(data['endTime']?.toString() ?? '');
+        if (start == null || end == null) continue;
+        final sMin = start.hour * 60 + start.minute;
+        final eMin = end.hour * 60 + end.minute;
+        if (eMin <= sMin) continue;
+        ranges.add(_TimeRange(start: start, end: end));
+      }
+      ranges.sort((a, b) {
+        final aMin = a.start.hour * 60 + a.start.minute;
+        final bMin = b.start.hour * 60 + b.start.minute;
+        return aMin.compareTo(bMin);
+      });
+      return ranges;
+    } catch (_) {
+      return const <_TimeRange>[];
+    }
+  }
+
+  TimeOfDay _endTimeFromStart(TimeOfDay startTime) {
+    final totalMinutes = (startTime.hour * 60) + startTime.minute + 120;
+    final clamped = totalMinutes.clamp(0, 24 * 60 - 1);
+    return TimeOfDay(hour: clamped ~/ 60, minute: clamped % 60);
+  }
+
+  double _safeDouble(dynamic value, [double fallback = 0.0]) {
+    if (value is num) return value.toDouble();
+    if (value is String) return double.tryParse(value.trim()) ?? fallback;
+    return fallback;
+  }
+
+  Future<void> _goToBookingSummary({
+    required String caregiverId,
+    required DateTime scheduleDate,
+    required TimeOfDay startTime,
+    required TimeOfDay endTime,
+    required bool showScheduleSection,
+  }) async {
+    final person = widget.person;
+    final selectedAddress = widget.selectedAddress;
+    if (person == null || selectedAddress == null) return;
+    final caregiver = CaregiverModel.safeFromMap(caregiverId, _caregiverData);
+    final price = _safeDouble(caregiver.price, 1.0);
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => BookingSummaryScreen(
+          person: person,
+          caregiver: caregiver,
+          scheduleDate: scheduleDate,
+          startTime: startTime,
+          endTime: endTime,
+          price: price,
+          selectedAddress: selectedAddress,
+          showScheduleSection: showScheduleSection,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _bookCaregiverNow() async {
+    final caregiverId = widget.caregiverId?.trim() ?? '';
+    if (caregiverId.isEmpty) return;
+    final now = DateTime.now();
+    final start = TimeOfDay.fromDateTime(now);
+    final end = _endTimeFromStart(start);
+    await _goToBookingSummary(
+      caregiverId: caregiverId,
+      scheduleDate: now,
+      startTime: start,
+      endTime: end,
+      showScheduleSection: false,
+    );
+  }
+
+  Future<void> _bookInAdvance() async {
+    final caregiverId = widget.caregiverId?.trim() ?? '';
+    if (caregiverId.isEmpty) return;
+    final now = DateTime.now();
+    final initialDay = DateTime(now.year, now.month, now.day).add(
+      const Duration(days: 1),
+    );
+    final result = await showScheduleBookingTelegramSheet(
+      context: context,
+      caregiverId: caregiverId,
+      initialDay: initialDay,
+      initialStart: const TimeOfDay(hour: 8, minute: 0),
+      initialEnd: const TimeOfDay(hour: 10, minute: 0),
+      primaryColor: _accentGold,
+      excludeBookingId: null,
+      allowInitialDayEvenIfUnavailable: false,
+      barrierColor: Colors.black.withValues(alpha: 0.54),
+    );
+    if (!mounted || result == null) return;
+    await _goToBookingSummary(
+      caregiverId: caregiverId,
+      scheduleDate: result.day,
+      startTime: result.start,
+      endTime: result.end,
+      showScheduleSection: true,
+    );
+  }
+
+  Future<void> _openTracker() async {
+    final booking = _booking;
+    if (booking == null) return;
+    final bookingId = widget.bookingId.trim();
+    if (bookingId.isEmpty) return;
+    final personId = normalizeString(booking['personId']) ?? '';
+    final caregiverId = normalizeString(booking['caregiverId']) ?? '';
+    if (caregiverId.isEmpty) return;
+    final caregiverName =
+        normalizeString(booking['caregiverName']) ??
+        normalizeString(_caregiverData?['name']) ??
+        'Caregiver';
+
+    await FirebaseFirestore.instance.collection('bookings').doc(bookingId).set({
+      'trackingCaregiverId': caregiverId,
+      if (personId.isNotEmpty) 'trackingPersonId': personId,
+      'trackingUpdatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => TrackCaregiverScreen(
+          bookingId: bookingId,
+          caregiverName: caregiverName,
+          caregiverId: caregiverId,
+          personId: personId.isNotEmpty ? personId : null,
+          showStatusUpdateButton: false,
+        ),
+      ),
+    );
   }
 
   String _formatRelative(Timestamp? timestamp) {
@@ -340,10 +1422,15 @@ class _ActivityBookingDetailsScreenState
   Widget _reviewAvatar(_UserMini user) {
     final trimmed = user.photoUrl?.trim();
     if (trimmed?.isNotEmpty == true) {
-      return ClipOval(
-        child: SizedBox(
-          width: 36,
-          height: 36,
+      return Container(
+        width: 32,
+        height: 32,
+        padding: const EdgeInsets.all(1.8),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: _accentGold, width: 2.2),
+        ),
+        child: ClipOval(
           child: SafeNetworkImage(
             trimmed!,
             fit: BoxFit.cover,
@@ -356,15 +1443,24 @@ class _ActivityBookingDetailsScreenState
 
     final name = user.name.trim();
     final initial = name.isEmpty ? 'U' : name[0].toUpperCase();
-    return CircleAvatar(
-      radius: 18,
-      backgroundColor: Colors.black.withValues(alpha: 0.08),
-      child: Text(
-        initial,
-        style: const TextStyle(
-          fontSize: 13,
-          fontWeight: FontWeight.w900,
-          color: _profileDarkText,
+    return Container(
+      width: 32,
+      height: 32,
+      padding: const EdgeInsets.all(1.8),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(color: _accentGold, width: 2.2),
+      ),
+      child: CircleAvatar(
+        radius: 16,
+        backgroundColor: Colors.black.withValues(alpha: 0.08),
+        child: Text(
+          initial,
+          style: const TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w900,
+            color: _profileDarkText,
+          ),
         ),
       ),
     );
@@ -439,6 +1535,24 @@ class _ActivityBookingDetailsScreenState
     required bool selected,
     required VoidCallback onTap,
   }) {
+    Widget content = Text(label);
+    final trimmed = label.trim();
+    final firstToken = trimmed.split(' ').first;
+    final rating = int.tryParse(firstToken);
+    if (rating != null && rating >= 1 && rating <= 5) {
+      var rest = trimmed.substring(firstToken.length).trim();
+      if (rest.startsWith('ƒ~.')) rest = rest.substring(1).trim();
+      if (rest.startsWith('aŸY.')) rest = rest.substring(2).trim();
+      content = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(rating.toString()),
+          const SizedBox(width: 4),
+          const Icon(Icons.star_rounded, size: 14, color: _accentGold),
+          if (rest.isNotEmpty) ...[const SizedBox(width: 4), Text(rest)],
+        ],
+      );
+    }
     return TextButton(
       onPressed: onTap,
       style: TextButton.styleFrom(
@@ -457,7 +1571,7 @@ class _ActivityBookingDetailsScreenState
         backgroundColor: selected ? _accentBlue : Colors.white,
         textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
       ),
-      child: Text(label),
+      child: content,
     );
   }
 
@@ -479,10 +1593,17 @@ class _ActivityBookingDetailsScreenState
         children: [
           Row(
             children: [
-              DefaultProfileAvatar(
-                radius: 14,
-                photoUrl: caregiverPhotoUrl,
-                label: caregiverName,
+              Container(
+                padding: const EdgeInsets.all(1.4),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: _accentGold, width: 2),
+                ),
+                child: DefaultProfileAvatar(
+                  radius: 12.6,
+                  photoUrl: caregiverPhotoUrl,
+                  label: caregiverName,
+                ),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -564,6 +1685,9 @@ class _ActivityBookingDetailsScreenState
     required int verifiedDocsCount,
     required int reviewsCount,
     String? photoUrl,
+    Widget? footer,
+    bool hideMetrics = false,
+    bool showServiceSubtitle = false,
   }) {
     const avatarRadius = 38.0;
 
@@ -599,6 +1723,21 @@ class _ActivityBookingDetailsScreenState
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
               ),
+              if (showServiceSubtitle && serviceLabel.trim().isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  serviceLabel.trim(),
+                  textAlign: TextAlign.center,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.black.withValues(alpha: 0.62),
+                    letterSpacing: -0.1,
+                  ),
+                ),
+              ],
               const SizedBox(height: 10),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -623,32 +1762,35 @@ class _ActivityBookingDetailsScreenState
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
-              Divider(
-                height: 1,
-                thickness: 1,
-                color: Colors.black.withValues(alpha: 0.06),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  _buildMetricItem(
-                    icon: Icons.groups_2_outlined,
-                    label: 'Clients',
-                    value: clientsCount.toString(),
-                  ),
-                  _buildMetricItem(
-                    icon: Icons.verified_outlined,
-                    label: 'Certification',
-                    value: verifiedDocsCount.toString(),
-                  ),
-                  _buildMetricItem(
-                    icon: Icons.star_rounded,
-                    label: 'Reviews',
-                    value: reviewsCount.toString(),
-                  ),
-                ],
-              ),
+              if (!hideMetrics) ...[
+                const SizedBox(height: 12),
+                Divider(
+                  height: 1,
+                  thickness: 1,
+                  color: Colors.black.withValues(alpha: 0.06),
+                ),
+                const SizedBox(height: 10),
+                footer ??
+                    Row(
+                      children: [
+                        _buildMetricItem(
+                          icon: Icons.groups_2_outlined,
+                          label: 'Clients',
+                          value: clientsCount.toString(),
+                        ),
+                        _buildMetricItem(
+                          icon: Icons.verified_outlined,
+                          label: 'Certification',
+                          value: verifiedDocsCount.toString(),
+                        ),
+                        _buildMetricItem(
+                          icon: Icons.star_rounded,
+                          label: 'Reviews',
+                          value: reviewsCount.toString(),
+                        ),
+                      ],
+                    ),
+              ],
             ],
           ),
         ),
@@ -658,13 +1800,13 @@ class _ActivityBookingDetailsScreenState
           right: 0,
           child: Center(
             child: Container(
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 4),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.12),
-                    blurRadius: 14,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: _accentGold, width: 3.2),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.12),
+                      blurRadius: 14,
                     offset: const Offset(0, 8),
                   ),
                 ],
@@ -755,6 +1897,43 @@ class _ActivityBookingDetailsScreenState
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildHeaderPill({
+    required IconData icon,
+    required String text,
+  }) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: Colors.black.withValues(alpha: 0.10),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            icon,
+            size: 14,
+            color: Colors.black.withValues(alpha: 0.62),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            trimmed,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+              color: Colors.black.withValues(alpha: 0.72),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -912,206 +2091,153 @@ class _ActivityBookingDetailsScreenState
     );
   }
 
-  Widget _buildAboutMeSection(Map<String, dynamic>? caregiver) {
-    final bioRaw = (caregiver?['bio'] as String?)?.trim() ?? '';
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildSectionHeader(title: 'About me'),
-        if (bioRaw.isEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
-            child: _buildUnavailablePlaceholder(
-              message: 'About me unavailable',
-              explanation: "This caregiver hasn't shared a bio yet.",
-            ),
-          )
-        else
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
-            child: Text(
-              bioRaw,
-              style: _fieldValueTextStyle.copyWith(
-                color: Colors.black.withValues(alpha: 0.70),
-                height: 1.45,
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildServiceChip({required String label}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      constraints: const BoxConstraints(minHeight: 26),
-      decoration: BoxDecoration(
-        color: _accentBlue,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: _accentBlue.withValues(alpha: 0.45)),
-      ),
-      child: Text(
-        label,
-        style: const TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w700,
-          color: Colors.white,
-        ),
-        textAlign: TextAlign.center,
-      ),
-    );
-  }
-
-  Widget _buildServicesSection({
-    required List<String> servicePreferences,
-    required String fallbackServiceLabel,
-  }) {
-    final services = servicePreferences
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty)
-        .toList(growable: false);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildSectionHeader(title: 'Services'),
-        if (services.isEmpty && fallbackServiceLabel.trim().isEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
-            child: _buildUnavailablePlaceholder(
-              message: 'Services unavailable',
-              explanation: "This caregiver hasn't shared their services yet.",
-            ),
-          )
-        else
-          SizedBox(
-            height: 38,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              physics: const BouncingScrollPhysics(),
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              itemCount: services.isNotEmpty ? services.length : 1,
-              separatorBuilder: (_, __) => const SizedBox(width: 8),
-              itemBuilder: (context, index) {
-                final label = services.isNotEmpty
-                    ? services[index]
-                    : fallbackServiceLabel;
-                return _buildServiceChip(label: label);
-              },
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildVerifiedCertificatesSection({
-    required Stream<QuerySnapshot<Map<String, dynamic>>> documentsStream,
-  }) {
-    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: documentsStream,
-      builder: (context, snapshot) {
-        final docs = snapshot.data?.docs ?? const [];
-        final verified = docs
-            .where((d) => (d.data()['status'] as bool?) == true)
-            .toList();
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _buildSectionHeader(title: 'Certificates'),
-            if (snapshot.connectionState == ConnectionState.waiting ||
-                verified.isEmpty)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
-                child: _buildUnavailablePlaceholder(
-                  message: 'Certificates unavailable',
-                  explanation: "No verified certificates have been added yet.",
-                ),
-              )
-            else
-              ...verified.asMap().entries.map((entry) {
-                final index = entry.key;
-                final doc = entry.value;
-                final data = doc.data();
-                final name = (data['name'] as String?)?.trim();
-                final docName = (name != null && name.isNotEmpty)
-                    ? name
-                    : 'Document';
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 6),
-                  child: Column(
-                    children: [
-                      Row(
-                        children: [
-                          Container(
-                            width: 38,
-                            height: 38,
-                            decoration: BoxDecoration(
-                              color: _accentBlue.withValues(alpha: 0.10),
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color: _accentBlue.withValues(alpha: 0.28),
-                                width: 1.2,
-                              ),
-                            ),
-                            child: const Icon(
-                              Icons.description_outlined,
-                              color: _accentBlue,
-                              size: 18,
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              docName,
-                              style: _fieldValueTextStyle.copyWith(
-                                color: Colors.black.withValues(alpha: 0.70),
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ),
-                      if (index != verified.length - 1)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 10),
-                          child: Divider(
-                            height: 1,
-                            thickness: 1,
-                            color: Colors.black.withValues(alpha: 0.06),
-                          ),
-                        ),
-                    ],
-                  ),
-                );
-              }),
-          ],
-        );
-      },
-    );
-  }
-
   Widget _buildCaregiverDetailsTab({
     required Map<String, dynamic>? caregiver,
     required Stream<QuerySnapshot<Map<String, dynamic>>> documentsStream,
   }) {
+    final caregiverName = normalizeString(caregiver?['name']) ?? 'Caregiver';
+    final caregiverPhotoUrl =
+        (normalizeString(caregiver?['photoUrl'])?.trim().isNotEmpty == true
+            ? normalizeString(caregiver?['photoUrl'])!.trim()
+            : (normalizeString(caregiver?['imageUrl'])?.trim().isNotEmpty == true
+                  ? normalizeString(caregiver?['imageUrl'])!.trim()
+                  : null));
+    final caregiverLocation =
+        normalizeString(caregiver?['defaultAddress']) ??
+        normalizeString(caregiver?['address']) ??
+        normalizeString(caregiver?['area']) ??
+        'Location not provided';
+
+    final bioRaw = (caregiver?['bio'] as String?)?.trim() ?? '';
     final prefs = extractServicePreferencesList(
       caregiver?['servicePreferences'] ?? caregiver?['services'],
     );
     final fallbackServiceLabel = normalizeString(caregiver?['service']) ?? '';
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildAboutMeSection(caregiver),
-        const SizedBox(height: 12),
-        _buildServicesSection(
-          servicePreferences: prefs,
-          fallbackServiceLabel: fallbackServiceLabel,
+    final services = prefs
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList(growable: false);
+    final servicesList = services.isNotEmpty
+        ? services
+        : (fallbackServiceLabel.trim().isNotEmpty
+              ? [fallbackServiceLabel.trim()]
+              : const <String>[]);
+
+    Widget listRow({
+      required IconData icon,
+      required String value,
+      required bool showBorder,
+    }) {
+      return Container(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: showBorder
+                ? const BorderSide(color: _cardBorder)
+                : BorderSide.none,
+          ),
         ),
-        const SizedBox(height: 12),
-        _buildVerifiedCertificatesSection(documentsStream: documentsStream),
-      ],
+        child: Row(
+          children: [
+            Icon(icon, size: 17, color: _accentGreen),
+            const SizedBox(width: 10),
+            Expanded(child: Text(value, style: _fieldValueTextStyle)),
+          ],
+        ),
+      );
+    }
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: documentsStream,
+      builder: (context, snapshot) {
+        final verifiedDocs = snapshot.hasData
+            ? snapshot.data!.docs
+                .where((d) => (d.data()['status'] as bool?) == true)
+                .toList(growable: false)
+            : const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+        final certificateNames = verifiedDocs
+            .map((d) => (d.data()['name'] as String?)?.trim() ?? '')
+            .where((e) => e.isNotEmpty)
+            .toList(growable: false);
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildSectionHeader(
+              title: 'Caregiver details',
+              hint: 'Profile info from this caregiver.',
+            ),
+            const SizedBox(height: 4),
+            _centerAvatar(caregiverName, caregiverPhotoUrl),
+            _buildTabContent([
+              _buildInfoRow(
+                icon: Icons.person,
+                title: 'Name',
+                value: caregiverName,
+              ),
+              _buildInfoRow(
+                icon: Icons.info_outline_rounded,
+                title: 'Bio',
+                value: bioRaw.isNotEmpty ? bioRaw : 'Unavailable',
+              ),
+              _buildInfoRow(
+                icon: Icons.location_on_outlined,
+                title: 'Location',
+                value: caregiverLocation,
+                showBorder: false,
+              ),
+            ]),
+            const SizedBox(height: 14),
+            _buildSectionHeader(title: 'Services provided'),
+            if (servicesList.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+                child: _buildUnavailablePlaceholder(
+                  message: 'Services unavailable',
+                  explanation: 'Caregiver has not listed services yet.',
+                ),
+              )
+            else
+              _buildTabContent([
+                for (var i = 0; i < servicesList.length; i++)
+                  listRow(
+                    icon: Icons.medical_services_outlined,
+                    value: servicesList[i],
+                    showBorder: i != servicesList.length - 1,
+                  ),
+              ]),
+            const SizedBox(height: 14),
+            _buildSectionHeader(title: 'Certificates'),
+            if (!snapshot.hasData)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+                child: _buildUnavailablePlaceholder(
+                  message: 'Certificates unavailable',
+                  explanation: documentsStream is Stream<Never>
+                      ? 'No certificates available.'
+                      : 'Loading certificates...',
+                ),
+              )
+            else if (certificateNames.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+                child: _buildUnavailablePlaceholder(
+                  message: 'Certificates unavailable',
+                  explanation: 'No verified certificates yet.',
+                ),
+              )
+            else
+              _buildTabContent([
+                for (var i = 0; i < certificateNames.length; i++)
+                  listRow(
+                    icon: Icons.verified_outlined,
+                    value: certificateNames[i],
+                    showBorder: i != certificateNames.length - 1,
+                  ),
+              ]),
+          ],
+        );
+      },
     );
   }
 
@@ -1183,6 +2309,198 @@ class _ActivityBookingDetailsScreenState
     );
   }
 
+  List<Map<String, dynamic>> _extractEmergencyContacts(Map<String, dynamic>? data) {
+    if (data == null) return const [];
+    final raw = data['emergencyContacts'];
+    if (raw is List) {
+      return raw
+          .whereType<Map>()
+          .map((entry) => Map<String, dynamic>.from(entry))
+          .toList(growable: false);
+    }
+    return const [];
+  }
+
+  Widget _buildEmergencyContactsTab() {
+    final contacts = _extractEmergencyContacts(_userData);
+    if (contacts.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+        child: _buildUnavailablePlaceholder(
+          message: 'Emergency contacts unavailable',
+          explanation: 'Client has not added any emergency contacts yet.',
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildSectionHeader(
+          title: 'Emergency contact',
+          hint: 'Contacts provided by the client.',
+        ),
+        for (var i = 0; i < contacts.length; i++) ...[
+          const SizedBox(height: 4),
+          _centerAvatar(
+            (contacts[i]['name'] ?? 'Emergency contact').toString(),
+            (contacts[i]['photoUrl'] as String?)?.trim(),
+          ),
+          _buildTabContent([
+            _buildInfoRow(
+              icon: Icons.person,
+              title: 'Name',
+              value: (contacts[i]['name'] ?? 'Emergency contact').toString(),
+            ),
+            _buildInfoRow(
+              icon: Icons.family_restroom_rounded,
+              title: 'Relationship',
+              value:
+                  (contacts[i]['relationship'] ?? 'Relationship not set').toString(),
+            ),
+            Builder(
+              builder: (context) {
+                final phone = (contacts[i]['phone'] ?? '').toString().trim();
+                return _buildInfoRow(
+                  icon: Icons.phone_android,
+                  title: 'Contact',
+                  value: phone.isNotEmpty ? phone : 'Phone not available',
+                  showBorder: false,
+                );
+              },
+            ),
+          ]),
+          if (i != contacts.length - 1) const SizedBox(height: 12),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildClientDetailsTabForCaregiver() {
+    final booking = _booking ?? const <String, dynamic>{};
+    final user = _userData ?? const <String, dynamic>{};
+
+    final person = _resolvePersonDisplay(booking);
+    final ownerName =
+        normalizeString(user['name']) ??
+        normalizeString(booking['userName']) ??
+        'Booking owner';
+    final ownerPhone =
+        normalizeString(user['phone']) ??
+        normalizeString(booking['userPhone']) ??
+        '-';
+    final ownerAddress =
+        normalizeString(user['defaultAddress']) ??
+        normalizeString(user['address']) ??
+        normalizeString(booking['address']) ??
+        '-';
+    final ownerPhotoUrl =
+        (normalizeString(user['photoUrl'])?.trim().isNotEmpty == true
+            ? normalizeString(user['photoUrl'])!.trim()
+            : (normalizeString(user['imageUrl'])?.trim().isNotEmpty == true
+                  ? normalizeString(user['imageUrl'])!.trim()
+                  : null));
+    final notes = normalizeString(booking['notes']) ?? '';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildSectionHeader(title: 'Client details'),
+        const SizedBox(height: 4),
+        Center(
+          child: Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: _accentGold, width: 3.2),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.12),
+                  blurRadius: 14,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: DefaultProfileAvatar(
+              radius: 34,
+              photoUrl: person.photoUrl,
+              label: person.name,
+            ),
+          ),
+        ),
+        _buildTabContent([
+          _buildInfoRow(
+            icon: Icons.person,
+            title: 'Client name',
+            value: person.name,
+          ),
+          _buildInfoRow(
+            icon: Icons.phone_android,
+            title: 'Client contact',
+            value: person.phone,
+          ),
+          _buildInfoRow(
+            icon: Icons.family_restroom_rounded,
+            title: 'Relationship',
+            value: person.label,
+          ),
+          _buildInfoRow(
+            icon: Icons.home,
+            title: 'Location',
+            value: person.address,
+            showBorder: notes.trim().isNotEmpty,
+          ),
+          if (notes.trim().isNotEmpty)
+            _buildInfoContentRow(
+              icon: Icons.sticky_note_2_outlined,
+              title: 'Additional notes',
+              value: notes.trim(),
+            ),
+        ]),
+        const SizedBox(height: 14),
+        _buildSectionHeader(title: 'Booking owner'),
+        const SizedBox(height: 4),
+        Center(
+          child: Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: _accentGold, width: 3.2),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.12),
+                  blurRadius: 14,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: DefaultProfileAvatar(
+              radius: 34,
+              photoUrl: ownerPhotoUrl,
+              label: ownerName,
+            ),
+          ),
+        ),
+        _buildTabContent([
+          _buildInfoRow(
+            icon: Icons.person,
+            title: 'Owner name',
+            value: ownerName,
+          ),
+          _buildInfoRow(
+            icon: Icons.phone_android,
+            title: 'Owner contact',
+            value: ownerPhone,
+          ),
+          _buildInfoRow(
+            icon: Icons.home,
+            title: 'Location',
+            value: ownerAddress,
+            showBorder: false,
+          ),
+        ]),
+      ],
+    );
+  }
+
   // ignore: unused_element
   Widget _buildLocationTab({
     required String caregiverAddress,
@@ -1221,27 +2539,628 @@ class _ActivityBookingDetailsScreenState
         ? '${_formatTime(startTime)} - ${_formatTime(endTime)}'
         : (time.isNotEmpty ? _formatTime(time) : '');
 
-    return Padding(
-      padding: EdgeInsets.zero,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final selectedDay = _scheduleSelectedDay ?? today;
+    final selectedKey = _ymd(selectedDay);
+
+    _scheduleSelectedDay ??= today;
+
+    DateTime? parseYmd(String raw) {
+      try {
+        return DateFormat('yyyy-MM-dd').parse(raw);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    DateTime? bookingDay = dateLabel.isNotEmpty ? parseYmd(dateLabel) : null;
+    if (bookingDay == null && _isPreviewMode) {
+      bookingDay = selectedDay;
+    }
+    final caregiverIdFromBooking = (booking['caregiverId'] as String?)?.trim();
+    final caregiverId =
+        caregiverIdFromBooking?.isNotEmpty == true
+            ? caregiverIdFromBooking!
+            : (widget.caregiverId?.trim() ?? '');
+    final bookingStart =
+        startTime.isNotEmpty ? _parseStoredTime(startTime) : null;
+    final bookingEnd = endTime.isNotEmpty ? _parseStoredTime(endTime) : null;
+
+    if (bookingDay == null) {
+      return Padding(
+        padding: EdgeInsets.zero,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildSectionHeader(title: 'Schedule'),
+            _buildTabContent([
+              _buildInfoRow(
+                icon: Icons.calendar_month,
+                title: 'Date',
+                value: dateLabel.isNotEmpty ? _formatDate(dateLabel) : '-',
+              ),
+              _buildInfoRow(
+                icon: Icons.access_time,
+                title: 'Time',
+                value: timeLabel.isNotEmpty ? timeLabel : '-',
+                showBorder: false,
+              ),
+            ]),
+          ],
+        ),
+      );
+    }
+
+    final availabilityStream = caregiverId.isNotEmpty
+        ? FirebaseFirestore.instance
+              .collection('availability')
+              .doc(caregiverId)
+              .snapshots()
+        : const Stream<DocumentSnapshot<Map<String, dynamic>>>.empty();
+
+    Widget timelineRow({
+      required String timeLabel,
+      required Widget card,
+      required double connectorHeight,
+      required bool hasEvent,
+      bool isLast = false,
+    }) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSectionHeader(title: 'Schedule'),
-          _buildTabContent([
-            _buildInfoRow(
-              icon: Icons.calendar_month,
-              title: 'Date',
-              value: dateLabel.isNotEmpty ? _formatDate(dateLabel) : '—',
+          SizedBox(
+            width: 58,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 14),
+                child: Text(
+                  timeLabel,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.black.withValues(alpha: 0.55),
+                  ),
+                ),
             ),
-            _buildInfoRow(
-              icon: Icons.access_time,
-              title: 'Time',
-              value: timeLabel.isNotEmpty ? timeLabel : '—',
-              showBorder: false,
+          ),
+          SizedBox(
+            width: 24,
+            child: Column(
+              children: [
+                Container(
+                  width: 12,
+                  height: 12,
+                  margin: const EdgeInsets.only(top: 16),
+                  decoration: BoxDecoration(
+                    color: hasEvent ? _accentBlue : Colors.white,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: _accentBlue.withValues(alpha: 0.7),
+                      width: 2,
+                    ),
+                  ),
+                  child: hasEvent
+                      ? const Center(
+                          child: Icon(
+                            Icons.check,
+                            size: 10,
+                            color: Colors.white,
+                          ),
+                        )
+                      : null,
+                ),
+                if (!isLast)
+                  Container(
+                    width: 2,
+                    height: connectorHeight,
+                    margin: const EdgeInsets.only(top: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  ),
+              ],
             ),
-          ]),
+          ),
+          const SizedBox(width: 10),
+          Expanded(child: card),
         ],
-      ),
+      );
+    }
+
+    Widget eventCard({
+      required String title,
+      required String subtitle,
+      required Color background,
+      required Color foreground,
+      IconData? icon,
+      bool strike = false,
+    }) {
+      return Container(
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x12000000),
+              blurRadius: 16,
+              offset: Offset(0, 8),
+            ),
+          ],
+        ),
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                if (icon != null) ...[
+                  Icon(icon, size: 15, color: foreground),
+                  const SizedBox(width: 8),
+                ],
+                Expanded(
+                  child: Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w900,
+                      color: foreground,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            if (subtitle.trim().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                subtitle,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  height: 1.3,
+                  decoration: strike ? TextDecoration.lineThrough : null,
+                  color: foreground.withValues(alpha: 0.78),
+                ),
+              ),
+            ],
+          ],
+        ),
+      );
+    }
+
+    String dayTitle(DateTime d) => DateFormat('EEEE').format(d);
+    String daySubtitle(DateTime d) => DateFormat('d MMMM yyyy').format(d);
+
+    Widget dateStrip(DateTime selected) {
+      final start = selected.subtract(const Duration(days: 3));
+      final days = List<DateTime>.generate(
+        7,
+        (i) => DateTime(start.year, start.month, start.day + i),
+      );
+      final monthLabel = DateFormat('MMM').format(selected);
+
+      return Row(
+        children: [
+          SizedBox(
+            width: 44,
+            child: Text(
+              monthLabel,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                color: Colors.black.withValues(alpha: 0.60),
+              ),
+            ),
+          ),
+          Expanded(
+            child: SizedBox(
+              height: 56,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                physics: const BouncingScrollPhysics(),
+                itemCount: days.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (context, index) {
+                  final d = days[index];
+                  final isPast = d.isBefore(today);
+                  final isSelected =
+                      d.year == selected.year &&
+                      d.month == selected.month &&
+                      d.day == selected.day;
+                  final weekday = DateFormat('EEE').format(d);
+                  final dayNum = d.day.toString().padLeft(2, '0');
+                  return InkWell(
+                    onTap: isPast ? null : () => setState(() => _scheduleSelectedDay = d),
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
+                      width: 54,
+                      decoration: BoxDecoration(
+                        color: isSelected ? _accentBlue : Colors.transparent,
+                        borderRadius: BorderRadius.circular(10),
+                        boxShadow: isSelected
+                            ? const [
+                                BoxShadow(
+                                  color: Color(0x24000000),
+                                  blurRadius: 10,
+                                  offset: Offset(0, 6),
+                                ),
+                              ]
+                            : null,
+                      ),
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            weekday,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              height: 1.0,
+                              color: isSelected
+                                  ? Colors.white.withValues(alpha: 0.9)
+                                  : Colors.black.withValues(
+                                      alpha: isPast ? 0.22 : 0.45,
+                                    ),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            dayNum,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w900,
+                              height: 1.0,
+                              color: isSelected
+                                  ? Colors.white
+                                  : (isPast
+                                        ? Colors.black.withValues(alpha: 0.30)
+                                        : _profileDarkText),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: availabilityStream,
+      builder: (context, availabilitySnap) {
+        final availability =
+            availabilitySnap.data?.data() ?? const <String, dynamic>{};
+
+        List<DateTimeRange> blockedRanges() {
+          final raw = availability['blockedDates'];
+          if (raw is! Iterable) return const [];
+          final ranges = <DateTimeRange>[];
+          for (final entry in raw) {
+            if (entry is! Map) continue;
+            final startRaw = entry['start']?.toString();
+            final endRaw = entry['end']?.toString();
+            final start = startRaw == null ? null : DateTime.tryParse(startRaw);
+            final end = endRaw == null ? null : DateTime.tryParse(endRaw);
+            if (start == null || end == null) continue;
+            ranges.add(
+              DateTimeRange(
+                start: DateTime(start.year, start.month, start.day),
+                end: DateTime(end.year, end.month, end.day),
+              ),
+            );
+          }
+          return ranges;
+        }
+
+        Map<int, ({bool available, TimeOfDay start, TimeOfDay end})>
+        weeklyRanges() {
+          const dayToWeekday = <String, int>{
+            'Monday': DateTime.monday,
+            'Tuesday': DateTime.tuesday,
+            'Wednesday': DateTime.wednesday,
+            'Thursday': DateTime.thursday,
+            'Friday': DateTime.friday,
+            'Saturday': DateTime.saturday,
+            'Sunday': DateTime.sunday,
+          };
+          final raw = availability['weeklySchedule'];
+          if (raw is! Iterable) return const {};
+          final map =
+              <int, ({bool available, TimeOfDay start, TimeOfDay end})>{};
+          for (final entry in raw) {
+            if (entry is! Map) continue;
+            final dayName = entry['day']?.toString();
+            final weekday = dayToWeekday[dayName];
+            if (weekday == null) continue;
+            final available = entry['available'] as bool? ?? true;
+            final startRaw = entry['start']?.toString() ?? '08:00';
+            final endRaw = entry['end']?.toString() ?? '18:00';
+            final start =
+                _parseStoredTime(startRaw) ?? const TimeOfDay(hour: 8, minute: 0);
+            final end =
+                _parseStoredTime(endRaw) ?? const TimeOfDay(hour: 18, minute: 0);
+            map[weekday] = (available: available, start: start, end: end);
+          }
+          return map;
+        }
+
+        final normalizedDay =
+            DateTime(selectedDay.year, selectedDay.month, selectedDay.day);
+        final blocked = blockedRanges().any((r) {
+          final start = DateTime(r.start.year, r.start.month, r.start.day);
+          final end = DateTime(r.end.year, r.end.month, r.end.day);
+          return !normalizedDay.isBefore(start) && !normalizedDay.isAfter(end);
+        });
+
+        final weekly = weeklyRanges()[normalizedDay.weekday];
+        final availableWindow = (weekly == null || !weekly.available)
+            ? null
+            : (weekly.start, weekly.end);
+        final dayOff = weekly != null && !weekly.available;
+
+        if (caregiverId.isNotEmpty &&
+            !_scheduleTakenCache.containsKey(selectedKey) &&
+            !_scheduleLoadingTaken.contains(selectedKey)) {
+          _scheduleLoadingTaken.add(selectedKey);
+          WidgetsBinding.instance.addPostFrameCallback((_) async {
+            final next = await _fetchTakenRanges(
+              caregiverId: caregiverId,
+              day: selectedDay,
+              excludeBookingId: widget.bookingId,
+            );
+            if (!mounted) return;
+            setState(() {
+              _scheduleTakenCache[selectedKey] = next;
+              _scheduleLoadingTaken.remove(selectedKey);
+            });
+          });
+        }
+
+        final taken = _scheduleTakenCache[selectedKey] ?? const <_TimeRange>[];
+        final isLoadingTaken =
+            caregiverId.isNotEmpty && !_scheduleTakenCache.containsKey(selectedKey);
+
+        final header = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            dateStrip(selectedDay),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    dayTitle(selectedDay),
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w900,
+                      color: _profileDarkText,
+                    ),
+                  ),
+                ),
+                Text(
+                  daySubtitle(selectedDay),
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.black.withValues(alpha: 0.55),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        );
+
+        final timelineItems = <Widget>[];
+
+        if (isLoadingTaken) {
+          timelineItems.add(
+            Padding(
+              padding: const EdgeInsets.only(top: 18),
+              child: Center(
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.black.withValues(alpha: 0.35),
+                  ),
+                ),
+              ),
+            ),
+          );
+        } else if (blocked || dayOff || availableWindow == null) {
+          timelineItems.add(
+            timelineRow(
+              timeLabel: '—',
+              connectorHeight: 18,
+              hasEvent: false,
+              isLast: true,
+              card: eventCard(
+                title: 'Unavailable',
+                subtitle: blocked ? 'Blocked' : 'Not available',
+                background: Colors.black.withValues(alpha: 0.06),
+                foreground: _profileDarkText,
+                icon: Icons.block_rounded,
+              ),
+            ),
+          );
+        } else {
+          final events =
+              <({TimeOfDay start, TimeOfDay end, String title, String subtitle, Color bg, Color fg, IconData icon, bool strike})>[];
+
+          final isBookingDay = _ymd(selectedDay) == _ymd(bookingDay!);
+          if (isBookingDay && bookingStart != null) {
+            final end = bookingEnd ??
+                TimeOfDay(
+                  hour:
+                      (bookingStart.hour + ((bookingStart.minute + 15) ~/ 60)) %
+                      24,
+                  minute: (bookingStart.minute + 15) % 60,
+                );
+            events.add(
+              (
+                start: bookingStart,
+                end: end,
+                title: 'Your booking',
+                subtitle: timeLabel.isNotEmpty ? timeLabel : '',
+                bg: const Color(0xFF71CBBE),
+                fg: Colors.white,
+                icon: Icons.check_circle_rounded,
+                strike: false,
+              ),
+            );
+          }
+
+          const palette = <Color>[
+            Color(0xFFFFB930),
+            Color(0xFF7E57C2),
+            Color(0xFFEC407A),
+          ];
+          for (int i = 0; i < taken.length; i++) {
+            final r = taken[i];
+            final bg = palette[i % palette.length];
+            events.add(
+              (
+                start: r.start,
+                end: r.end,
+                title: 'Booked slot',
+                subtitle: 'Unavailable',
+                bg: bg,
+                fg: Colors.white,
+                icon: Icons.check_circle_rounded,
+                strike: bg == palette.first,
+              ),
+            );
+          }
+
+          int toMinutes(TimeOfDay t) => t.hour * 60 + t.minute;
+          TimeOfDay fromMinutes(int minutes) {
+            final clamped = minutes.clamp(0, 24 * 60 - 1);
+            return TimeOfDay(hour: clamped ~/ 60, minute: clamped % 60);
+          }
+
+          final startMin = toMinutes(availableWindow.$1);
+          final endMin = toMinutes(availableWindow.$2);
+          final tickMins = <int>{startMin, endMin};
+          for (final e in events) {
+            final m = toMinutes(e.start);
+            if (m >= startMin && m <= endMin) tickMins.add(m);
+          }
+          final sortedTicks = tickMins.toList()..sort();
+
+          events.sort((a, b) => toMinutes(a.start).compareTo(toMinutes(b.start)));
+
+          for (int i = 0; i < sortedTicks.length; i++) {
+            final tickMin = sortedTicks[i];
+            final tick = fromMinutes(tickMin);
+            final nextTickMin = i < sortedTicks.length - 1
+                ? sortedTicks[i + 1]
+                : tickMin;
+            final diffMin = (nextTickMin - tickMin).abs();
+            final connectorHeight = i == sortedTicks.length - 1
+                ? 18.0
+                : (diffMin * 0.45).clamp(18.0, 220.0);
+
+            final atTick =
+                events.where((e) => toMinutes(e.start) == tickMin).toList();
+
+            final cardWidget = atTick.isEmpty
+                ? const SizedBox(height: 10)
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (int j = 0; j < atTick.length; j++) ...[
+                        eventCard(
+                          title: atTick[j].title,
+                          subtitle: atTick[j].subtitle,
+                          background: atTick[j].bg,
+                          foreground: atTick[j].fg,
+                          icon: atTick[j].icon,
+                          strike: atTick[j].strike,
+                        ),
+                        if (j != atTick.length - 1) const SizedBox(height: 10),
+                      ],
+                    ],
+                  );
+
+            timelineItems.add(
+              timelineRow(
+                timeLabel: _formatTime24(tick),
+                connectorHeight: connectorHeight,
+                hasEvent: atTick.isNotEmpty,
+                isLast: i == sortedTicks.length - 1,
+                card: cardWidget,
+              ),
+            );
+            if (i != sortedTicks.length - 1) {
+              timelineItems.add(const SizedBox(height: 6));
+            }
+          }
+
+          if (timelineItems.isEmpty) {
+            timelineItems.add(
+              Padding(
+                padding: const EdgeInsets.only(top: 18),
+                child: Center(
+                  child: Text(
+                    'No schedule for this day.',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.black.withValues(alpha: 0.55),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }
+        }
+
+        return Padding(
+          padding: EdgeInsets.zero,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildSectionHeader(title: 'Schedule'),
+              Container(
+                margin: const EdgeInsets.only(top: 6),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(
+                    color: Colors.black.withValues(alpha: 0.12),
+                    width: 1.2,
+                  ),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x1A000000),
+                      blurRadius: 16,
+                      offset: Offset(0, 8),
+                    ),
+                  ],
+                ),
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    header,
+                    const SizedBox(height: 14),
+                    ...timelineItems,
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -1320,21 +3239,6 @@ class _ActivityBookingDetailsScreenState
             return tb.compareTo(ta);
           });
 
-        if (allDocs.isEmpty) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
-                child: _buildUnavailablePlaceholder(
-                  message: 'Reviews unavailable',
-                  explanation: 'No reviews yet.',
-                ),
-              ),
-            ],
-          );
-        }
-
         final counts = <int, int>{1: 0, 2: 0, 3: 0, 4: 0, 5: 0};
         var totalRating = 0;
         for (final doc in allDocs) {
@@ -1356,8 +3260,9 @@ class _ActivityBookingDetailsScreenState
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const SizedBox(height: 10),
+            _buildSectionHeader(title: 'Reviews'),
             Container(
+              margin: const EdgeInsets.only(top: 6),
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(18),
@@ -1384,7 +3289,7 @@ class _ActivityBookingDetailsScreenState
                         Text(
                           average.toStringAsFixed(1),
                           style: const TextStyle(
-                            fontSize: 36,
+                            fontSize: 30,
                             fontWeight: FontWeight.w900,
                             color: _profileDarkText,
                             height: 1,
@@ -1447,24 +3352,21 @@ class _ActivityBookingDetailsScreenState
                 ],
               ),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 6),
             if (docs.isEmpty)
               Padding(
-                padding: const EdgeInsets.only(top: 30),
-                child: Center(
-                  child: Text(
-                    'No reviews for this filter.',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.black.withValues(alpha: 0.55),
-                    ),
-                  ),
+                padding: const EdgeInsets.only(top: 6),
+                child: _buildUnavailablePlaceholder(
+                  message: 'Reviews unavailable',
+                  explanation: totalCount == 0
+                      ? 'No reviews yet.'
+                      : 'No reviews for this filter.',
                 ),
               )
             else
               ListView.separated(
                 shrinkWrap: true,
+                padding: EdgeInsets.zero,
                 physics: const NeverScrollableScrollPhysics(),
                 itemCount: docs.length,
                 separatorBuilder: (_, __) => const SizedBox(height: 10),
@@ -1522,7 +3424,7 @@ class _ActivityBookingDetailsScreenState
                                         ? user.name.trim()
                                         : personName,
                                     style: const TextStyle(
-                                      fontSize: 13.5,
+                                      fontSize: 12.5,
                                       fontWeight: FontWeight.w900,
                                       color: _profileDarkText,
                                     ),
@@ -1553,7 +3455,7 @@ class _ActivityBookingDetailsScreenState
                               ? feedback
                               : 'No written feedback.',
                           style: TextStyle(
-                            fontSize: 13.5,
+                            fontSize: 12.5,
                             height: 1.35,
                             fontWeight: FontWeight.w700,
                             color: feedback.isNotEmpty
@@ -1627,6 +3529,67 @@ class _ActivityBookingDetailsScreenState
     );
   }
 
+  // ignore: unused_element
+  Widget _buildInfoRowWithTrailing({
+    required IconData icon,
+    required String title,
+    required String value,
+    required Widget trailing,
+    bool showBorder = true,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: showBorder
+              ? const BorderSide(color: _cardBorder)
+              : BorderSide.none,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 17, color: _accentGreen),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: _fieldLabelTextStyle),
+                const SizedBox(height: 4),
+                Text(value, style: _fieldValueTextStyle),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          trailing,
+        ],
+      ),
+    );
+  }
+
+  Widget _centerAvatar(String label, String? photoUrl, {double radius = 34}) {
+    return Center(
+      child: Container(
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: _accentGold, width: 3.2),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.12),
+              blurRadius: 14,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: DefaultProfileAvatar(
+          radius: radius,
+          photoUrl: (photoUrl?.trim().isNotEmpty == true) ? photoUrl!.trim() : null,
+          label: label,
+        ),
+      ),
+    );
+  }
+
   Widget _buildTabContent(List<Widget> children) {
     return Container(
       decoration: BoxDecoration(
@@ -1664,24 +3627,115 @@ class _ActivityBookingDetailsScreenState
     final date = normalizeString(booking['date']);
     final time = normalizeString(booking['time']);
     final payment = normalizeString(booking['paymentMethod']) ?? 'Unknown';
-    final status =
-        normalizeString(booking['status'])?.toUpperCase() ?? 'PENDING';
     final notes = normalizeString(booking['notes']) ?? '';
-    final person = normalizeString(booking['personName']) ?? 'Family member';
-    final address =
-        normalizeString(booking['personAddress']) ??
-        normalizeString(booking['addressLabel']) ??
-        'Address not provided';
+    final personDisplay = _resolvePersonDisplay(booking);
+    final services = extractServicePreferencesList(
+      booking['servicePreferences'] ??
+          booking['services'] ??
+          booking['selectedServices'],
+    );
+    final fallbackServiceLabel = extractServiceLabelFromFirestore(booking);
+    final servicesValue = services.isNotEmpty
+        ? services.join(', ')
+        : (fallbackServiceLabel.trim().isNotEmpty
+              ? fallbackServiceLabel.trim()
+              : 'Unavailable');
     final ownerName = (_userData?['name'] as String?) ?? 'You';
     final ownerPhone = (_userData?['phone'] as String?) ?? 'No contact';
+
+    final caregiver = _caregiverData ?? const <String, dynamic>{};
+    final caregiverName =
+        normalizeString(caregiver['name']) ??
+        normalizeString(booking['caregiverName']) ??
+        'Caregiver';
+    final caregiverPhone =
+        normalizeString(caregiver['phone']) ??
+        normalizeString(caregiver['phoneNumber']) ??
+        normalizeString(booking['caregiverPhone']) ??
+        '-';
+    final caregiverAddress =
+        normalizeString(caregiver['defaultAddress']) ??
+        normalizeString(caregiver['address']) ??
+        normalizeString(caregiver['area']) ??
+        'Location not provided';
+    final caregiverPhotoUrl =
+        (normalizeString(caregiver['photoUrl'])?.trim().isNotEmpty == true
+            ? normalizeString(caregiver['photoUrl'])!.trim()
+            : (normalizeString(caregiver['imageUrl'])?.trim().isNotEmpty == true
+                  ? normalizeString(caregiver['imageUrl'])!.trim()
+                  : null));
+    final caregiverServices = extractServicePreferencesList(
+      caregiver['servicePreferences'] ?? caregiver['services'],
+    );
+    final caregiverServiceFallback = normalizeString(caregiver['service']) ?? '';
+    final caregiverServicesValue = caregiverServices.isNotEmpty
+        ? caregiverServices.join(', ')
+        : (caregiverServiceFallback.trim().isNotEmpty
+              ? caregiverServiceFallback.trim()
+              : servicesValue);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        _buildSectionHeader(title: 'Caregiver'),
+        const SizedBox(height: 4),
+        _centerAvatar(caregiverName, caregiverPhotoUrl),
+        _buildTabContent([
+          _buildInfoRow(
+            icon: Icons.person,
+            title: 'Caregiver name',
+            value: caregiverName,
+          ),
+          _buildInfoRow(
+            icon: Icons.medical_services_outlined,
+            title: 'Services',
+            value: caregiverServicesValue,
+          ),
+          _buildInfoRow(
+            icon: Icons.phone_android,
+            title: 'Contact',
+            value: caregiverPhone,
+          ),
+          _buildInfoRow(
+            icon: Icons.home,
+            title: 'Address',
+            value: caregiverAddress,
+            showBorder: false,
+          ),
+        ]),
+        const SizedBox(height: 14),
+        _buildSectionHeader(title: 'Selected person'),
+        const SizedBox(height: 4),
+        _centerAvatar(personDisplay.name, personDisplay.photoUrl),
+        _buildTabContent([
+          _buildInfoRow(
+            icon: Icons.person,
+            title: 'Name',
+            value: personDisplay.name,
+          ),
+          _buildInfoRow(
+            icon: Icons.phone_android,
+            title: 'Contact',
+            value: personDisplay.phone,
+          ),
+          _buildInfoRow(
+            icon: Icons.home,
+            title: 'Location',
+            value: personDisplay.address,
+            showBorder: false,
+          ),
+        ]),
+        const SizedBox(height: 14),
         _buildSectionHeader(
           title: 'Booking details',
           hint: 'Live details pulled from the booking record.',
         ),
         _buildTabContent([
+          _buildInfoRow(
+            icon: Icons.medical_services_outlined,
+            title: 'Services',
+            value: servicesValue,
+          ),
           _buildInfoRow(
             icon: Icons.calendar_month,
             title: 'Booked date',
@@ -1693,11 +3747,6 @@ class _ActivityBookingDetailsScreenState
             value: _formatTime(time ?? ''),
           ),
           _buildInfoRow(
-            icon: Icons.home,
-            title: 'Care location',
-            value: address,
-          ),
-          _buildInfoRow(
             icon: Icons.person,
             title: 'Booked by',
             value: ownerName,
@@ -1707,26 +3756,17 @@ class _ActivityBookingDetailsScreenState
             title: 'Owner contact',
             value: ownerPhone,
           ),
-          _buildInfoContentRow(
-            icon: Icons.person,
-            title: 'Primary person',
-            value: person,
-          ),
-          const Divider(thickness: 1, height: 1, color: _cardBorder),
-          _buildInfoRow(icon: Icons.payment, title: 'Payment', value: payment),
           _buildInfoRow(
-            icon: Icons.local_offer,
-            title: 'Status',
-            value: status,
-            showBorder: false,
+            icon: Icons.payment,
+            title: 'Payment',
+            value: payment,
+            showBorder: notes.trim().isNotEmpty,
           ),
-          if (notes.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              child: Text(
-                'Notes: $notes',
-                style: const TextStyle(fontSize: 11, color: Colors.black87),
-              ),
+          if (notes.trim().isNotEmpty)
+            _buildInfoContentRow(
+              icon: Icons.sticky_note_2_outlined,
+              title: 'Notes',
+              value: notes.trim(),
             ),
         ]),
       ],
@@ -1811,6 +3851,418 @@ class _ActivityBookingDetailsScreenState
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  Future<void> _startSessionFromCaregiverView() async {
+    final booking = _booking;
+    if (booking == null) return;
+    final caregiverId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (caregiverId.trim().isEmpty) return;
+
+    final personId = normalizeString(booking['personId']) ?? '';
+    var caregiverName =
+        normalizeString(_caregiverData?['name']) ??
+        normalizeString(booking['caregiverName']) ??
+        'Caregiver';
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('caregivers')
+          .doc(caregiverId.trim())
+          .get();
+      final data = doc.data();
+      final raw = data?['name'];
+      if (raw is String && raw.trim().isNotEmpty) caregiverName = raw.trim();
+    } catch (_) {}
+
+    await FirebaseFirestore.instance
+        .collection('bookings')
+        .doc(widget.bookingId)
+        .set({
+          'trackingCaregiverId': caregiverId.trim(),
+          if (personId.trim().isNotEmpty) 'trackingPersonId': personId.trim(),
+          'trackingUpdatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+
+    if (!mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TrackCaregiverScreen(
+          bookingId: widget.bookingId,
+          caregiverName: caregiverName,
+          caregiverId: caregiverId.trim(),
+          personId: personId.trim().isNotEmpty ? personId.trim() : null,
+          showStatusUpdateButton: true,
+          showActionFrontSheet: true,
+        ),
+      ),
+    );
+  }
+
+  Future<Position?> _getDevicePosition() async {
+    final enabled = await Geolocator.isLocationServiceEnabled();
+    if (!enabled) return null;
+
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      return null;
+    }
+
+    return Geolocator.getCurrentPosition(
+      desiredAccuracy: LocationAccuracy.high,
+    );
+  }
+
+  Future<void> _openEmergencyAlertSheet() async {
+    final contacts = _extractEmergencyContacts(_userData);
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      barrierColor: Colors.black.withValues(alpha: 0.54),
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return _EmergencyAlertBottomSheet(
+          contacts: contacts,
+          onSubmit: (ids, reason) async {
+            final pos = await _getDevicePosition();
+            if (pos == null) {
+              throw const _EmergencyAlertError(
+                message: 'Location permission is required for SOS.',
+              );
+            }
+            final functions = FirebaseFunctions.instanceFor(region: 'us-central1');
+            await functions.httpsCallable('handleSOSAlert').call({
+              'lat': pos.latitude,
+              'lng': pos.longitude,
+              'reason': reason.trim().isNotEmpty ? reason.trim() : 'Emergency alert',
+              'notifyContactIds': ids.toList(growable: false),
+            });
+          },
+          onCompleted: () {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Emergency alert started.')),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ignore: unused_element
+  Widget _buildSelectedPersonHeaderSummary({
+    required String? photoUrl,
+    required String name,
+    required String label,
+    required String address,
+    required String serviceLabel,
+  }) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.025),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          DefaultProfileAvatar(
+            radius: 18,
+            photoUrl: photoUrl,
+            label: name,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name.trim().isNotEmpty ? name.trim() : 'Selected person',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                    color: _profileDarkText,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _buildHeaderPill(
+                      icon: Icons.accessibility_new_rounded,
+                      text: label,
+                    ),
+                    _buildHeaderPill(
+                      icon: Icons.medical_services_outlined,
+                      text: serviceLabel,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.location_on_outlined,
+                      size: 15,
+                      color: Colors.black.withValues(alpha: 0.55),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        address,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.black.withValues(alpha: 0.62),
+                          height: 1.2,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ignore: unused_element
+  Widget _caregiverSessionFrontSheet({
+    required String personName,
+    required String personLabel,
+    required String location,
+    required String? personPhotoUrl,
+  }) {
+    final title = personName.trim().isNotEmpty ? personName.trim() : 'Person';
+    final subtitleParts = <String>[];
+    if (personLabel.trim().isNotEmpty) subtitleParts.add(personLabel.trim());
+    if (location.trim().isNotEmpty) subtitleParts.add(location.trim());
+    final subtitle = subtitleParts.join(' • ');
+
+    return Material(
+      color: Colors.white,
+      elevation: 12,
+      shadowColor: Colors.black.withValues(alpha: 0.2),
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                DefaultProfileAvatar(
+                  radius: 22,
+                  photoUrl: personPhotoUrl,
+                  label: title,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                          color: _profileDarkText,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        subtitle.isNotEmpty ? subtitle : 'Selected person',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.black.withValues(alpha: 0.54),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _startSessionFromCaregiverView,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accentGold,
+                  foregroundColor: Colors.black,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  textStyle: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                child: const Text('Start session'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _caregiverSessionStartFrontSheet({
+    required String? personPhotoUrl,
+    required String personName,
+    required String personLabel,
+    required String personAddress,
+    required String serviceLabel,
+  }) {
+    return Material(
+      color: Colors.white,
+      elevation: 12,
+      shadowColor: Colors.black.withValues(alpha: 0.2),
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(2),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: _accentGold, width: 2.2),
+                  ),
+                  child: DefaultProfileAvatar(
+                    radius: 20,
+                    photoUrl: personPhotoUrl,
+                    label: personName,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        personName.trim().isNotEmpty
+                            ? personName.trim()
+                            : 'Selected person',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                          color: _profileDarkText,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        [personLabel, serviceLabel]
+                            .map((e) => e.trim())
+                            .where((e) => e.isNotEmpty)
+                            .join(' • '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.black.withValues(alpha: 0.54),
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        personAddress.trim().isNotEmpty
+                            ? personAddress.trim()
+                            : 'Care location',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.black.withValues(alpha: 0.62),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: _openEmergencyAlertSheet,
+                    borderRadius: BorderRadius.circular(999),
+                    child: Ink(
+                      width: 46,
+                      height: 46,
+                      decoration: const BoxDecoration(
+                        color: Colors.red,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Center(
+                        child: Text(
+                          'SOS',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w900,
+                            color: Colors.white,
+                            letterSpacing: 0.3,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: _startSessionFromCaregiverView,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _accentGold,
+                      foregroundColor: Colors.black,
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                      textStyle: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    child: const Text('Start session'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1906,7 +4358,7 @@ class _ActivityBookingDetailsScreenState
         body: Center(child: Text(_error!)),
       );
     }
-    if (_notFound || _booking == null) {
+    if (!_isPreviewMode && (_notFound || _booking == null)) {
       return Scaffold(
         appBar: buildProfileStyleAppBar(
           title: 'Booking Details',
@@ -1916,45 +4368,55 @@ class _ActivityBookingDetailsScreenState
       );
     }
 
-    final booking = _booking!;
+    final booking = _booking ?? const <String, dynamic>{};
+    final isCaregiverView = widget.caregiverView;
     final caregiverName =
-        (booking['caregiverName'] as String?) ??
-        (_caregiverData?['name'] as String?) ??
+        normalizeString(booking['caregiverName']) ??
+        normalizeString(_caregiverData?['name']) ??
         'Caregiver';
     final caregiverPhoto =
-        (_caregiverData?['photoUrl'] as String?) ?? _defaultAvatarUrl;
-    final rawServiceLabel = extractServiceLabelFromFirestore(booking);
+        (normalizeString(_caregiverData?['photoUrl'])?.trim().isNotEmpty == true
+            ? normalizeString(_caregiverData?['photoUrl'])!.trim()
+            : (normalizeString(_caregiverData?['imageUrl'])?.trim().isNotEmpty ==
+                      true
+                  ? normalizeString(_caregiverData?['imageUrl'])!.trim()
+                  : _defaultAvatarUrl));
+    final rawServiceLabel =
+        _booking == null ? '' : extractServiceLabelFromFirestore(booking);
     final service = rawServiceLabel.isNotEmpty ? rawServiceLabel : 'Home care';
     // Keep booking status available for downstream sections if needed later.
     // (No longer shown in the header card.)
-    final caregiverId = (booking['caregiverId'] as String?) ?? '';
+    final caregiverId =
+        normalizeString(booking['caregiverId']) ??
+        (widget.caregiverId?.trim() ?? '');
     final caregiverDefaultAddress =
         normalizeString(_caregiverData?['defaultAddress']) ??
         normalizeString(_caregiverData?['address']) ??
         normalizeString(_caregiverData?['area']) ??
         'Location not provided';
 
-    final documentsStream = caregiverId.isNotEmpty
+    final documentsStream = (!isCaregiverView && caregiverId.isNotEmpty)
         ? FirebaseFirestore.instance
               .collection('documents')
               .where('caregiverId', isEqualTo: caregiverId)
               .snapshots()
         : const Stream<QuerySnapshot<Map<String, dynamic>>>.empty();
-    final reviewsCountStream = caregiverId.isNotEmpty
+    final reviewsCountStream = (!isCaregiverView && caregiverId.isNotEmpty)
         ? FirebaseFirestore.instance
               .collection('reviews')
               .where('caregiverId', isEqualTo: caregiverId)
               .snapshots()
               .map((snap) => snap.docs.length)
         : Stream<int>.value(0);
-    final verifiedDocsCountStream = caregiverId.isNotEmpty
-        ? documentsStream.map(
-            (snap) => snap.docs
-                .where((d) => (d.data()['status'] as bool?) == true)
-                .length,
-          )
-        : Stream<int>.value(0);
-    final clientsCountStream = caregiverId.isNotEmpty
+    final verifiedDocsCountStream =
+        (!isCaregiverView && caregiverId.isNotEmpty)
+            ? documentsStream.map(
+                (snap) => snap.docs
+                    .where((d) => (d.data()['status'] as bool?) == true)
+                    .length,
+              )
+            : Stream<int>.value(0);
+    final clientsCountStream = (!isCaregiverView && caregiverId.isNotEmpty)
         ? FirebaseFirestore.instance
               .collection('bookings')
               .where('caregiverId', isEqualTo: caregiverId)
@@ -1963,12 +4425,38 @@ class _ActivityBookingDetailsScreenState
               .map((snap) => snap.docs.length)
         : Stream<int>.value(0);
 
-    final tabLabels = <String>[
-      'Caregiver details',
-      if (!widget.hideBookingDetailsTab) 'Booking details',
-      'Schedule',
-      'Reviews',
-    ];
+    final hasBookingTab = !_isPreviewMode && !widget.hideBookingDetailsTab;
+    final showScheduleTab = _isPreviewMode && !isCaregiverView;
+
+    late final List<String> tabLabels;
+    late final int bookingDetailsTabIndex;
+    late final int scheduleTabIndex;
+    late final int reviewsTabIndex;
+    late final int emergencyTabIndex;
+
+    if (isCaregiverView) {
+      tabLabels = <String>[
+        'Client details',
+        'Emergency contact',
+        'Booking details',
+      ];
+      bookingDetailsTabIndex = 2;
+      scheduleTabIndex = -1;
+      reviewsTabIndex = -1;
+      emergencyTabIndex = 1;
+    } else {
+      tabLabels = <String>[
+        'Caregiver details',
+        if (hasBookingTab) 'Booking details',
+        if (showScheduleTab) 'Schedule',
+        'Reviews',
+      ];
+      bookingDetailsTabIndex = hasBookingTab ? 1 : -1;
+      scheduleTabIndex = showScheduleTab ? (hasBookingTab ? 2 : 1) : -1;
+      reviewsTabIndex =
+          hasBookingTab ? (showScheduleTab ? 3 : 2) : (showScheduleTab ? 2 : 1);
+      emergencyTabIndex = -1;
+    }
 
     final selectedIndex = _selectedTabIndex
         .clamp(0, tabLabels.length - 1)
@@ -1976,85 +4464,144 @@ class _ActivityBookingDetailsScreenState
 
     Widget selectedTabContent() {
       final index = selectedIndex;
-      final hasBookingTab = !widget.hideBookingDetailsTab;
-      if (index == 0) {
+      if (isCaregiverView && index == 0) {
+        return _buildClientDetailsTabForCaregiver();
+      }
+      if (isCaregiverView && index == emergencyTabIndex) {
+        return _buildEmergencyContactsTab();
+      }
+      if (!isCaregiverView && index == 0) {
         return _buildCaregiverDetailsTab(
           caregiver: _caregiverData,
           documentsStream: documentsStream,
         );
       }
-      if (hasBookingTab && index == 1) {
+      if (hasBookingTab && index == bookingDetailsTabIndex) {
         return _buildBookingDetailsTab();
       }
-      final scheduleIndex = hasBookingTab ? 2 : 1;
-      final reviewsIndex = hasBookingTab ? 3 : 2;
-      if (index == scheduleIndex) {
+      if (scheduleTabIndex >= 0 && index == scheduleTabIndex) {
         return _buildScheduleTab(booking);
       }
-      if (index == reviewsIndex) {
+      if (reviewsTabIndex >= 0 && index == reviewsTabIndex) {
         return _buildReviewsTab(caregiverId);
       }
       return const SizedBox.shrink();
     }
 
-    final coverPhoto = caregiverPhoto.trim().isNotEmpty
-        ? caregiverPhoto.trim()
-        : _defaultAvatarUrl;
+    final clientPhoto =
+        (normalizeString(_userData?['photoUrl'])?.trim().isNotEmpty == true
+            ? normalizeString(_userData?['photoUrl'])!.trim()
+            : (normalizeString(_userData?['imageUrl'])?.trim().isNotEmpty == true
+                  ? normalizeString(_userData?['imageUrl'])!.trim()
+                  : _defaultAvatarUrl));
+
+    final personDisplay = _resolvePersonDisplay(booking);
+    final clientName =
+        normalizeString(_userData?['name']) ??
+        normalizeString(booking['userName']) ??
+        'Client';
+
+    final headerName = isCaregiverView ? clientName : caregiverName;
+    final headerPhoto = isCaregiverView ? clientPhoto : caregiverPhoto;
+    final headerAddress =
+        isCaregiverView ? personDisplay.address : caregiverDefaultAddress;
+
+    final coverPhoto =
+        headerPhoto.trim().isNotEmpty ? headerPhoto.trim() : _defaultAvatarUrl;
 
     const double headerCardOverlap = 96;
-    final headerWithMetrics = StreamBuilder<int>(
-      stream: clientsCountStream,
-      builder: (context, clientsSnap) {
-        final clientsCount = clientsSnap.data ?? 0;
-        return StreamBuilder<int>(
-          stream: verifiedDocsCountStream,
-          builder: (context, docsSnap) {
-            final verifiedDocs = docsSnap.data ?? 0;
-            return StreamBuilder<int>(
-              stream: reviewsCountStream,
-              builder: (context, reviewsSnap) {
-                final reviewsCount = reviewsSnap.data ?? 0;
-                return SizedBox(
-                  height: 220 + headerCardOverlap,
-                  child: Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                      const Positioned(
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        child: SizedBox(height: 220),
+    final headerWithMetrics =
+        isCaregiverView
+            ? SizedBox(
+                height: 220 + headerCardOverlap,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    const Positioned(
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      child: SizedBox(height: 220),
+                    ),
+                    Positioned(
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      child: _buildHeroCover(coverPhoto),
+                    ),
+                    Positioned(
+                      left: 16,
+                      right: 16,
+                      bottom: 0,
+                      child: _buildHeaderCard(
+                        name: headerName,
+                        serviceLabel: service,
+                        servicePreferences: const [],
+                        defaultAddress: headerAddress,
+                        clientsCount: 0,
+                        verifiedDocsCount: 0,
+                        reviewsCount: 0,
+                        photoUrl: headerPhoto,
+                        hideMetrics: true,
+                        showServiceSubtitle: true,
                       ),
-                      Positioned(
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        child: _buildHeroCover(coverPhoto),
-                      ),
-                      Positioned(
-                        left: 16,
-                        right: 16,
-                        bottom: 0,
-                        child: _buildHeaderCard(
-                          name: caregiverName,
-                          serviceLabel: service,
-                          servicePreferences: const [],
-                          defaultAddress: caregiverDefaultAddress,
-                          clientsCount: clientsCount,
-                          verifiedDocsCount: verifiedDocs,
-                          reviewsCount: reviewsCount,
-                          photoUrl: caregiverPhoto,
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            );
-          },
-        );
-      },
-    );
+                    ),
+                  ],
+                ),
+              )
+            : StreamBuilder<int>(
+                stream: clientsCountStream,
+                builder: (context, clientsSnap) {
+                  final clientsCount = clientsSnap.data ?? 0;
+                  return StreamBuilder<int>(
+                    stream: verifiedDocsCountStream,
+                    builder: (context, docsSnap) {
+                      final verifiedDocs = docsSnap.data ?? 0;
+                      return StreamBuilder<int>(
+                        stream: reviewsCountStream,
+                        builder: (context, reviewsSnap) {
+                          final reviewsCount = reviewsSnap.data ?? 0;
+                          return SizedBox(
+                            height: 220 + headerCardOverlap,
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                const Positioned(
+                                  top: 0,
+                                  left: 0,
+                                  right: 0,
+                                  child: SizedBox(height: 220),
+                                ),
+                                Positioned(
+                                  top: 0,
+                                  left: 0,
+                                  right: 0,
+                                  child: _buildHeroCover(coverPhoto),
+                                ),
+                                Positioned(
+                                  left: 16,
+                                  right: 16,
+                                  bottom: 0,
+                                  child: _buildHeaderCard(
+                                    name: caregiverName,
+                                    serviceLabel: service,
+                                    servicePreferences: const [],
+                                    defaultAddress: caregiverDefaultAddress,
+                                    clientsCount: clientsCount,
+                                    verifiedDocsCount: verifiedDocs,
+                                    reviewsCount: reviewsCount,
+                                    photoUrl: caregiverPhoto,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  );
+                },
+              );
     _scheduleAutoSheetExtentUpdate();
 
     final tabSelector = _buildOtherInfoTabs(
@@ -2067,11 +4614,57 @@ class _ActivityBookingDetailsScreenState
         _autoInitialSheetExtent ?? _sheetFallbackInitialExtentRaw;
     const double sheetMaxExtentRaw = _sheetMaxExtentRaw;
 
-    final sheetInitialExtent = sheetInitialExtentRaw.clamp(0.0, 1.0);
-    final sheetMinExtent = sheetInitialExtent;
+    final sheetInitialExtent = sheetInitialExtentRaw.clamp(
+      _sheetDefaultMinExtentRaw,
+      _sheetDefaultMaxInitialExtentRaw,
+    );
     final sheetMaxExtent = math
         .max(sheetMaxExtentRaw.clamp(0.0, 1.0), sheetInitialExtent)
         .clamp(sheetInitialExtent, 1.0);
+
+    final sheetMinExtent = (_isPreviewMode && _canBookFromSchedule)
+        ? math.min(sheetInitialExtent, 0.62)
+        : sheetInitialExtent;
+
+    final previewDenom = (sheetMaxExtent - sheetMinExtent);
+    final effectivePanelT = previewDenom <= 0
+        ? 0.0
+        : (_panelSeeded
+                ? _panelController.value
+                : ((sheetInitialExtent - sheetMinExtent) / previewDenom))
+            .clamp(0.0, 1.0);
+    final effectiveSheetExtent =
+        sheetMinExtent + (previewDenom * effectivePanelT);
+    final showPreviewCta = _canBookFromSchedule;
+    final previewT = previewDenom <= 0
+        ? 0.0
+        : ((effectiveSheetExtent - sheetMinExtent) / previewDenom)
+            .clamp(0.0, 1.0);
+    final hidePreviewCta = showPreviewCta && previewT > 0.55;
+    final showTrackFrontSheet =
+        widget.showTrackFrontSheet &&
+        !isCaregiverView &&
+        !_isPreviewMode &&
+        _showTrackButton &&
+        caregiverId.trim().isNotEmpty;
+    final hideTrackFrontSheet = showTrackFrontSheet && previewT > 0.55;
+    final showCaregiverFrontSheet = isCaregiverView && !_isPreviewMode;
+    final hideCaregiverFrontSheet = showCaregiverFrontSheet && previewT > 0.55;
+    final String? distance = null;
+    final String? eta = null;
+    final bottomInset = MediaQuery.of(context).padding.bottom;
+    final double previewFrontBottom = hidePreviewCta
+        ? -110.0
+        : (bottomInset + 2).clamp(4.0, double.infinity).toDouble();
+    final double trackFrontBottom = hideTrackFrontSheet
+        ? -110.0
+        : (bottomInset + 2).clamp(4.0, double.infinity).toDouble();
+    final double caregiverFrontBottom = hideCaregiverFrontSheet
+        ? -140.0
+        : (bottomInset + 2).clamp(4.0, double.infinity).toDouble();
+    final panelBackdropAlpha = (lerpDouble(0.0, 0.08, effectivePanelT) ?? 0.0)
+        .clamp(0.0, 0.12)
+        .toDouble();
 
     final content = Stack(
       children: [
@@ -2080,91 +4673,240 @@ class _ActivityBookingDetailsScreenState
           physics: const NeverScrollableScrollPhysics(),
           children: [KeyedSubtree(key: _metricsKey, child: headerWithMetrics)],
         ),
-        DraggableScrollableSheet(
-          initialChildSize: sheetInitialExtent,
-          minChildSize: sheetMinExtent,
-          maxChildSize: sheetMaxExtent,
-          builder: (context, scrollController) {
-            final extentBase = _currentSheetExtent == 0.0
-                ? sheetInitialExtent
-                : _currentSheetExtent;
-            final t =
-                ((extentBase - sheetInitialExtent) / (1 - sheetInitialExtent))
+        if (panelBackdropAlpha > 0.001)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 120),
+                curve: Curves.easeOut,
+                color: Colors.black.withValues(alpha: panelBackdropAlpha),
+              ),
+            ),
+          ),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final screenHeight = constraints.maxHeight;
+            _panelMinExtent = sheetMinExtent;
+            _panelMaxExtent = sheetMaxExtent;
+            final denom = (sheetMaxExtent - sheetMinExtent);
+            final desiredInitialT = denom <= 0
+                ? 0.0
+                : ((sheetInitialExtent - sheetMinExtent) / denom)
                     .clamp(0.0, 1.0);
-            final showAppBar = extentBase >= 0.96;
-            final collapsedSpacing = 0.0;
-            final interpolatedSpacing =
-                lerpDouble(collapsedSpacing, 15.0, t) ?? 0.0;
-            final topSpacing = showAppBar
-                ? (kToolbarHeight + 8.0)
-                : interpolatedSpacing;
+            if (!_panelSeeded ||
+                (!_panelUserInteracted &&
+                    (_panelController.value - desiredInitialT).abs() > 0.001)) {
+              _panelSeeded = true;
+              _pendingPanelSeedValue = desiredInitialT;
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted) return;
+                if (_panelUserInteracted) return;
+                final seed = _pendingPanelSeedValue;
+                if (seed == null) return;
+                _panelController.value = seed;
+              });
+            }
 
-            return NotificationListener<DraggableScrollableNotification>(
-              onNotification: (notification) {
-                _onSheetExtentChanged(notification.extent);
-                return false;
-              },
-              child: Container(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(28),
-                  ),
+            final extentBase =
+                sheetMinExtent + (denom * _panelController.value);
+            final t = denom <= 0 ? 0.0 : _panelController.value;
+            final appBarT =
+                ((extentBase - 0.90) / 0.10).clamp(0.0, 1.0).toDouble();
+            final topChromeInset = (lerpDouble(0, kToolbarHeight + 6.0, appBarT) ??
+                    0.0)
+                .clamp(0.0, double.infinity);
+            final previewVisible = showPreviewCta && !hidePreviewCta;
+            final trackVisible = showTrackFrontSheet && !hideTrackFrontSheet;
+            final caregiverVisible =
+                showCaregiverFrontSheet && !hideCaregiverFrontSheet;
+            final bottomCtaPadding = (previewVisible || trackVisible)
+                ? 172.0
+                : (caregiverVisible ? 212.0 : 0.0);
+
+            final panelHeight =
+                (extentBase * screenHeight).clamp(0.0, screenHeight).toDouble();
+            final dragRangePx =
+                (denom.abs() * screenHeight).clamp(1.0, double.infinity).toDouble();
+
+            return Align(
+              alignment: Alignment.bottomCenter,
+              child: SizedBox(
+                width: double.infinity,
+                height: panelHeight,
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(28),
+                    ),
                   border: Border.all(
-                    color: Colors.black.withValues(alpha: 0.06),
+                    color: Colors.black.withValues(
+                      alpha: (lerpDouble(0.05, 0.07, t) ?? 0.06)
+                          .clamp(0.0, 1.0),
+                    ),
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.14),
-                      blurRadius: 22,
-                      offset: const Offset(0, -8),
+                      color: Colors.black.withValues(
+                        alpha: (lerpDouble(0.14, 0.22, t) ?? 0.14)
+                            .clamp(0.0, 1.0),
+                      ),
+                      blurRadius: (lerpDouble(18, 26, t) ?? 22)
+                          .clamp(0.0, double.infinity),
+                      offset: Offset(
+                        0,
+                        -((lerpDouble(6, 10, t) ?? 8)
+                            .clamp(0.0, double.infinity)),
+                      ),
                     ),
                   ],
                 ),
-                child: ScrollConfiguration(
-                  behavior: const _NoOverscrollScrollBehavior(),
-                  child: ListView(
-                    controller: scrollController,
-                    padding: EdgeInsets.zero,
-                    physics: const ClampingScrollPhysics(),
+                  child: Column(
                     children: [
-                      SizedBox(height: topSpacing),
-                      Center(
-                        child: Container(
-                          width: 44,
-                          height: 5,
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.18),
-                            borderRadius: BorderRadius.circular(999),
+                      SizedBox(height: topChromeInset),
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        dragStartBehavior: DragStartBehavior.down,
+                        onVerticalDragUpdate:
+                            (details) => _onPanelHandleDragUpdate(
+                              details.delta.dy,
+                              dragRangePx,
+                            ),
+                        onVerticalDragEnd: (details) => _onPanelHandleDragEnd(
+                          details.primaryVelocity ?? 0,
+                        ),
+                        onVerticalDragCancel: () => _onPanelHandleDragEnd(0),
+                        child: SizedBox(
+                          height: 44,
+                          width: double.infinity,
+                          child: Center(
+                            child: Container(
+                              width: 44,
+                              height: 5,
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.18),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                            ),
                           ),
                         ),
                       ),
-                      const SizedBox(height: 10),
-                      tabSelector,
-                      Divider(
-                        height: 10,
-                        thickness: 2,
-                        color: Colors.black.withValues(alpha: 0.12),
-                      ),
-                      const SizedBox(height: 6),
-                      FadeTransition(
-                        opacity: _tabFade,
-                        child: SlideTransition(
-                          position: _tabSlide,
-                          child: Padding(
-                            padding: const EdgeInsets.fromLTRB(0, 2, 0, 12),
-                            child: selectedTabContent(),
-                          ),
+                    Divider(
+                      height: 1,
+                      color: Colors.black.withValues(alpha: 0.06),
+                    ),
+                    const SizedBox(height: 10),
+                    tabSelector,
+                    Divider(
+                      height: 10,
+                      thickness: 2,
+                      color: Colors.black.withValues(alpha: 0.12),
+                    ),
+                    const SizedBox(height: 6),
+                    Expanded(
+                      child: ScrollConfiguration(
+                        behavior: const _NoOverscrollScrollBehavior(),
+                        child: ListView(
+                          controller: _panelScrollController,
+                          padding: EdgeInsets.only(bottom: bottomCtaPadding),
+                          physics: const ClampingScrollPhysics(),
+                          children: [
+                            FadeTransition(
+                              opacity: _tabFade,
+                              child: SlideTransition(
+                                position: _tabSlide,
+                                child: Padding(
+                                  padding: const EdgeInsets.fromLTRB(0, 2, 0, 12),
+                                  child: selectedTabContent(),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
+                ),
                 ),
               ),
             );
           },
         ),
+        if (showTrackFrontSheet)
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 240),
+            curve: Curves.easeOut,
+            left: 8,
+            right: 8,
+            bottom: trackFrontBottom,
+            child: IgnorePointer(
+              ignoring: hideTrackFrontSheet,
+              child: Container(
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: Colors.black12.withValues(alpha: 0.08),
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: _trackFrontSheet(
+                  caregiverName: caregiverName,
+                  caregiverPhotoUrl: caregiverPhoto,
+                  serviceLabel: service,
+                  metaLine: [
+                    if (distance?.trim().isNotEmpty == true) distance!.trim(),
+                    if (eta?.trim().isNotEmpty == true) eta!.trim(),
+                  ].join(' • '),
+                ),
+              ),
+            ),
+          ),
+        if (showCaregiverFrontSheet)
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 240),
+            curve: Curves.easeOut,
+            left: 8,
+            right: 8,
+            bottom: caregiverFrontBottom,
+            child: IgnorePointer(
+              ignoring: hideCaregiverFrontSheet,
+              child: Container(
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: Colors.black12.withValues(alpha: 0.08),
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: _caregiverSessionStartFrontSheet(
+                  personPhotoUrl: personDisplay.photoUrl,
+                  personName: personDisplay.name,
+                  personLabel: personDisplay.label,
+                  personAddress: personDisplay.address,
+                  serviceLabel: service,
+                ),
+              ),
+            ),
+          ),
+        if (showPreviewCta)
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 240),
+            curve: Curves.easeOut,
+            left: 8,
+            right: 8,
+            bottom: previewFrontBottom,
+            child: IgnorePointer(
+              ignoring: hidePreviewCta,
+              child: Container(
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: Colors.black12.withValues(alpha: 0.08),
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: _previewFrontSheet(),
+              ),
+            ),
+          ),
       ],
     );
 
@@ -2172,7 +4914,7 @@ class _ActivityBookingDetailsScreenState
       backgroundColor: _screenBackground,
       extendBodyBehindAppBar: true,
       appBar: buildProfileStyleAppBar(
-        title: 'Booking details',
+        title: _isPreviewMode ? 'Caregiver Details' : 'Booking details',
         onBack: () => Navigator.of(context).pop(),
       ),
       body: FadeTransition(

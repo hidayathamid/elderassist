@@ -61,7 +61,19 @@ Future<void> main() async {
   // ?? ENSURE USER IS AUTHENTICATED
   // ========================================
   final auth = FirebaseAuth.instance;
-  if (auth.currentUser == null) {
+  // On app start / hot restart FirebaseAuth may take a moment to restore the
+  // persisted session. Avoid signing in anonymously too early (which would
+  // replace an existing caregiver/user session).
+  User? initialUser;
+  try {
+    initialUser = await auth.authStateChanges().first.timeout(
+      const Duration(seconds: 2),
+      onTimeout: () => auth.currentUser,
+    );
+  } catch (_) {
+    initialUser = auth.currentUser;
+  }
+  if (initialUser == null) {
     try {
       await auth.signInAnonymously();
     } on FirebaseAuthException catch (err) {

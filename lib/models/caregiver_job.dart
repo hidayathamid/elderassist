@@ -18,6 +18,9 @@ class CaregiverJob {
     required this.service,
     required this.personAge,
     required this.time,
+    this.startTime = '',
+    this.endTime = '',
+    this.personPhotoUrl = '',
     required this.personLabel,
     required this.personAddress,
     required this.cancellationReason,
@@ -36,6 +39,9 @@ class CaregiverJob {
   final String service;
   final String personAge;
   final String time;
+  final String startTime;
+  final String endTime;
+  final String personPhotoUrl;
   final String personLabel;
   final String personAddress;
   final String cancellationReason;
@@ -83,6 +89,14 @@ class CaregiverJob {
       service: serviceLabel.isNotEmpty ? serviceLabel : 'Home care',
       personAge: parseAge(),
       time: (data['time'] as String?) ?? '',
+      startTime: (data['startTime'] as String?) ?? '',
+      endTime: (data['endTime'] as String?) ?? '',
+      personPhotoUrl:
+          (data['personPhotoUrl'] as String?) ??
+          (data['personPhoto'] as String?) ??
+          (data['personAvatarUrl'] as String?) ??
+          (data['personImageUrl'] as String?) ??
+          '',
       personLabel: (data['personLabel'] as String?) ?? '',
       personAddress:
           (data['personAddress'] as String?) ??
@@ -122,6 +136,40 @@ String? resolvePersonLabel(Map<String, dynamic>? data, CaregiverJob job) {
   return rawLabel?.trim().isNotEmpty == true ? rawLabel!.trim() : null;
 }
 
+String? resolvePersonName(Map<String, dynamic>? data, CaregiverJob job) {
+  final match = _findAddressEntry(data, job);
+  final rawName =
+      _stringValue(match?['forWho']) ??
+      _stringValue(match?['name']) ??
+      _stringValue(match?['title']) ??
+      _stringValue(match?['label']);
+  return rawName?.trim().isNotEmpty == true ? rawName!.trim() : null;
+}
+
+String? resolvePersonAddress(Map<String, dynamic>? data, CaregiverJob job) {
+  final match = _findAddressEntry(data, job);
+  final raw =
+      _stringValue(match?['addressLine']) ??
+      _stringValue(match?['address']) ??
+      _stringValue(match?['subtitle']) ??
+      _stringValue(match?['description']);
+  return raw?.trim().isNotEmpty == true ? raw!.trim() : null;
+}
+
+String? resolvePersonPhotoUrl(Map<String, dynamic>? data, CaregiverJob job) {
+  final fromBooking = job.personPhotoUrl.trim();
+  if (fromBooking.isNotEmpty) return fromBooking;
+
+  final match = _findAddressEntry(data, job);
+  final raw =
+      _stringValue(match?['photoUrl']) ??
+      _stringValue(match?['avatarUrl']) ??
+      _stringValue(match?['imageUrl']) ??
+      _stringValue(match?['photo']) ??
+      _stringValue(match?['image']);
+  return raw?.trim().isNotEmpty == true ? raw!.trim() : null;
+}
+
 Map<String, dynamic>? _findAddressEntry(
   Map<String, dynamic>? data,
   CaregiverJob job,
@@ -141,6 +189,43 @@ Map<String, dynamic>? _findAddressEntry(
       return entry;
     }
   }
+
+  String normalize(String value) =>
+      value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
+  final jobAddress = normalize(job.personAddress.isNotEmpty ? job.personAddress : job.location);
+  final jobPersonName = normalize(job.personName);
+
+  if (jobAddress.isNotEmpty) {
+    for (final entry in entries) {
+      final entryAddress = normalize(
+        _stringValue(entry['addressLine']) ??
+            _stringValue(entry['address']) ??
+            _stringValue(entry['subtitle']) ??
+            _stringValue(entry['description']) ??
+            '',
+      );
+      if (entryAddress.isNotEmpty && entryAddress == jobAddress) {
+        return entry;
+      }
+    }
+  }
+
+  if (jobPersonName.isNotEmpty) {
+    for (final entry in entries) {
+      final entryName = normalize(
+        _stringValue(entry['forWho']) ??
+            _stringValue(entry['name']) ??
+            _stringValue(entry['title']) ??
+            _stringValue(entry['label']) ??
+            '',
+      );
+      if (entryName.isNotEmpty && entryName == jobPersonName) {
+        return entry;
+      }
+    }
+  }
+
   return null;
 }
 

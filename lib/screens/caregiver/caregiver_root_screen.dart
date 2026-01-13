@@ -10,7 +10,7 @@ import 'chat/caregiver_chat_list_screen.dart';
 import 'home/caregiver_home_screen.dart';
 import 'jobs/caregiver_jobs_screen.dart';
 import 'profile/caregiver_profile_screen.dart';
-import 'sos/caregiver_sos_alerts_screen.dart';
+import 'sos/caregiver_sos_root_screen.dart';
 
 const Color _caregiverNavActiveBlue = Color(0xFF00A8A7);
 const Color _caregiverChatBadgeColor = Color(0xFF00A8A7);
@@ -41,7 +41,7 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
     _pages = [
       CaregiverHomeScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 0),
       CaregiverJobsScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 1),
-      const CaregiverSOSAlertsScreen(),
+      CaregiverSosRootScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 2),
       CaregiverChatListScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 3),
       CaregiverProfileScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 4),
     ];

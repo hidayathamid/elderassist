@@ -7,7 +7,6 @@ import 'package:flutter/material.dart';
 
 import '../../../services/auth_service.dart';
 import '../../../services/chat_service.dart';
-import '../chat/user_chat_list_screen.dart';
 import '../chat/user_chat_screen.dart';
 
 import 'activity_booking_details_screen.dart';
@@ -24,6 +23,7 @@ import 'package:emergencies_disability_assistance_app/models/payment_document_ta
 import 'package:intl/intl.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 
+import '../../../utils/booking_due_status.dart';
 import '../../../utils/service_preferences.dart';
 
 const Color activityBackgroundColor = Color(0xFFF7F8FA);
@@ -92,7 +92,6 @@ class _ActivityScreenState extends State<ActivityScreen>
   late final Animation<Offset> _reasonSheetOffset;
   List<_EnrichedBooking>? _cachedEnriched;
   final Set<String> _hiddenHistoryBookings = <String>{};
-  final ChatService _chatService = ChatService();
   final FirebaseFunctions _functions = FirebaseFunctions.instanceFor(
     region: 'asia-southeast1',
   );
@@ -332,20 +331,10 @@ class _ActivityScreenState extends State<ActivityScreen>
     );
   }
 
-  void _navigateToChatList() {
-    if (!mounted) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => const UserChatListScreen(
-          showBackButton: true,
-          showPersonChats: false,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildList(List<_EnrichedBooking> list) {
+  Widget _buildList(
+    List<_EnrichedBooking> list, {
+    required bool showTrackFrontSheetOnDetails,
+  }) {
     if (list.isEmpty) {
       return const Center(child: Text('No items'));
     }
@@ -362,6 +351,7 @@ class _ActivityScreenState extends State<ActivityScreen>
           caregiverData: entry.caregiverData,
           userData: entry.userData,
           hasReview: entry.hasReview,
+          showTrackFrontSheetOnDetails: showTrackFrontSheetOnDetails,
         );
         if (!cancellable) return card;
         return Padding(
@@ -703,6 +693,7 @@ class _ActivityScreenState extends State<ActivityScreen>
     String title,
     String subtitle, {
     required bool isHistory,
+    required bool showTrackFrontSheetOnDetails,
   }) {
     final visibleList = isHistory
         ? list
@@ -716,7 +707,10 @@ class _ActivityScreenState extends State<ActivityScreen>
         ? _buildEmptyState(icon, title, subtitle)
         : (isHistory
               ? _buildHistoryList(visibleList)
-              : _buildList(visibleList));
+              : _buildList(
+                  visibleList,
+                  showTrackFrontSheetOnDetails: showTrackFrontSheetOnDetails,
+                ));
 
     return body;
   }
@@ -748,17 +742,17 @@ class _ActivityScreenState extends State<ActivityScreen>
   }
 
   Widget _buildActivityContent(List<_EnrichedBooking> enriched) {
-    String normalizeStatus(String value) {
-      return value
-          .trim()
-          .toUpperCase()
-          .replaceAll(' ', '_')
-          .replaceAll('-', '_')
-          .replaceAll('__', '_');
+    String effectiveStatus(_EnrichedBooking entry) {
+      final date = entry.booking.scheduledDate.trim().isNotEmpty
+          ? entry.booking.scheduledDate
+          : entry.booking.date;
+      final time = entry.booking.startTime.trim().isNotEmpty
+          ? entry.booking.startTime
+          : entry.booking.time;
+      return deriveDueAwareStatus(status: entry.status, date: date, time: time);
     }
 
-    bool isScheduled(_EnrichedBooking entry) =>
-        normalizeStatus(entry.status) == 'SCHEDULED';
+    bool isScheduled(_EnrichedBooking entry) => effectiveStatus(entry) == 'SCHEDULED';
 
     bool isHistory(_EnrichedBooking entry) =>
         entry.booking.status == BookingStatus.completed ||
@@ -845,6 +839,7 @@ class _ActivityScreenState extends State<ActivityScreen>
                         'No active bookings yet',
                         'Assigned and ongoing bookings will appear here.',
                         isHistory: false,
+                        showTrackFrontSheetOnDetails: true,
                       ),
                       _buildTabContent(
                         upcoming,
@@ -852,6 +847,7 @@ class _ActivityScreenState extends State<ActivityScreen>
                         'No upcoming bookings yet',
                         'Schedule a caregiver to see it appear here.',
                         isHistory: false,
+                        showTrackFrontSheetOnDetails: false,
                       ),
                       _buildTabContent(
                         history,
@@ -859,6 +855,7 @@ class _ActivityScreenState extends State<ActivityScreen>
                         'No booking history yet',
                         'Completed bookings will show up here.',
                         isHistory: true,
+                        showTrackFrontSheetOnDetails: false,
                       ),
                     ],
                   ),
@@ -1327,12 +1324,14 @@ class ActivityBookingCard extends StatefulWidget {
     this.caregiverData,
     this.userData,
     this.hasReview = false,
+    this.showTrackFrontSheetOnDetails = false,
   });
 
   final ActivityBooking booking;
   final Map<String, dynamic>? caregiverData;
   final Map<String, dynamic>? userData;
   final bool hasReview;
+  final bool showTrackFrontSheetOnDetails;
 
   @override
   State<ActivityBookingCard> createState() => _ActivityBookingCardState();
@@ -1478,7 +1477,10 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
       context,
       MaterialPageRoute(
         builder: (_) =>
-            ActivityBookingDetailsScreen(bookingId: widget.booking.id),
+            ActivityBookingDetailsScreen(
+              bookingId: widget.booking.id,
+              showTrackFrontSheet: widget.showTrackFrontSheetOnDetails,
+            ),
       ),
     );
   }

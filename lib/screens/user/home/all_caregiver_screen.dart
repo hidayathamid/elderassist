@@ -8,7 +8,7 @@ import 'package:geolocator/geolocator.dart';
 
 import 'package:emergencies_disability_assistance_app/models/caregiver_model.dart';
 import 'package:emergencies_disability_assistance_app/models/recommendation_rules.dart';
-import 'package:emergencies_disability_assistance_app/screens/user/booking/booking_caregiver_screen.dart';
+import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_booking_details_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/booking/booking_person_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/profile/profile_addresses_screen.dart';
 import 'package:emergencies_disability_assistance_app/services/caregiver_service.dart';
@@ -69,6 +69,7 @@ class _AllCaregiverScreenState extends State<AllCaregiverScreen> {
   List<_HomeAddressItem> _homeAddresses = const [];
   int _selectedHomeAddressIndex = 0;
   String? _userPhoneNumber;
+  bool _modalSheetScrimVisible = false;
 
   StreamSubscription<List<CaregiverModel>>? _caregiverSub;
   List<CaregiverModel> _latestCaregivers = const [];
@@ -131,12 +132,38 @@ class _AllCaregiverScreenState extends State<AllCaregiverScreen> {
 
   List<Map<String, dynamic>> _extractAddressList(Map<String, dynamic>? data) {
     if (data == null) return const [];
-    final raw = data['addresses'];
-    if (raw is! List) return const [];
-    return raw
-        .whereType<Map>()
-        .map((e) => Map<String, dynamic>.from(e))
-        .toList();
+    final list = <Map<String, dynamic>>[];
+
+    final rawAddresses = data['addresses'];
+    if (rawAddresses is List) {
+      list.addAll(
+        rawAddresses.whereType<Map>().map((entry) => Map<String, dynamic>.from(entry)),
+      );
+    } else if (rawAddresses is Map) {
+      list.add(Map<String, dynamic>.from(rawAddresses));
+    }
+
+    final rawAddress = data['address'];
+    if (rawAddress is List) {
+      list.addAll(
+        rawAddress.whereType<Map>().map((entry) => Map<String, dynamic>.from(entry)),
+      );
+    } else if (rawAddress is Map) {
+      list.add(Map<String, dynamic>.from(rawAddress));
+    }
+
+    final rawPersonAddress = data['personAddress'];
+    if (rawPersonAddress is List) {
+      list.addAll(
+        rawPersonAddress
+            .whereType<Map>()
+            .map((entry) => Map<String, dynamic>.from(entry)),
+      );
+    } else if (rawPersonAddress is Map) {
+      list.add(Map<String, dynamic>.from(rawPersonAddress));
+    }
+
+    return list;
   }
 
   int _resolveSelectedIndex({
@@ -276,42 +303,47 @@ class _AllCaregiverScreenState extends State<AllCaregiverScreen> {
       return;
     }
 
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      barrierColor: Colors.transparent,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) {
-        return Material(
-          color: Colors.white,
-          shape: const RoundedRectangleBorder(
-            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: _HomeAddressPickerSheet(
-            items: _homeAddresses,
-            initialIndex: _selectedHomeAddressIndex,
-            phoneNumber: _userPhoneNumber ?? '',
-            onIndexChanged: (index) {
-              if (!mounted) return;
-              final item = _homeAddresses[index];
-              setState(() {
-                _selectedHomeAddressIndex = index;
-                if (item.lat != null && item.lng != null) {
-                  _originLat = item.lat;
-                  _originLng = item.lng;
-                }
-              });
-            },
-            onEditPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const ProfileAddressesScreen()),
-              );
-            },
-          ),
-        );
-      },
-    );
+    setState(() => _modalSheetScrimVisible = true);
+    try {
+      await showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        barrierColor: Colors.transparent,
+        backgroundColor: Colors.transparent,
+        builder: (ctx) {
+          return Material(
+            color: Colors.white,
+            shape: const RoundedRectangleBorder(
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: _HomeAddressPickerSheet(
+              items: _homeAddresses,
+              initialIndex: _selectedHomeAddressIndex,
+              phoneNumber: _userPhoneNumber ?? '',
+              onIndexChanged: (index) {
+                if (!mounted) return;
+                final item = _homeAddresses[index];
+                setState(() {
+                  _selectedHomeAddressIndex = index;
+                  if (item.lat != null && item.lng != null) {
+                    _originLat = item.lat;
+                    _originLng = item.lng;
+                  }
+                });
+              },
+              onEditPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const ProfileAddressesScreen()),
+                );
+              },
+            ),
+          );
+        },
+      );
+    } finally {
+      if (mounted) setState(() => _modalSheetScrimVisible = false);
+    }
   }
 
   void _listenForRecommendationRules() {
@@ -577,7 +609,7 @@ class _AllCaregiverScreenState extends State<AllCaregiverScreen> {
     }).toList(growable: false);
   }
 
-  void _openBookingFromBrowse() {
+  void _openCaregiverDetailsFromBrowse(_CaregiverCardData caregiver) {
     final ctx = _selectedBookingContext();
     if (ctx == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -587,189 +619,239 @@ class _AllCaregiverScreenState extends State<AllCaregiverScreen> {
     }
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => BookingCaregiverScreen(
+        builder: (_) => ActivityBookingDetailsScreen(
+          bookingId: '',
+          hideBookingDetailsTab: true,
+          caregiverId: caregiver.id,
           person: ctx.person,
           selectedAddress: ctx.address,
+          initialTabIndex: 1,
         ),
       ),
     );
+  }
+
+  Map<String, dynamic>? _buildSelectedAddressResult() {
+    if (_homeAddresses.isEmpty) return null;
+    final index = _selectedHomeAddressIndex.clamp(0, _homeAddresses.length - 1);
+    final item = _homeAddresses[index];
+    return <String, dynamic>{
+      'address': item.address,
+      'lat': item.lat,
+      'lng': item.lng,
+      'name': item.name,
+      'label': item.label,
+      'photoUrl': item.photoUrl,
+      'isUser': item.isUser,
+      'index': index,
+    };
+  }
+
+  void _closeWithSelection() {
+    final result = _buildSelectedAddressResult();
+    if (!Navigator.of(context).canPop()) return;
+    Navigator.of(context).pop(result);
   }
 
   @override
   Widget build(BuildContext context) {
     final items = _buildCategoryList();
     final bottomInset = MediaQuery.of(context).padding.bottom;
-    return Scaffold(
-      backgroundColor: _pageBackground,
-      appBar: buildProfileStyleAppBar(
-        title: 'All caregivers',
-        onBack: () => Navigator.of(context).maybePop(),
-      ),
-      body: Stack(
-        children: [
-          SafeArea(
-            child: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(18),
-                          border: Border.all(
-                            color: Colors.black12.withValues(alpha: 0.08),
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.08),
-                              blurRadius: 18,
-                              offset: const Offset(0, 10),
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _closeWithSelection();
+      },
+      child: Scaffold(
+        backgroundColor: _pageBackground,
+        appBar: buildProfileStyleAppBar(
+          title: 'All caregivers',
+          onBack: _closeWithSelection,
+        ),
+        body: Stack(
+          children: [
+            SafeArea(
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: Colors.black12.withValues(alpha: 0.08),
                             ),
-                          ],
-                        ),
-                        child: TextField(
-                          controller: _searchController,
-                          textInputAction: TextInputAction.search,
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: _primaryText,
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.08),
+                                blurRadius: 18,
+                                offset: const Offset(0, 10),
+                              ),
+                            ],
                           ),
-                          decoration: const InputDecoration(
-                            hintText: 'Search caregiver',
-                            hintStyle: TextStyle(
+                          child: TextField(
+                            controller: _searchController,
+                            textInputAction: TextInputAction.search,
+                            style: const TextStyle(
                               fontSize: 13,
                               fontWeight: FontWeight.w600,
-                              color: Colors.black45,
+                              color: _primaryText,
                             ),
-                            prefixIcon: Icon(Icons.search_rounded, size: 20),
-                            border: InputBorder.none,
-                            contentPadding: EdgeInsets.symmetric(
-                              horizontal: 14,
-                              vertical: 12,
+                            decoration: const InputDecoration(
+                              hintText: 'Search caregiver',
+                              hintStyle: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.black45,
+                              ),
+                              prefixIcon: Icon(Icons.search_rounded, size: 20),
+                              border: InputBorder.none,
+                              contentPadding: EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                      const SizedBox(height: 10),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: SizedBox(
-                          height: 34,
-                          child: SingleChildScrollView(
-                            scrollDirection: Axis.horizontal,
+                        const SizedBox(height: 10),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: SizedBox(
+                            height: 34,
+                            child: SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              physics: const BouncingScrollPhysics(),
+                              child: Row(
+                                children: [
+                                  _CategoryChip(
+                                    label: 'All',
+                                    selected: _category == AllCaregiverCategory.all,
+                                    onTap: () => setState(
+                                      () => _category = AllCaregiverCategory.all,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  _CategoryChip(
+                                    label: 'Nearby',
+                                    selected: _category == AllCaregiverCategory.nearby,
+                                    onTap: () => setState(
+                                      () => _category = AllCaregiverCategory.nearby,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  _CategoryChip(
+                                    label: 'Recommended',
+                                    selected:
+                                        _category == AllCaregiverCategory.recommended,
+                                    onTap: () => setState(
+                                      () => _category =
+                                          AllCaregiverCategory.recommended,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          _category == AllCaregiverCategory.nearby
+                              ? 'Nearby caregivers'
+                              : _category == AllCaregiverCategory.recommended
+                                  ? 'Recommended caregivers'
+                                  : 'All caregivers',
+                          style: _sectionTitleStyle,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: items.isEmpty
+                        ? Center(
+                            child: _EmptyCaregiverPlaceholder(
+                              message: _query.isNotEmpty
+                                  ? 'No caregiver found'
+                                  : 'No caregivers available',
+                              explanation: _query.isNotEmpty
+                                  ? 'Try a different name.'
+                                  : "They'll show up as soon as they become available near you.",
+                            ),
+                          )
+                        : GridView.builder(
+                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                             physics: const BouncingScrollPhysics(),
-                            child: Row(
-                              children: [
-                                _CategoryChip(
-                                  label: 'All',
-                                  selected: _category == AllCaregiverCategory.all,
-                                  onTap: () => setState(
-                                    () => _category = AllCaregiverCategory.all,
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                _CategoryChip(
-                                  label: 'Nearby',
-                                  selected: _category == AllCaregiverCategory.nearby,
-                                  onTap: () => setState(
-                                    () => _category = AllCaregiverCategory.nearby,
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                _CategoryChip(
-                                  label: 'Recommended',
-                                  selected:
-                                      _category == AllCaregiverCategory.recommended,
-                                  onTap: () => setState(
-                                    () => _category = AllCaregiverCategory.recommended,
-                                  ),
-                                ),
-                              ],
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 2,
+                              mainAxisSpacing: 12,
+                              crossAxisSpacing: 12,
+                              childAspectRatio: 0.74,
                             ),
+                            itemCount: items.length,
+                            itemBuilder: (context, index) {
+                              final caregiver = items[index];
+                              return _CaregiverPortraitCard(
+                                data: caregiver,
+                                onTap:
+                                    () => _openCaregiverDetailsFromBrowse(caregiver),
+                              );
+                            },
                           ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        _category == AllCaregiverCategory.nearby
-                            ? 'Nearby caregivers'
-                            : _category == AllCaregiverCategory.recommended
-                                ? 'Recommended caregivers'
-                                : 'All caregivers',
-                        style: _sectionTitleStyle,
+                  ),
+                ],
+              ),
+            ),
+            Positioned(
+              right: 16,
+              bottom: bottomInset + 16,
+              child: GestureDetector(
+                onTap: _openHomeAddressSheet,
+                child: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: Colors.black.withValues(alpha: 0.08),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.18),
+                        blurRadius: 10,
+                        offset: const Offset(0, 6),
                       ),
                     ],
                   ),
-                ),
-                Expanded(
-                  child: items.isEmpty
-                      ? Center(
-                          child: _EmptyCaregiverPlaceholder(
-                            message: _query.isNotEmpty
-                                ? 'No caregiver found'
-                                : 'No caregivers available',
-                            explanation: _query.isNotEmpty
-                                ? 'Try a different name.'
-                                : "They'll show up as soon as they become available near you.",
-                          ),
-                        )
-                      : GridView.builder(
-                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                          physics: const BouncingScrollPhysics(),
-                          gridDelegate:
-                              const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 2,
-                            mainAxisSpacing: 12,
-                            crossAxisSpacing: 12,
-                            childAspectRatio: 0.74,
-                          ),
-                          itemCount: items.length,
-                          itemBuilder: (context, index) {
-                            return _CaregiverPortraitCard(
-                              data: items[index],
-                              onTap: _openBookingFromBrowse,
-                            );
-                          },
-                        ),
-                ),
-              ],
-            ),
-          ),
-          Positioned(
-            right: 16,
-            bottom: bottomInset + 16,
-            child: GestureDetector(
-              onTap: _openHomeAddressSheet,
-              child: Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: Colors.black.withValues(alpha: 0.08),
+                  child: const Icon(
+                    Icons.place_outlined,
+                    color: _accentTeal,
+                    size: 20,
                   ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.18),
-                      blurRadius: 10,
-                      offset: const Offset(0, 6),
-                    ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.place_outlined,
-                  color: _accentTeal,
-                  size: 20,
                 ),
               ),
             ),
-          ),
-        ],
+            Positioned.fill(
+              child: IgnorePointer(
+                ignoring: true,
+                child: AnimatedOpacity(
+                  duration: const Duration(milliseconds: 160),
+                  curve: Curves.easeOut,
+                  opacity: _modalSheetScrimVisible ? 1 : 0,
+                  child: ColoredBox(
+                    color: Colors.black.withAlpha(_alphaFromOpacity(0.54)),
+                    child: SizedBox.expand(),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -928,22 +1010,37 @@ class _HomeAddressPickerSheetState extends State<_HomeAddressPickerSheet> {
               child: Stack(
                 alignment: Alignment.center,
                 children: [
-                  PageView.builder(
-                    controller: _controller,
-                    itemCount: widget.items.length,
-                    onPageChanged: widget.onIndexChanged,
-                    physics: const BouncingScrollPhysics(),
-                    itemBuilder: (context, index) {
-                      final item = widget.items[index];
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
-                        child: _HomeAddressCard(
-                          item: item,
-                          phoneNumber: widget.phoneNumber,
-                          onEditPressed: widget.onEditPressed,
-                        ),
+                  NotificationListener<ScrollEndNotification>(
+                    onNotification: (_) {
+                      final page = _controller.page;
+                      if (page == null) return false;
+                      final target = page.round();
+                      if ((page - target).abs() < 0.0001) return false;
+                      _controller.animateToPage(
+                        target,
+                        duration: const Duration(milliseconds: 180),
+                        curve: Curves.easeOut,
                       );
+                      return false;
                     },
+                    child: PageView.builder(
+                      controller: _controller,
+                      itemCount: widget.items.length,
+                      onPageChanged: widget.onIndexChanged,
+                      pageSnapping: true,
+                      physics: const PageScrollPhysics(),
+                      itemBuilder: (context, index) {
+                        final item = widget.items[index];
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          child: _HomeAddressCard(
+                            item: item,
+                            phoneNumber: widget.phoneNumber,
+                            onEditPressed: widget.onEditPressed,
+                          ),
+                        );
+                      },
+                    ),
                   ),
                   IgnorePointer(
                     child: FractionallySizedBox(

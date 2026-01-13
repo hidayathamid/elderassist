@@ -43,6 +43,7 @@ const double _sheetHeaderGap = 12.0;
 const double _sheetHeaderInset =
     _headerTopPadding + _headerHeightEstimate + _sheetHeaderGap;
 const double _sheetSpacingBaseline = 310.0;
+const double _sheetSectionSpacing = _sectionSpacing;
 
 double _homeJobCardWidth(BuildContext context) {
   final baseWidth = MediaQuery.of(context).size.width - 32;
@@ -92,17 +93,13 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
       parent: entryController,
       curve: Curves.easeOutCubic,
     );
-    _entrySlide = Tween<Offset>(
-      begin: const Offset(0, 0.02),
-      end: Offset.zero,
-    ).animate(
-      CurvedAnimation(
-        parent: entryController,
-        curve: Curves.easeOutCubic,
-      ),
-    );
+    _entrySlide = Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero)
+        .animate(
+          CurvedAnimation(parent: entryController, curve: Curves.easeOutCubic),
+        );
 
-    _wasActive = (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+    _wasActive =
+        (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
         widget.tabIndex;
     widget.tabIndexListenable?.addListener(_handleTabChange);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -135,7 +132,8 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     if (oldWidget.tabIndexListenable != widget.tabIndexListenable) {
       oldWidget.tabIndexListenable?.removeListener(_handleTabChange);
       widget.tabIndexListenable?.addListener(_handleTabChange);
-      _wasActive = (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+      _wasActive =
+          (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
           widget.tabIndex;
     }
   }
@@ -182,6 +180,10 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
         ),
       ],
     );
+  }
+
+  Widget _buildSectionDivider({double spacing = _sheetSectionSpacing}) {
+    return SizedBox(height: spacing);
   }
 
   @override
@@ -301,7 +303,12 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                               return false;
                             },
                             child: Container(
-                              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                              padding: const EdgeInsets.fromLTRB(
+                                16,
+                                12,
+                                16,
+                                24,
+                              ),
                               decoration: const BoxDecoration(
                                 color: _pageBackground,
                                 borderRadius: BorderRadius.vertical(
@@ -330,10 +337,11 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                                     hasAssignedBooking: hasAssignedBooking,
                                     isAvailable: isAvailable,
                                   ),
-                                  const SizedBox(height: _sectionSpacing),
+                                  _buildSectionDivider(),
                                   _buildSectionTitle(
                                     title: "Today's Jobs",
-                                    hint: 'Care bookings assigned to you today.',
+                                    hint:
+                                        'Care bookings assigned to you today.',
                                     trailing: _sectionToggleButton(
                                       hidden: _todayJobsSectionHidden,
                                       canHide: todayJobs.isEmpty,
@@ -347,13 +355,13 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                                   if (!(todayJobs.isEmpty &&
                                       _todayJobsSectionHidden))
                                     _buildTodayJobSection(context, todayJobs),
-                                  const SizedBox(height: _sectionSpacing),
+                                  _buildSectionDivider(),
                                   _buildScheduledJobsSection(
                                     context,
                                     scheduledJobs,
                                   ),
                                   if (!_hideScheduledCategory) ...[
-                                    const SizedBox(height: _sectionSpacing),
+                                    _buildSectionDivider(),
                                     _buildSectionTitle(
                                       title: 'Schedule',
                                       hint:
@@ -374,8 +382,11 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                                         context,
                                         scheduledJobs,
                                       ),
-                                    const SizedBox(height: _sectionSpacing),
+                                    _buildSectionDivider(),
                                   ],
+                                  if (_hideScheduledCategory &&
+                                      scheduledJobs.isNotEmpty)
+                                    _buildSectionDivider(),
                                   _buildSectionTitle(
                                     title: 'Earnings & Stats',
                                     hint:
@@ -391,7 +402,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                                     totalValue: earningsSummary.totalEarnings,
                                     rating: ratingValue,
                                   ),
-                                  const SizedBox(height: 28),
+                                  const SizedBox(height: 22),
                                 ],
                               ),
                             ),
@@ -403,7 +414,9 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                         left: 0,
                         right: 0,
                         child: AnimatedSlide(
-                          offset: showAppBar ? Offset.zero : const Offset(0, -1),
+                          offset: showAppBar
+                              ? Offset.zero
+                              : const Offset(0, -1),
                           duration: const Duration(milliseconds: 260),
                           curve: Curves.easeInOut,
                           child: AnimatedOpacity(
@@ -611,8 +624,9 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
 
     final startDayEnabled = !hasAssignedBooking;
     final startDayLabel = isAvailable ? 'End Day' : 'Start Day';
-    final startDayIcon =
-        isAvailable ? Icons.pause_circle_filled : Icons.play_circle_fill;
+    final startDayIcon = isAvailable
+        ? Icons.pause_circle_filled
+        : Icons.play_circle_fill;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -641,11 +655,11 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                 child: ElevatedButton.icon(
                   onPressed: startDayEnabled
                       ? () => _onStartDayTap(
-                        context,
-                        caregiverRef,
-                        hasAssignedBooking,
-                        isAvailable,
-                      )
+                          context,
+                          caregiverRef,
+                          hasAssignedBooking,
+                          isAvailable,
+                        )
                       : null,
                   icon: Icon(startDayIcon, size: 18),
                   label: Text(startDayLabel),
@@ -658,7 +672,9 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                       (states) =>
                           startDayEnabled ? Colors.white : Colors.grey.shade600,
                     ),
-                    elevation: WidgetStateProperty.all(startDayEnabled ? 1.0 : 0.0),
+                    elevation: WidgetStateProperty.all(
+                      startDayEnabled ? 1.0 : 0.0,
+                    ),
                     padding: WidgetStateProperty.all(
                       const EdgeInsets.symmetric(vertical: 12),
                     ),
@@ -668,7 +684,10 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                       ),
                     ),
                     textStyle: WidgetStateProperty.all(
-                      const TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+                      const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                   ),
                 ),
@@ -746,38 +765,29 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
           hint: 'Upcoming assignments sorted by date.',
         ),
         const SizedBox(height: 12),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final basePadding = (constraints.maxWidth - cardWidth) / 2;
-            final horizontalPadding = basePadding > 16.0 ? basePadding : 16.0;
-            return SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              physics: const BouncingScrollPhysics(),
-              padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
-              child: Row(
-                children: [
-                  for (var i = 0; i < scheduledJobs.length; i++) ...[
-                    if (i != 0) const SizedBox(width: 12),
-                    SizedBox(
-                      width: cardWidth,
-                      child: CaregiverJobCard(
-                        job: scheduledJobs[i],
-                        onView: () => _openBookingDetails(
-                          context,
-                          scheduledJobs[i].bookingId,
-                        ),
-                        onTrack: () => _openTrackJob(
-                          context,
-                          scheduledJobs[i],
-                        ),
-                        matchHomeStyle: true,
-                      ),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          physics: const BouncingScrollPhysics(),
+          padding: EdgeInsets.zero,
+          child: Row(
+            children: [
+              for (var i = 0; i < scheduledJobs.length; i++) ...[
+                if (i != 0) const SizedBox(width: 12),
+                SizedBox(
+                  width: cardWidth,
+                  child: CaregiverJobCard(
+                    job: scheduledJobs[i],
+                    onView: () => _openBookingDetails(
+                      context,
+                      scheduledJobs[i].bookingId,
                     ),
-                  ],
-                ],
-              ),
-            );
-          },
+                    onTrack: () => _openTrackJob(context, scheduledJobs[i]),
+                    matchHomeStyle: true,
+                  ),
+                ),
+              ],
+            ],
+          ),
         ),
       ],
     );
@@ -893,10 +903,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
             side: const BorderSide(color: _cardBorderColor),
           ),
           backgroundColor: Colors.white,
-          textStyle: const TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w800,
-          ),
+          textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -1113,10 +1120,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
           width: double.infinity,
           child: ElevatedButton(
             onPressed: enabled
-                ? () => _onWithdrawTap(
-                      context,
-                      caregiverData: caregiverData,
-                    )
+                ? () => _onWithdrawTap(context, caregiverData: caregiverData)
                 : null,
             style: ButtonStyle(
               backgroundColor: WidgetStateProperty.resolveWith<Color?>(
@@ -1143,10 +1147,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
           const SizedBox(height: 6),
           Text(
             helperText,
-            style: const TextStyle(
-              fontSize: 12,
-              color: Colors.black54,
-            ),
+            style: const TextStyle(fontSize: 12, color: Colors.black54),
           ),
         ],
       ],
@@ -1158,7 +1159,8 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     required Map<String, dynamic> caregiverData,
     required bool enabled,
   }) {
-    final caregiverId = (caregiverData['caregiverId'] as String?) ??
+    final caregiverId =
+        (caregiverData['caregiverId'] as String?) ??
         FirebaseAuth.instance.currentUser?.uid;
     if (caregiverId == null) {
       return _buildWithdrawButton(
@@ -1176,8 +1178,9 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: withdrawStream,
       builder: (context, snapshot) {
-        final latestDoc =
-            snapshot.data?.docs.isNotEmpty == true ? snapshot.data!.docs.first : null;
+        final latestDoc = snapshot.data?.docs.isNotEmpty == true
+            ? snapshot.data!.docs.first
+            : null;
         final hasActivePending = _isWithdrawDisabled(latestDoc);
         final helperText = hasActivePending && latestDoc != null
             ? _withdrawHelperText(latestDoc)
@@ -1192,21 +1195,18 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     );
   }
 
-  bool _isWithdrawDisabled(
-    QueryDocumentSnapshot<Map<String, dynamic>>? doc,
-  ) {
+  bool _isWithdrawDisabled(QueryDocumentSnapshot<Map<String, dynamic>>? doc) {
     if (doc == null) return false;
     final data = doc.data();
-    final status = (data['status'] as String?)?.trim().toLowerCase() ?? 'pending';
+    final status =
+        (data['status'] as String?)?.trim().toLowerCase() ?? 'pending';
     if (status != 'pending') return false;
     final requestedAt = (data['requestedAt'] as Timestamp?)?.toDate();
     if (requestedAt == null) return true;
     return DateTime.now().difference(requestedAt) < const Duration(hours: 24);
   }
 
-  String _withdrawHelperText(
-    QueryDocumentSnapshot<Map<String, dynamic>> doc,
-  ) {
+  String _withdrawHelperText(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
     final data = doc.data();
     final requestedAt = (data['requestedAt'] as Timestamp?)?.toDate();
     if (requestedAt == null) {
@@ -1220,7 +1220,10 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => ActivityBookingDetailsScreen(bookingId: bookingId),
+        builder: (_) => ActivityBookingDetailsScreen(
+          bookingId: bookingId,
+          caregiverView: true,
+        ),
       ),
     );
   }
@@ -1256,10 +1259,12 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
         builder: (_) => TrackCaregiverScreen(
           bookingId: bookingId,
           caregiverName: caregiverName,
-          caregiverId:
-              job.caregiverId.trim().isNotEmpty ? job.caregiverId.trim() : caregiverId,
+          caregiverId: job.caregiverId.trim().isNotEmpty
+              ? job.caregiverId.trim()
+              : caregiverId,
           personId: job.personId.trim().isNotEmpty ? job.personId.trim() : null,
           showStatusUpdateButton: true,
+          showActionFrontSheet: true,
         ),
       ),
     );
@@ -1292,6 +1297,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
         final value = details[key] as String?;
         return value != null && value.trim().isNotEmpty;
       }
+
       return defined('bankName') &&
           defined('accountName') &&
           defined('accountNumber');
@@ -1408,7 +1414,8 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
       ),
     );
     if (shouldWait == true && context.mounted) {
-      final caregiverId = (caregiverData['caregiverId'] as String?) ??
+      final caregiverId =
+          (caregiverData['caregiverId'] as String?) ??
           FirebaseAuth.instance.currentUser?.uid;
       var requestCreated = false;
       if (caregiverId != null) {
@@ -1481,10 +1488,12 @@ class _QuickActionButton extends StatelessWidget {
     final ringColor = isDisabled
         ? Colors.grey.withAlpha(60)
         : _primaryBlue.withValues(alpha: 0.55);
-    final fillColor =
-        isDisabled ? Colors.grey.shade100 : _primaryBlue.withValues(alpha: 0.12);
-    final labelColor =
-        isDisabled ? _profileDarkText.withValues(alpha: 0.45) : _profileDarkText;
+    final fillColor = isDisabled
+        ? Colors.grey.shade100
+        : _primaryBlue.withValues(alpha: 0.12);
+    final labelColor = isDisabled
+        ? _profileDarkText.withValues(alpha: 0.45)
+        : _profileDarkText;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -1501,22 +1510,18 @@ class _QuickActionButton extends StatelessWidget {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: fillColor,
-                border: Border.all(
-                  color: ringColor,
-                ),
+                border: Border.all(color: ringColor),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withValues(alpha: isDisabled ? 0.06 : 0.12),
+                    color: Colors.black.withValues(
+                      alpha: isDisabled ? 0.06 : 0.12,
+                    ),
                     blurRadius: 10,
                     offset: const Offset(0, 6),
                   ),
                 ],
               ),
-              child: Icon(
-                action.icon,
-                size: 22,
-                color: iconColor,
-              ),
+              child: Icon(action.icon, size: 22, color: iconColor),
             ),
           ),
         ),
