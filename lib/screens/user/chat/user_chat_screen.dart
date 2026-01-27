@@ -18,15 +18,21 @@ import '../../../widgets/default_profile_avatar.dart';
 import '../../../widgets/safe_network_image.dart';
 
 const Color _profileTextColor = Color(0xFF1B1D29);
-const Color _profileBorderColor = Color(0xFFE0E0E0);
+const Color _profileBorderColor = Color(0xFFE1E4EA);
 const Color _tealAccent = Color(0xFF00A8A7);
-const Color _bubbleYou = Color(0xFF3F3F3F);
-const Color _bubbleMe = _tealAccent;
+const Color _bubbleYouBackground = Colors.white;
+const Color _bubbleMeBackground = _tealAccent;
+const Color _chatPageBackground = Color(0xFFF7F8FA);
 const double _containerRadius = 18;
-const TextStyle _bubbleText = TextStyle(
+const TextStyle _bubbleTextMe = TextStyle(
   fontSize: 12,
-  fontWeight: FontWeight.w500,
+  fontWeight: FontWeight.w700,
   color: Colors.white,
+);
+const TextStyle _bubbleTextOther = TextStyle(
+  fontSize: 12,
+  fontWeight: FontWeight.w700,
+  color: _profileTextColor,
 );
 final DateFormat _timeFormat = DateFormat('h:mm a');
 
@@ -262,17 +268,25 @@ class _UserChatScreenState extends State<UserChatScreen> {
   }
 
   List<Widget> _buildTimeAndTick(bool isMe, ChatMessageModel message) {
+    final timeStyle = TextStyle(
+      color: isMe
+          ? Colors.white.withValues(alpha: 0.72)
+          : Colors.black.withValues(alpha: 0.48),
+      fontSize: 10,
+      fontWeight: FontWeight.w700,
+    );
     return [
       Text(
         _timeFormat.format(message.timestamp.toDate().toLocal()),
-        style: const TextStyle(color: Colors.white70, fontSize: 10),
+        style: timeStyle,
       ),
       if (isMe) ...[
         const SizedBox(width: 4),
         Icon(
           Icons.done_all,
           size: 14,
-          color: message.readAt != null ? _tealAccent : Colors.white60,
+          color:
+              message.readAt != null ? Colors.white : Colors.white.withValues(alpha: 0.62),
         ),
       ],
     ];
@@ -284,6 +298,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
     bool isMe,
     String currentUserId,
   ) {
+    final baseStyle = isMe ? _bubbleTextMe : _bubbleTextOther;
     if (message.isDeleted) {
       final deletedByMe = message.deletedBy == currentUserId;
       final placeholderText =
@@ -295,9 +310,11 @@ class _UserChatScreenState extends State<UserChatScreen> {
           Flexible(
             child: Text(
               placeholderText,
-              style: _bubbleText.copyWith(
+              style: baseStyle.copyWith(
                 fontStyle: FontStyle.italic,
-                color: Colors.white.withValues(alpha: 0.85),
+                color: isMe
+                    ? Colors.white.withValues(alpha: 0.85)
+                    : Colors.black.withValues(alpha: 0.58),
               ),
               textAlign: isMe ? TextAlign.right : TextAlign.left,
             ),
@@ -346,7 +363,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
               alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
               child: Text(
                 message.text,
-                style: _bubbleText,
+                style: baseStyle,
                 textAlign: isMe ? TextAlign.right : TextAlign.left,
               ),
             ),
@@ -369,7 +386,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
         Flexible(
           child: Text(
             message.text,
-            style: _bubbleText,
+            style: baseStyle,
             textAlign: isMe ? TextAlign.right : TextAlign.left,
           ),
         ),
@@ -426,7 +443,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
                 child: BackdropFilter(
                   filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
                   child: Container(
-                    color: Colors.black.withOpacity(0.15),
+                    color: Colors.black.withValues(alpha: 0.15),
                   ),
                 ),
               ),
@@ -679,15 +696,20 @@ class _UserChatScreenState extends State<UserChatScreen> {
                   maxWidth: MediaQuery.of(context).size.width * 0.8,
                 ),
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
                   decoration: BoxDecoration(
-                    color: isMe ? _bubbleMe : _bubbleYou,
+                    color: isMe ? _bubbleMeBackground : _bubbleYouBackground,
                     borderRadius: BorderRadius.circular(_containerRadius),
+                    border: isMe
+                        ? null
+                        : Border.all(
+                            color: Colors.black.withValues(alpha: 0.08),
+                          ),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.25),
-                        blurRadius: 8,
-                        offset: const Offset(0, 3),
+                        color: Colors.black.withValues(alpha: isMe ? 0.12 : 0.06),
+                        blurRadius: isMe ? 16 : 14,
+                        offset: Offset(0, isMe ? 7 : 8),
                       ),
                     ],
                   ),
@@ -712,7 +734,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
 
     final canSend = _controller.text.trim().isNotEmpty || _selectedImage != null;
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: _chatPageBackground,
       appBar: PreferredSize(
         preferredSize: const Size.fromHeight(58),
         child: AppBar(
@@ -763,8 +785,8 @@ class _UserChatScreenState extends State<UserChatScreen> {
                     widget.otherUserName,
                     style: const TextStyle(
                       color: _profileTextColor,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
+                      fontSize: 15.5,
+                      fontWeight: FontWeight.w800,
                     ),
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -793,46 +815,61 @@ class _UserChatScreenState extends State<UserChatScreen> {
           Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: StreamBuilder<List<ChatMessageModel>>(
-                stream: _chatService.streamMessages(widget.chatId),
-                builder: (context, snap) {
-                  if (!snap.hasData) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
+              child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                stream: FirebaseFirestore.instance
+                    .collection('chats')
+                    .doc(widget.chatId)
+                    .snapshots(),
+                builder: (context, chatSnap) {
+                  final chatData = chatSnap.data?.data();
+                  final clearedMap =
+                      (chatData?['clearedAt'] as Map?)?.cast<String, dynamic>();
+                  final clearedAt = clearedMap?[userId] as Timestamp?;
 
-                  final messages = snap.data!;
-                  _maybeMarkMessagesRead(messages, userId);
-                  WidgetsBinding.instance.addPostFrameCallback(
-                    (_) => _scrollToBottom(),
-                  );
+                  return StreamBuilder<List<ChatMessageModel>>(
+                    stream: _chatService.streamMessages(widget.chatId),
+                    builder: (context, snap) {
+                      if (!snap.hasData) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
 
-                  final visibleMessages = messages
-                      .where((msg) => !msg.hiddenFor.contains(userId))
-                      .toList();
+                      final messages = snap.data!;
+                      final visibleMessages = messages.where((msg) {
+                        if (msg.hiddenFor.contains(userId)) return false;
+                        if (clearedAt == null) return true;
+                        return msg.timestamp.compareTo(clearedAt) > 0;
+                      }).toList();
 
-                  return Column(
-                    children: [
-                      if (visibleMessages.isNotEmpty)
-                        _buildDateHeader(visibleMessages),
-                      Expanded(
-                        child: ListView.builder(
-                          controller: _scrollController,
-                          physics: const BouncingScrollPhysics(),
-                          padding: const EdgeInsets.only(top: 12, bottom: 16),
-                          itemCount: visibleMessages.length,
-                          itemBuilder: (context, index) {
-                            final message = visibleMessages[index];
-                            final isMe = message.senderId == userId;
-                            return _buildMessageRow(
-                              context,
-                              message,
-                              isMe,
-                              userId,
-                            );
-                          },
-                        ),
-                      ),
-                    ],
+                      _maybeMarkMessagesRead(visibleMessages, userId);
+                      WidgetsBinding.instance.addPostFrameCallback(
+                        (_) => _scrollToBottom(),
+                      );
+
+                      return Column(
+                        children: [
+                          if (visibleMessages.isNotEmpty)
+                            _buildDateHeader(visibleMessages),
+                          Expanded(
+                            child: ListView.builder(
+                              controller: _scrollController,
+                              physics: const BouncingScrollPhysics(),
+                              padding: const EdgeInsets.only(top: 12, bottom: 16),
+                              itemCount: visibleMessages.length,
+                              itemBuilder: (context, index) {
+                                final message = visibleMessages[index];
+                                final isMe = message.senderId == userId;
+                                return _buildMessageRow(
+                                  context,
+                                  message,
+                                  isMe,
+                                  userId,
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      );
+                    },
                   );
                 },
               ),
@@ -844,7 +881,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Container(
                 decoration: BoxDecoration(
-                  color: _tealAccent.withOpacity(0.08),
+                  color: _tealAccent.withValues(alpha: 0.08),
                   borderRadius: BorderRadius.circular(14),
                 ),
                 padding:
@@ -883,14 +920,30 @@ class _UserChatScreenState extends State<UserChatScreen> {
               ),
             ),
           Container(
-            color: Colors.white,
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.08),
+                  blurRadius: 18,
+                  offset: const Offset(0, -6),
+                ),
+              ],
+            ),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(32),
                 border: Border.all(color: _profileBorderColor),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.05),
+                    blurRadius: 12,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
               ),
               child: Row(
                 children: [

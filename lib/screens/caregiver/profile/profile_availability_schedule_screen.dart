@@ -18,6 +18,7 @@ class ProfileAvailabilityScheduleScreen extends StatefulWidget {
 class _ProfileAvailabilityScheduleScreenState
     extends State<ProfileAvailabilityScheduleScreen> {
   bool _cleanupBlockedDatesInFlight = false;
+  bool _seedWeeklyScheduleInFlight = false;
 
   DocumentReference<Map<String, dynamic>>? get _docRef {
     final uid = FirebaseAuth.instance.currentUser?.uid;
@@ -52,6 +53,25 @@ class _ProfileAvailabilityScheduleScreenState
         await _updateAvailability(blockedDates: cleaned);
       } finally {
         _cleanupBlockedDatesInFlight = false;
+      }
+    });
+  }
+
+  void _seedWeeklyScheduleIfMissing({
+    required bool docExists,
+    required List<DaySchedule> currentSchedule,
+  }) {
+    if (docExists) return;
+    if (_seedWeeklyScheduleInFlight) return;
+    if (currentSchedule.isEmpty) return;
+
+    _seedWeeklyScheduleInFlight = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      try {
+        await _updateAvailability(weeklySchedule: currentSchedule);
+      } finally {
+        _seedWeeklyScheduleInFlight = false;
       }
     });
   }
@@ -147,6 +167,10 @@ class _ProfileAvailabilityScheduleScreenState
              final data = snapshot.data?.data();
              final weeklySchedule = _weeklyFromSnapshot(data);
              final blockedDates = _blockedDatesFromSnapshot(data);
+             _seedWeeklyScheduleIfMissing(
+               docExists: snapshot.data?.exists == true,
+               currentSchedule: weeklySchedule,
+             );
              _scheduleExpiredBlockedDatesCleanup(blockedDates);
 
              return SingleChildScrollView(
@@ -221,7 +245,7 @@ class _ProfileAvailabilityScheduleScreenState
                   ),
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   minimumSize: Size.zero,
-                  foregroundColor: availabilityTealAccent,
+                  foregroundColor: availabilityDarkText,
                   textStyle: availabilityBodySemiBoldTextStyle,
                 ),
                 child: const Text('+ Edit'),
@@ -338,7 +362,7 @@ class _ProfileAvailabilityScheduleScreenState
                   padding: EdgeInsets.zero,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   minimumSize: Size.zero,
-                  foregroundColor: availabilityTealAccent,
+                  foregroundColor: availabilityDarkText,
                   textStyle: availabilityBodySemiBoldTextStyle,
                 ),
                 child: const Text('+ Add'),
@@ -467,7 +491,7 @@ class _ProfileAvailabilityScheduleScreenState
           final defaultEntry = defaultScheduleLookup[day];
           final start =
               entry['start'] as String? ?? defaultEntry?.start ?? '08:00';
-          final end = entry['end'] as String? ?? defaultEntry?.end ?? '18:00';
+          final end = entry['end'] as String? ?? defaultEntry?.end ?? '16:00';
           parsed[day] = DaySchedule(
             day: day,
             available:

@@ -20,6 +20,7 @@ import 'package:emergencies_disability_assistance_app/services/booking_service.d
 import 'package:emergencies_disability_assistance_app/services/caregiver_service.dart';
 import 'package:emergencies_disability_assistance_app/services/location_service.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/home/all_caregiver_screen.dart';
+import 'package:emergencies_disability_assistance_app/utils/booking_due_status.dart';
 import 'package:emergencies_disability_assistance_app/widgets/safe_network_image.dart';
 import 'package:emergencies_disability_assistance_app/widgets/service_tag_chip.dart';
 
@@ -62,7 +63,7 @@ int _alphaFromOpacity(double opacity) =>
 
 enum _CaregiverSectionType { previous, nearby, recommended, activeBookings }
 
-enum _ActiveBookingStatus { ongoing, assigned, scheduled }
+enum _ActiveBookingStatus { emergency, ongoing, assigned, scheduled }
 
 class _AddressSelectionKey {
   const _AddressSelectionKey({
@@ -78,19 +79,23 @@ class _AddressSelectionKey {
 
 class _HomeAddressItem {
   const _HomeAddressItem({
+    this.id,
     required this.name,
     required this.label,
     required this.address,
     this.isUser = false,
+    this.isDefault = false,
     this.photoUrl,
     this.lat,
     this.lng,
   });
 
+  final String? id;
   final String name;
   final String label;
   final String address;
   final bool isUser;
+  final bool isDefault;
   final String? photoUrl;
   final double? lat;
   final double? lng;
@@ -104,6 +109,8 @@ class _HomeAddressItem {
   }
 
   factory _HomeAddressItem.fromMap(Map<String, dynamic> map, {bool isUser = false}) {
+    final id = map['id']?.toString().trim();
+    final isDefault = map['isDefault'] == true;
     final lat = _safeDouble(map['lat']) ?? _safeDouble(map['latitude']);
     final lng =
         _safeDouble(map['long']) ??
@@ -124,10 +131,12 @@ class _HomeAddressItem {
         map['city'] ??
         '';
     return _HomeAddressItem(
+      id: id?.isNotEmpty == true ? id : null,
       name: isUser ? 'You' : ('$nameValue'.trim().isNotEmpty ? '$nameValue'.trim() : 'Person'),
       label: isUser ? '' : '$labelValue'.trim(),
       address: '$addressValue'.trim(),
       isUser: isUser,
+      isDefault: !isUser && isDefault,
       photoUrl: photoUrl?.trim().isNotEmpty == true ? photoUrl!.trim() : null,
       lat: lat,
       lng: lng,
@@ -467,6 +476,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
   final Map<String, CaregiverModel> _caregiverCache = {};
   RecommendationRules _recommendationRules = RecommendationRules.defaults();
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _rulesSub;
+  final Set<String> _autoPromotedBookingIds = <String>{};
 
   AnimationController? _entryController;
   Animation<double>? _entryFade;
@@ -483,6 +493,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
   List<_HomeAddressItem> _homeAddresses = [];
   int _selectedHomeAddressIndex = 0;
   bool _didForceInitialYouSelection = false;
+  _AddressSelectionKey? _lastAppliedDefaultSelectionKey;
   _AddressSelectionKey? _selectionKey;
   String? _userPhoneNumber;
   final double _sheetMaxExtent = 1.0;
@@ -852,11 +863,38 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     final adjustedIndex = (!hadUserCard && resolvedAddresses.isNotEmpty && resolvedAddresses.first.isUser)
         ? baseIndex + 1
         : baseIndex;
+
+    final int defaultIndex = resolvedAddresses.indexWhere(
+      (e) => !e.isUser && e.isDefault,
+    );
+    final _HomeAddressItem? defaultItem =
+        defaultIndex == -1 ? null : resolvedAddresses[defaultIndex];
+    final _AddressSelectionKey? defaultKey = defaultItem == null
+        ? null
+        : _AddressSelectionKey(
+            address: defaultItem.address,
+            lat: defaultItem.lat,
+            lng: defaultItem.lng,
+          );
+
+    final bool defaultChanged =
+        defaultKey != null &&
+        (_lastAppliedDefaultSelectionKey == null ||
+            _lastAppliedDefaultSelectionKey!.address != defaultKey.address ||
+            _lastAppliedDefaultSelectionKey!.lat != defaultKey.lat ||
+            _lastAppliedDefaultSelectionKey!.lng != defaultKey.lng);
+    final bool forceDefaultThisTime =
+        defaultIndex != -1 && (defaultChanged || _selectionKey == null);
+
     final bool forceYouThisTime =
-        !_didForceInitialYouSelection && resolvedAddresses.isNotEmpty;
+        !forceDefaultThisTime &&
+        !_didForceInitialYouSelection &&
+        resolvedAddresses.isNotEmpty;
     final int nextSelectedIndex;
     if (resolvedAddresses.isEmpty) {
       nextSelectedIndex = 0;
+    } else if (forceDefaultThisTime) {
+      nextSelectedIndex = defaultIndex;
     } else if (forceYouThisTime) {
       final youIndex = resolvedAddresses.indexWhere((e) => e.isUser);
       nextSelectedIndex = (youIndex == -1) ? 0 : youIndex;
@@ -873,8 +911,32 @@ class _UserHomeScreenState extends State<UserHomeScreen>
       _userPhoneNumber = phone?.isNotEmpty == true ? phone : _userPhoneNumber;
       _homeAddresses = resolvedAddresses;
       _selectedHomeAddressIndex = nextSelectedIndex;
-      if (forceYouThisTime) {
+      if (forceDefaultThisTime && defaultKey != null) {
+        _lastAppliedDefaultSelectionKey = defaultKey;
         _didForceInitialYouSelection = true;
+        _selectionKey = defaultKey;
+        final item = resolvedAddresses[nextSelectedIndex];
+        final lat = item.lat;
+        final lng = item.lng;
+        if (lat != null && lng != null) {
+          _manualLocationLock = true;
+          _currentPosition = Position(
+            longitude: lng,
+            latitude: lat,
+            timestamp: DateTime.now(),
+            accuracy: 10,
+            altitude: 0,
+            heading: 0,
+            speed: 0,
+            speedAccuracy: 0,
+            altitudeAccuracy: 0,
+            headingAccuracy: 0,
+          );
+          _previousCaregiversFuture = _loadPreviousCaregivers();
+        }
+      } else if (forceYouThisTime) {
+        _didForceInitialYouSelection = true;
+        _lastAppliedDefaultSelectionKey = defaultKey;
         final item = resolvedAddresses[nextSelectedIndex];
         _selectionKey = _AddressSelectionKey(
           address: item.address,
@@ -1648,6 +1710,9 @@ class _UserHomeScreenState extends State<UserHomeScreen>
         .replaceAll(' ', '_')
         .replaceAll('-', '_')
         .replaceAll('__', '_');
+    if (normalized == 'EMERGENCY_ALERT') {
+      return _ActiveBookingStatus.emergency;
+    }
     if (normalized == 'ONGOING' ||
         normalized == 'IN_PROGRESS' ||
         normalized == 'NOTIFY' ||
@@ -1663,17 +1728,21 @@ class _UserHomeScreenState extends State<UserHomeScreen>
 
   int _activeBookingPriority(_ActiveBookingStatus status) {
     switch (status) {
-      case _ActiveBookingStatus.ongoing:
+      case _ActiveBookingStatus.emergency:
         return 0;
-      case _ActiveBookingStatus.assigned:
+      case _ActiveBookingStatus.ongoing:
         return 1;
-      case _ActiveBookingStatus.scheduled:
+      case _ActiveBookingStatus.assigned:
         return 2;
+      case _ActiveBookingStatus.scheduled:
+        return 3;
     }
   }
 
   String _activeBookingLabel(_ActiveBookingStatus status) {
     switch (status) {
+      case _ActiveBookingStatus.emergency:
+        return 'Emergency';
       case _ActiveBookingStatus.ongoing:
         return 'Ongoing';
       case _ActiveBookingStatus.assigned:
@@ -1700,6 +1769,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
       stream: stream,
       builder: (context, snapshot) {
         final docs = snapshot.data?.docs ?? [];
+        _autoPromoteDueScheduledBookings(docs);
         final entries =
             <
               ({
@@ -1768,6 +1838,38 @@ class _UserHomeScreenState extends State<UserHomeScreen>
         );
       },
     );
+  }
+
+  void _autoPromoteDueScheduledBookings(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  ) {
+    for (final doc in docs) {
+      if (_autoPromotedBookingIds.contains(doc.id)) continue;
+      final data = doc.data();
+      final status = (data['status'] as String?) ?? '';
+      final normalized = normalizeBookingStatus(status);
+      final isUpcoming =
+          normalized == 'SCHEDULED' ||
+          normalized == 'PENDING' ||
+          normalized == 'READY';
+      if (!isUpcoming) continue;
+
+      final date =
+          (data['scheduledDate'] as String?) ?? (data['date'] as String?) ?? '';
+      final time =
+          (data['startTime'] as String?) ?? (data['time'] as String?) ?? '';
+      final dueAware =
+          deriveDueAwareStatus(status: status, date: date, time: time);
+      if (dueAware != 'ASSIGNED') continue;
+
+      _autoPromotedBookingIds.add(doc.id);
+      doc.reference
+          .update({
+            'status': 'ASSIGNED',
+            'assignedAt': FieldValue.serverTimestamp(),
+          })
+          .catchError((_) => _autoPromotedBookingIds.remove(doc.id));
+    }
   }
 
   Future<List<CaregiverProfile>> _buildActiveBookingProfiles(
@@ -2400,52 +2502,32 @@ Widget _emptyCaregiverPlaceholder({
   String explanation =
       "They'll show up as soon as they become available near you.",
 }) {
-  return Container(
-    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-    decoration: BoxDecoration(
-      color: const Color(0xFFF9FAFB),
-      borderRadius: BorderRadius.circular(16),
-      border: Border.all(
-        color: Colors.black.withAlpha(_alphaFromOpacity(0.06)),
+  return ConstrainedBox(
+    constraints: const BoxConstraints(maxWidth: 360),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.bolt_rounded, size: 32, color: _serviceTagBlue),
+          const SizedBox(height: 10),
+          Text(
+            message,
+            style: const TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 15,
+              color: _homeHeadingTextColor,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            explanation,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 12, color: Colors.black54),
+          ),
+        ],
       ),
-    ),
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 42,
-          height: 42,
-          decoration: BoxDecoration(
-            color: _serviceTagBlue.withAlpha(_alphaFromOpacity(0.12)),
-            shape: BoxShape.circle,
-          ),
-          child: const Icon(
-            Icons.bolt_rounded,
-            size: 22,
-            color: _serviceTagBlue,
-          ),
-        ),
-        const SizedBox(height: 10),
-        Text(
-          message,
-          style: const TextStyle(
-            fontSize: 13,
-            color: _homeHeadingTextColor,
-            fontWeight: FontWeight.w700,
-          ),
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 4),
-        Text(
-          explanation,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            color: Colors.black.withAlpha(_alphaFromOpacity(0.6)),
-          ),
-        ),
-      ],
     ),
   );
 }
@@ -2696,8 +2778,31 @@ class _AvailabilityStatusChip extends StatelessWidget {
   final String status;
   final bool isActive;
 
-  Color get _dotColor =>
-      isActive ? Colors.green.shade700 : Colors.grey.shade600;
+  String get _normalized => status.trim().toLowerCase();
+
+  bool get _isScheduledLike =>
+      _normalized == 'scheduled' || _normalized == 'pending' || _normalized == 'ready';
+
+  bool get _isOngoingLike =>
+      _normalized == 'ongoing' ||
+      _normalized == 'in_progress' ||
+      _normalized == 'notify' ||
+      _normalized == 'handle_client';
+
+  Color get _dotColor {
+    if (_isScheduledLike) return const Color(0xFFF4B63D);
+    if (_normalized == 'emergency' || _normalized == 'emergency_alert') {
+      return Colors.red.shade700;
+    }
+    if (_isOngoingLike) return Colors.blue.shade700;
+    if (_normalized == 'completed' || _normalized == 'assigned') {
+      return Colors.green.shade700;
+    }
+    if (_normalized == 'cancelled' || _normalized == 'canceled') {
+      return Colors.red.shade700;
+    }
+    return isActive ? Colors.blue.shade700 : Colors.grey.shade600;
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -50,7 +50,9 @@ class CaregiverJob {
     QueryDocumentSnapshot<Map<String, dynamic>> doc,
   ) {
     final data = doc.data();
-    if ((data['hidden'] as bool?) == true) return null;
+    final hiddenLegacy = (data['hidden'] as bool?) == true;
+    final hiddenForCaregiver = (data['hiddenForCaregiver'] as bool?) == true;
+    if (hiddenLegacy || hiddenForCaregiver) return null;
 
     String parseAge() {
       final rawAge = data['personAge'] ?? data['age'];
@@ -77,7 +79,7 @@ class CaregiverJob {
           (data['servicePrice'] as Object?)?.toString() ??
           (data['price'] as Object?)?.toString() ??
           'RM 0',
-      notes: (data['notes'] as String?) ?? '',
+      notes: (data['personNotes'] as String?) ?? (data['notes'] as String?) ?? '',
       caregiverId:
           (data['caregiverId'] as String?) ??
           doc.reference.parent.parent?.id ??
@@ -110,6 +112,7 @@ class CaregiverJob {
 
   bool get isActiveStatus =>
       normalizedStatus == 'ASSIGNED' ||
+      normalizedStatus == 'EMERGENCY_ALERT' ||
       normalizedStatus == 'ONGOING' ||
       normalizedStatus == 'IN_PROGRESS';
 

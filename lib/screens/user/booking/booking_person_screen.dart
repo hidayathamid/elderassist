@@ -189,6 +189,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   late final Animation<Offset> _noteSheetOffset;
   bool _noteSheetVisible = false;
   LatLng _currentLatLng = const LatLng(3.1390, 101.6869);
+  LatLng? _defaultLatLng;
   bool _hideFrontPanel = false;
   double _backdropOpacity = 0.0;
   bool _hasLocation = false;
@@ -263,6 +264,21 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     }
 
     if (_isCurrentLocationItem(item)) {
+      final defaultLatLng = _defaultLatLng;
+      if (defaultLatLng != null) {
+        final lat = item.lat;
+        final lng = item.long;
+        final target = (lat != null && lng != null)
+            ? LatLng(lat, lng)
+            : defaultLatLng;
+        if (debounceCamera) {
+          _scheduleMapMove(target);
+        } else {
+          _mapController?.animateCamera(_cameraUpdate(target));
+        }
+        return;
+      }
+
       _refreshDeviceLocation();
       return;
     }
@@ -518,57 +534,40 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   Future<void> _autoDetectLocation() async {
     final int seq = ++_locationRequestSeq;
     try {
-      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        return;
-      }
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        return;
-      }
-      final pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.best,
-      );
-      final latLng = LatLng(pos.latitude, pos.longitude);
-      if (!mounted || seq != _locationRequestSeq) return;
-      final applyInitialYou = !_didApplyInitialYouSelection;
-      final selected = _selected;
-      final bool shouldAnimate =
-          applyInitialYou || selected == null || _isCurrentLocationItem(selected);
-      final wasShowingLocationRow = _hasLocation;
-      setState(() {
-        _currentLatLng = latLng;
-        _hasLocation = true;
+      // Prefer the saved default address location for the "You" row when available.
+      final defaultLatLng = _defaultLatLng;
+      if (defaultLatLng != null) {
+        if (!mounted || seq != _locationRequestSeq) return;
+        final applyInitialYou = !_didApplyInitialYouSelection;
+        final selected = _selected;
+        final bool shouldAnimate =
+            applyInitialYou ||
+            selected == null ||
+            _isCurrentLocationItem(selected);
+        setState(() {
+          _currentLatLng = defaultLatLng;
+          _hasLocation = true;
+          if (applyInitialYou) {
+            _didApplyInitialYouSelection = true;
+            _selected = _currentAddressItem();
+            _currentScrollIndex = 0;
+            _pendingScrollIndex = 0;
+          } else {
+            _selected ??= _currentAddressItem();
+          }
+        });
+        _updateSelectedPersonMarkerIcon();
         if (applyInitialYou) {
-          _didApplyInitialYouSelection = true;
-          _selected = _currentAddressItem();
-          _currentScrollIndex = 0;
-          _pendingScrollIndex = 0;
-        } else {
-          _selected ??= _currentAddressItem();
+          _scrollAfterPanelReady(0);
         }
+        if (shouldAnimate) {
+          _mapController?.animateCamera(_cameraUpdate(defaultLatLng));
+        }
+        _updateDistances();
+        return;
+      }
 
-        if (!wasShowingLocationRow &&
-            _selected != null &&
-            !_isCurrentLocationItem(_selected!)) {
-          final idx = _selectedIndexInVisible();
-          if (idx != null) _currentScrollIndex = idx;
-        }
-      });
-      _updateSelectedPersonMarkerIcon();
-      if (applyInitialYou) {
-        // Make sure the first row ("You") is highlighted/snapped without a tap.
-        _scrollAfterPanelReady(0);
-      }
-      if (shouldAnimate) {
-        _mapController?.animateCamera(_cameraUpdate(latLng));
-      }
-      _updateDistances();
-      _resolvePlaceName(latLng);
+      // Default-address mode: do not move the map to device GPS.
     } catch (_) {}
   }
 
@@ -600,14 +599,35 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   void _handleUserDocumentSnapshot(
     DocumentSnapshot<Map<String, dynamic>> snapshot,
   ) {
+    final snapshotData = snapshot.data();
     _userFullName = _resolveUserName(
       FirebaseAuth.instance.currentUser?.displayName,
-      snapshot.data(),
+      snapshotData,
     );
-    _userPhotoUrl = _normalizePhotoUrl(snapshot.data()?['photoUrl'] as String?);
-    _defaultAddressText = (snapshot.data()?['defaultAddress'] as String?)
-        ?.trim();
-    final fallback = _prepareDocAddressList(snapshot.data());
+    _userPhotoUrl = _normalizePhotoUrl(snapshotData?['photoUrl'] as String?);
+    _defaultAddressText = (snapshotData?['defaultAddress'] as String?)?.trim();
+
+    final defaultLatLng = _latLngFromUserDoc(snapshotData);
+    if (defaultLatLng != null) {
+      _defaultLatLng = defaultLatLng;
+      final selected = _selected;
+      final bool shouldApply =
+          selected == null || _isCurrentLocationItem(selected);
+      if (shouldApply) {
+        // Ensure the "You" row uses the default address location even when GPS
+        // isn't available (or not requested).
+        _currentLatLng = defaultLatLng;
+        _hasLocation = true;
+        _selected = _currentAddressItem();
+        _currentScrollIndex = 0;
+        _pendingScrollIndex = 0;
+        _didApplyInitialYouSelection = true;
+        _updateSelectedPersonMarkerIcon();
+        _scheduleMapMove(defaultLatLng, delay: Duration.zero);
+      }
+    }
+
+    final fallback = _prepareDocAddressList(snapshotData);
     _docAddressData = fallback;
     if (_collectionAddressData.isEmpty) {
       if (fallback.isNotEmpty) {
@@ -618,6 +638,19 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
     } else {
       _updateAddressList(_mergeAddressListWithDoc(_collectionAddressData));
     }
+  }
+
+  LatLng? _latLngFromUserDoc(Map<String, dynamic>? data) {
+    if (data == null) return null;
+    final lat =
+        AddressItem._safeDouble(data['lat']) ??
+        AddressItem._safeDouble(data['latitude']);
+    final lng =
+        AddressItem._safeDouble(data['lng']) ??
+        AddressItem._safeDouble(data['long']) ??
+        AddressItem._safeDouble(data['longitude']);
+    if (lat == null || lng == null) return null;
+    return LatLng(lat, lng);
   }
 
   List<Map<String, dynamic>> _prepareDocAddressList(
@@ -1304,6 +1337,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
 
   PersonProfile _personFromAddress(AddressItem item) {
     final bool isSelf = _isSelfAddress(item);
+    final bool isCurrent = _isCurrentLocationItem(item);
     final baseName = item.forWho?.isNotEmpty == true
         ? item.forWho!
         : item.title;
@@ -1314,7 +1348,9 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         ? _defaultAddressText!
         : null;
     final addressText =
-        (isSelf ? defaultAddressLine : null) ??
+        (isCurrent
+            ? defaultAddressLine
+            : (isSelf ? defaultAddressLine : null)) ??
         (item.addressLine?.isNotEmpty == true
             ? item.addressLine!
             : item.subtitle);
@@ -1453,7 +1489,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         : FirebaseFirestore.instance
               .collection('bookings')
               .where('userId', isEqualTo: userId)
-              .where('status', isEqualTo: 'ASSIGNED')
+              .where('status', whereIn: const ['ASSIGNED', 'EMERGENCY_ALERT'])
               .snapshots()
               .map((snapshot) {
                 final result = <String>{};
@@ -1634,14 +1670,12 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
                                 _mapController = c;
                                 _flushPendingMapMove();
                                 final selected = _selected;
-                                if (selected != null &&
-                                    !_isCurrentLocationItem(selected)) {
+                                if (selected != null) {
                                   _syncMapToSelected(
                                     selected,
                                     debounceCamera: false,
                                   );
                                 }
-                                _autoDetectLocation();
                               },
                             ),
                           ),
@@ -1927,12 +1961,18 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
         ? item.forWho!
         : item.title;
     final bool isSelf = _isSelfAddress(item);
-    final String addressLine =
-        (isSelf && _defaultAddressText?.isNotEmpty == true)
-        ? _defaultAddressText!
-        : (item.addressLine?.isNotEmpty == true
-              ? item.addressLine!
-              : item.subtitle);
+    final bool isCurrentLocation = _isCurrentLocationItem(item);
+    final String addressLine = isCurrentLocation
+        ? (_defaultAddressText?.isNotEmpty == true
+              ? _defaultAddressText!
+              : (item.addressLine?.isNotEmpty == true
+                    ? item.addressLine!
+                    : item.subtitle))
+        : ((isSelf && _defaultAddressText?.isNotEmpty == true)
+              ? _defaultAddressText!
+              : (item.addressLine?.isNotEmpty == true
+                    ? item.addressLine!
+                    : item.subtitle));
     final String distanceText = item.distanceKm != null
         ? '${item.distanceKm!.toStringAsFixed(1)}km'
         : '--';
@@ -2117,13 +2157,10 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   }
 
   Marker _buildMarker() {
-    LatLng markerPos = _currentLatLng;
     final selected = _selected;
-    if (selected != null &&
-        !_isCurrentLocationItem(selected) &&
-        selected.lat != null &&
-        selected.long != null) {
-      markerPos = LatLng(selected.lat!, selected.long!);
+    LatLng markerPos = _currentLatLng;
+    if (selected?.lat != null && selected?.long != null) {
+      markerPos = LatLng(selected!.lat!, selected.long!);
     }
     return Marker(
       markerId: const MarkerId('selected'),
@@ -2197,7 +2234,6 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   Future<BitmapDescriptor> _buildAvatarMarker({
     required Color fillColor,
     String? label,
-    Color textColor = Colors.black,
     double size = 110,
     double pixelRatio = 1.0,
     ui.Image? avatar,
@@ -2281,25 +2317,7 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
       );
       canvas.restore();
     }
-    if (avatar == null && label != null && label.isNotEmpty) {
-      const TextStyle textStyle = TextStyle(
-        color: Colors.black,
-        fontSize: 22,
-        fontWeight: FontWeight.bold,
-      );
-      final TextPainter textPainter = TextPainter(
-        text: TextSpan(
-          text: label,
-          style: textStyle.copyWith(color: textColor),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      final Offset offset = Offset(
-        radius - textPainter.width / 2,
-        circleCenterY - textPainter.height / 2,
-      );
-      textPainter.paint(canvas, offset);
-    }
+    // Intentionally do not render initials when there's no avatar image.
     final ui.Picture picture = recorder.endRecording();
     final int pixelSize = (size * effectivePixelRatio).round();
     final ui.Image image = await picture.toImage(pixelSize, pixelSize);
@@ -2326,14 +2344,19 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   }
 
   AddressItem _currentAddressItem() {
+    final defaultLatLng = _defaultLatLng;
+    final resolvedLatLng = defaultLatLng ?? _currentLatLng;
+    final String? resolvedAddressLine = _defaultAddressText?.isNotEmpty == true
+        ? _defaultAddressText
+        : _currentLocationName;
     return AddressItem(
       title: 'Current location',
-      subtitle: _currentLocationName ?? 'Using device GPS',
+      subtitle: resolvedAddressLine ?? 'Using device GPS',
       distanceKm: 0,
-      lat: _currentLatLng.latitude,
-      long: _currentLatLng.longitude,
+      lat: resolvedLatLng.latitude,
+      long: resolvedLatLng.longitude,
       forWho: 'You',
-      addressLine: _currentLocationName,
+      addressLine: resolvedAddressLine,
       avatarUrl: _userPhotoUrl,
       photoUrl: _userPhotoUrl,
       isCurrentLocation: true,
@@ -2391,6 +2414,9 @@ class _BookingPersonScreenState extends State<BookingPersonScreen>
   Future<void> _refreshDeviceLocation() async {
     final int seq = ++_locationRequestSeq;
     try {
+      // When default address coordinates are available, keep the "You" row pinned
+      // to that location (device GPS is treated as a fallback only).
+      if (_defaultLatLng != null) return;
       final pos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.best,
       );

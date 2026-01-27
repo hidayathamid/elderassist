@@ -12,6 +12,8 @@ import 'package:emergencies_disability_assistance_app/widgets/safe_network_image
 import 'package:emergencies_disability_assistance_app/widgets/service_tag_chip.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_screen.dart';
 
+const Color _accentGold = Color(0xFFF4B63D);
+
 /// Reusable card that mirrors the card design from the jobs screen.
 class CaregiverJobCard extends StatelessWidget {
   const CaregiverJobCard({
@@ -20,12 +22,14 @@ class CaregiverJobCard extends StatelessWidget {
     required this.onView,
     this.onTrack,
     this.matchHomeStyle = false,
+    this.highlightScheduledStatusChip = false,
   });
 
   final CaregiverJob job;
   final VoidCallback onView;
   final VoidCallback? onTrack;
   final bool matchHomeStyle;
+  final bool highlightScheduledStatusChip;
 
   int _alphaFromOpacity(double opacity) {
     final value = (opacity * 255).round();
@@ -35,6 +39,12 @@ class CaregiverJobCard extends StatelessWidget {
   }
 
   String get _timeLabel {
+    final start = job.startTime.trim();
+    final end = job.endTime.trim();
+    final hasScheduledRange = start.isNotEmpty && end.isNotEmpty;
+    if (hasScheduledRange) {
+      return '$start - $end';
+    }
     final time = job.time.trim();
     return time.isNotEmpty ? time : 'Time pending';
   }
@@ -340,7 +350,12 @@ class CaregiverJobCard extends StatelessWidget {
                       const SizedBox(width: 8),
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [_StatusChip(status: job.status)],
+                        children: [
+                          _StatusChip(
+                            status: job.status,
+                            highlightScheduled: highlightScheduledStatusChip,
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -398,18 +413,28 @@ class CaregiverJobCard extends StatelessWidget {
                       vertical: 8,
                     ),
                     decoration: BoxDecoration(
-                      color: Colors.grey[100],
+                      color: activityButtonYellow,
                       borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: activityButtonYellow.withValues(alpha: 0.55),
+                      ),
                     ),
                     child: Row(
                       children: [
-                        DefaultProfileAvatar(
-                          radius: 14,
-                          photoUrl:
-                              personPhotoFromUser?.trim().isNotEmpty == true
-                                  ? personPhotoFromUser!.trim()
-                                  : null,
-                          label: resolvedPersonName,
+                        Container(
+                          padding: const EdgeInsets.all(1.6),
+                          decoration: const BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.white,
+                          ),
+                          child: DefaultProfileAvatar(
+                            radius: 14,
+                            photoUrl:
+                                personPhotoFromUser?.trim().isNotEmpty == true
+                                    ? personPhotoFromUser!.trim()
+                                    : null,
+                            label: resolvedPersonName,
+                          ),
                         ),
                         const SizedBox(width: 8),
                         Expanded(
@@ -428,16 +453,20 @@ class CaregiverJobCard extends StatelessWidget {
                                 Text(
                                   personLabel!,
                                   style: const TextStyle(
-                                    fontSize: 9,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w500,
                                     color: Colors.black54,
                                   ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
                               ],
                               const SizedBox(height: 2),
                               Text(
                                 resolvedPersonAddress,
                                 style: const TextStyle(
-                                  fontSize: 9,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w500,
                                   color: Colors.black54,
                                 ),
                                 maxLines: 2,
@@ -527,7 +556,10 @@ class CaregiverJobCard extends StatelessWidget {
                           ),
                         ),
                         const SizedBox(width: 6),
-                        _StatusChip(status: job.status),
+                        _StatusChip(
+                          status: job.status,
+                          highlightScheduled: highlightScheduledStatusChip,
+                        ),
                       ],
                     ),
                     const SizedBox(height: 4),
@@ -541,7 +573,13 @@ class CaregiverJobCard extends StatelessWidget {
                             ServiceTagChip(label: serviceLabel),
                             if (trimmedPersonTag?.isNotEmpty == true) ...[
                               const SizedBox(width: 4),
-                              ServiceTagChip(label: trimmedPersonTag!),
+                              ServiceTagChip(
+                                label: trimmedPersonTag!,
+                                backgroundColor: _accentGold,
+                                borderColor: _accentGold,
+                                foregroundColor: Colors.black,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ],
                           ],
                         ),
@@ -850,23 +888,45 @@ class _CircleActionButton extends StatelessWidget {
 }
 
 class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.status});
+  const _StatusChip({
+    required this.status,
+    required this.highlightScheduled,
+  });
 
   final String status;
+  final bool highlightScheduled;
 
   String get _normalized => status.trim().toLowerCase();
+  bool get _isEmergency =>
+      _normalized == 'emergency_alert' ||
+      _normalized == 'emergency alert' ||
+      _normalized == 'emergency';
+
+  bool get _isScheduledLike =>
+      _normalized == 'scheduled' || _normalized == 'pending' || _normalized == 'ready';
+
+  bool get _isOngoingLike =>
+      _normalized == 'ongoing' ||
+      _normalized == 'in_progress' ||
+      _normalized == 'notify' ||
+      _normalized == 'handle_client';
 
   Color get _dotColor {
+    if (_isScheduledLike) {
+      return _accentGold;
+    }
     return switch (_normalized) {
-      'ongoing' || 'in_progress' => Colors.blue.shade700,
+      _ when _isEmergency => Colors.red.shade700,
+      _ when _isOngoingLike => Colors.blue.shade700,
       'completed' || 'assigned' => Colors.green.shade700,
-      'cancelled' => Colors.red.shade700,
+      'cancelled' || 'canceled' => Colors.red.shade700,
       _ => Colors.grey.shade600,
     };
   }
 
   String get _label {
     return switch (_normalized) {
+      _ when _isEmergency => 'Emergency alert',
       'ongoing' || 'in_progress' => 'Ongoing',
       'completed' => 'Completed',
       'cancelled' => 'Cancelled',
@@ -911,7 +971,7 @@ class _StatusChip extends StatelessWidget {
           const SizedBox(width: 4),
           Text(
             _label,
-            style: const TextStyle(
+            style: TextStyle(
               fontWeight: FontWeight.w600,
               fontSize: 10,
               color: Colors.black87,

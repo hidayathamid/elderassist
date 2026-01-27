@@ -18,9 +18,14 @@ const Color _idleSosBackground = _navBarBackground;
 const Color _pageBackground = Color(0xFFF7F8FA);
 
 class UserRootScreen extends StatefulWidget {
-  const UserRootScreen({super.key, this.initialIndex = 0});
+  const UserRootScreen({
+    super.key,
+    this.initialIndex = 0,
+    this.activityInitialCategoryIndex = 0,
+  });
 
   final int initialIndex;
+  final int activityInitialCategoryIndex;
 
   @override
   State<UserRootScreen> createState() => _UserRootScreenState();
@@ -37,6 +42,7 @@ class _UserRootScreenState extends State<UserRootScreen> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   bool _initialSeenSetup = false;
+  bool _pendingCaregiverSnackShown = false;
 
   final List<Widget> _pages = [
     const UserHomeScreen(),
@@ -46,7 +52,7 @@ class _UserRootScreenState extends State<UserRootScreen> {
     const ProfileOverviewScreen(),
   ];
 
-  static const Color _activeBlue = Color(0xFF00B8C6);
+  static const Color _activeBlue = Color(0xFF00A8A7);
 
   void _onItemTapped(int index) {
     setState(() => _selectedIndex = index);
@@ -86,12 +92,14 @@ class _UserRootScreenState extends State<UserRootScreen> {
     _pages[3] = ActivityScreen(
       tabIndexListenable: _tabIndexNotifier,
       tabIndex: 3,
+      initialCategoryIndex: widget.activityInitialCategoryIndex,
     );
     _pages[4] = ProfileOverviewScreen(
       tabIndexListenable: _tabIndexNotifier,
       tabIndex: 4,
     );
     _ensureActivitySeenInitialized();
+    _maybeShowCaregiverPendingNotice();
   }
 
   @override
@@ -116,6 +124,30 @@ class _UserRootScreenState extends State<UserRootScreen> {
       {'lastSeenActivityAt': FieldValue.serverTimestamp()},
       SetOptions(merge: true),
     );
+  }
+
+  Future<void> _maybeShowCaregiverPendingNotice() async {
+    if (_pendingCaregiverSnackShown) return;
+    final uid = _auth.currentUser?.uid ?? '';
+    if (uid.trim().isEmpty) return;
+    try {
+      final snap = await _db.collection('waitinglist').doc(uid).get();
+      final data = snap.data();
+      final verified = (data?['verified'] as bool?) == true;
+      if (!snap.exists || verified) return;
+      if (!mounted) return;
+      _pendingCaregiverSnackShown = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Account under verification. Please wait 72 hours before you can log in as caregiver.',
+            ),
+          ),
+        );
+      });
+    } catch (_) {}
   }
 
   Future<void> _markActivitySeen() async {
@@ -144,7 +176,9 @@ class _UserRootScreenState extends State<UserRootScreen> {
         var count = 0;
         for (final booking in snapshot.docs) {
           final data = booking.data();
-          if ((data['hidden'] as bool?) == true) continue;
+          final hiddenLegacy = (data['hidden'] as bool?) == true;
+          final hiddenForClient = (data['hiddenForClient'] as bool?) == true;
+          if (hiddenLegacy || hiddenForClient) continue;
           count++;
         }
         return count;
@@ -294,7 +328,7 @@ class _UserRootScreenState extends State<UserRootScreen> {
                           ),
                           child: const Icon(
                             Icons.chat_bubble_outline,
-                            color: Color(0xFF00B8C6),
+                            color: _activeBlue,
                             size: 20,
                           ),
                         ),
@@ -512,7 +546,7 @@ class _NavBubbleItemState extends State<_NavBubbleItem> {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
-                color: widget.activeColor,
+                color: _UserRootScreenState._activeBlue,
                 borderRadius: BorderRadius.circular(999),
                 border: Border.all(
                   color: Colors.white.withValues(alpha: 0.9),

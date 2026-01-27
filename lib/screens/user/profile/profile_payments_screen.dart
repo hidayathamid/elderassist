@@ -1,6 +1,9 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
+import 'dart:convert';
+import 'dart:io';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -8,6 +11,10 @@ import 'package:emergencies_disability_assistance_app/models/payment_document_ta
 import 'package:emergencies_disability_assistance_app/utils/service_preferences.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 import 'package:emergencies_disability_assistance_app/widgets/standard_app_bar.dart';
+import 'package:http/http.dart' as http;
+import 'package:open_filex/open_filex.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 const Color _cardBorderColor = Color(0xFFE0E0E0);
 const Color _profileDarkText = Color(0xFF1B1D29);
@@ -18,11 +25,13 @@ final TextStyle _payoutHintStyle = TextStyle(
   color: _profileDarkText.withValues(alpha: 0.45),
 );
 const Color _statusPaid = Color(0xFF2BB673);
-const Color _statusPending = Color(0xFFF4B63D);
 const Color _statusCancelled = Color(0xFFF25C54);
 const double _segmentRadius = 26.0;
 const double _segmentHeight = 38.0;
 const Color _segmentIndicatorColor = Color(0xFFF4F5F7);
+const Color _receiptCardShadow = Color(0x1A0B0C10);
+const Color _receiptCardBorderStrong = Color(0xFFE1E4EA);
+const Color _receiptMutedText = Color(0xFF6B7280);
 const BorderRadius _historyCardBorderRadius = BorderRadius.all(
   Radius.circular(18),
 );
@@ -64,7 +73,7 @@ class ProfilePaymentsScreen extends StatefulWidget {
 
   const ProfilePaymentsScreen({
     super.key,
-    this.target = PaymentDocumentTarget.auto,
+    this.target = PaymentDocumentTarget.user,
     this.initialTabIndex = 0,
     this.historyNotificationMessage,
   });
@@ -97,11 +106,90 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
   DocumentReference<Map<String, dynamic>>? _activeTargetRef;
   bool _isCaregiverAccount = false;
   String? _historyNotificationMessage;
-  List<QueryDocumentSnapshot<Map<String, dynamic>>> _cachedWithdrawDocs = [];
-  List<QueryDocumentSnapshot<Map<String, dynamic>>> _cachedPaymentDocs = [];
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> _paymentDocsFromServer =
+      const [];
+  bool _hasSeenPaymentServerSnapshot = false;
+  DateTime? _paymentsCacheFirstSeenAt;
+  final Set<String> _hiddenPaymentIds = <String>{};
+  final Set<String> _dismissedPaymentNotices = <String>{};
   Timestamp? _lastSeenPaymentHistoryAt;
   bool _historySeenInitialized = false;
   TabController? _tabController;
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> _withdrawDocsFromServer =
+      const [];
+  bool _hasSeenWithdrawServerSnapshot = false;
+  Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>>?
+      _legacyPaymentsByBookingFuture;
+
+  Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>>
+      _loadLegacyPaymentsByBookingId(String userId) async {
+    // Some legacy payment docs were created without `payments.userId`.
+    // Fallback: resolve payments via the user's bookings (bookingId/toyyibBillCode).
+    final bookingsSnap = await FirebaseFirestore.instance
+        .collection('bookings')
+        .where('userId', isEqualTo: userId)
+        .limit(80)
+        .get();
+
+    if (bookingsSnap.docs.isEmpty) return const [];
+
+    final billCodes = <String>{};
+    final bookingIds = <String>{};
+    for (final doc in bookingsSnap.docs) {
+      final data = doc.data();
+      bookingIds.add(doc.id);
+      final billCode =
+          (data['toyyibBillCode'] as String?)?.trim() ??
+          (data['billCode'] as String?)?.trim();
+      if (billCode != null && billCode.isNotEmpty) billCodes.add(billCode);
+    }
+
+    final results = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+    final payments = FirebaseFirestore.instance.collection('payments');
+
+    // 1) Query by documentId in chunks (billCode is doc id for ToyyibPay).
+    final billCodeList = billCodes.toList();
+    for (var i = 0; i < billCodeList.length; i += 10) {
+      final chunk = billCodeList.sublist(
+        i,
+        (i + 10).clamp(0, billCodeList.length),
+      );
+      if (chunk.isEmpty) continue;
+      final q = await payments
+          .where(FieldPath.documentId, whereIn: chunk)
+          .limit(10)
+          .get();
+      results.addAll(q.docs);
+    }
+
+    // 2) Fallback: query by bookingId (in case billCode isn't stored).
+    // Limit to a small number to avoid excessive reads.
+    var scanned = 0;
+    for (final bid in bookingIds) {
+      if (scanned >= 40) break;
+      scanned += 1;
+      final q = await payments.where('bookingId', isEqualTo: bid).limit(3).get();
+      for (final doc in q.docs) {
+        results.add(doc);
+      }
+    }
+
+    // Dedupe by id.
+    final byId = <String, QueryDocumentSnapshot<Map<String, dynamic>>>{};
+    for (final doc in results) {
+      byId[doc.id] = doc;
+    }
+    return byId.values.toList();
+  }
+
+  bool get _isCaregiverPov {
+    if (widget.target == PaymentDocumentTarget.caregiver) return true;
+    if (widget.target == PaymentDocumentTarget.user) return false;
+    final ref = _activeTargetRef;
+    if (ref == null) return _isCaregiverAccount;
+    // user/<uid> vs caregivers/<uid>
+    return ref.path.startsWith('caregivers/');
+  }
 
   @override
   void initState() {
@@ -142,14 +230,32 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
               final data = payment.data();
               if ((data['hidden'] as bool?) == true) continue;
               final status = (data['status'] as num?)?.toInt();
-              final paymentStatus =
-                  (data['paymentStatus'] as String?)?.trim().toUpperCase();
+              final paymentStatus = (data['paymentStatus'] as String?)
+                  ?.trim()
+                  .toUpperCase();
               if (status == 3 || paymentStatus == 'FAILED') continue;
               count++;
             }
             return count;
           });
     }).distinct();
+  }
+
+  bool _isPaymentHiddenForUser(Map<String, dynamic> data, String userId) {
+    if (userId.trim().isEmpty) return false;
+    if ((data['hidden'] as bool?) == true) return true; // legacy global hide
+    final hiddenFor = data['hiddenFor'];
+    if (hiddenFor is Map) {
+      final map = Map<String, dynamic>.from(hiddenFor);
+      return map[userId] == true;
+    }
+    final hiddenForUsers = data['hiddenForUsers'];
+    if (hiddenForUsers is Iterable) {
+      return hiddenForUsers.whereType<Object>().any(
+        (e) => e.toString() == userId,
+      );
+    }
+    return false;
   }
 
   Future<void> _markPaymentHistorySeen() async {
@@ -201,6 +307,18 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       _historySeenInitialized = true;
       final resolvedSnap = await resolvedRef.get();
       final existingSeen = resolvedSnap.data()?['lastSeenPaymentHistoryAt'];
+      final dismissedNoticesRaw =
+          resolvedSnap.data()?['dismissedPaymentHistoryNotices'];
+      if (dismissedNoticesRaw is Iterable) {
+        _dismissedPaymentNotices
+          ..clear()
+          ..addAll(
+            dismissedNoticesRaw
+                .whereType<Object>()
+                .map((e) => e.toString())
+                .where((v) => v.trim().isNotEmpty),
+          );
+      }
       if (existingSeen is Timestamp) {
         _lastSeenPaymentHistoryAt = existingSeen;
       } else {
@@ -336,6 +454,25 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     );
   }
 
+  Future<void> _dismissPendingPaymentNotice(String message) async {
+    final trimmed = message.trim();
+    if (trimmed.isEmpty) return;
+    final ref = _activeTargetRef;
+    setState(() {
+      _dismissedPaymentNotices.add(trimmed);
+      if (_historyNotificationMessage?.trim() == trimmed) {
+        _historyNotificationMessage = null;
+      }
+    });
+    if (ref == null) return;
+    await ref.set(
+      {
+        'dismissedPaymentHistoryNotices': FieldValue.arrayUnion([trimmed]),
+      },
+      SetOptions(merge: true),
+    );
+  }
+
   Widget _buildSegmentTabBar() {
     return SizedBox(
       height: _segmentHeight,
@@ -354,7 +491,7 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
               borderRadius: BorderRadius.circular(_segmentRadius),
               child: TabBar(
                 indicator: BoxDecoration(
-                  color: _segmentIndicatorColor,
+                  color: _accentGold.withValues(alpha: 0.9),
                   borderRadius: BorderRadius.circular(_segmentRadius),
                 ),
                 indicatorPadding: const EdgeInsets.symmetric(
@@ -875,142 +1012,165 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
   Widget _historySection() {
     final userId = FirebaseAuth.instance.currentUser?.uid;
     if (userId == null) return const SizedBox.shrink();
-    final paymentField = _isCaregiverAccount ? 'caregiverId' : 'userId';
+    final paymentField = _isCaregiverPov ? 'booking.caregiverId' : 'userId';
     final baseQuery = FirebaseFirestore.instance
         .collection('payments')
-        .where(paymentField, isEqualTo: userId)
-        ;
-    final stream = _isCaregiverAccount
-        ? baseQuery.snapshots()
-        : baseQuery.orderBy('updatedAt', descending: true).snapshots();
+        .where(paymentField, isEqualTo: userId);
+    // Avoid `orderBy(updatedAt)` here because some legacy docs may have missing
+    // or mixed-type `updatedAt`, which can break the query. We sort locally.
+    final stream = baseQuery.snapshots();
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: stream,
       builder: (context, snapshot) {
+        bool isCaregiverVisible(Map<String, dynamic> data) {
+          if (!_isCaregiverPov) return true;
+          final status = (data['status'] as num?)?.toInt();
+          final paymentStatus =
+              (data['paymentStatus'] as String?)?.trim().toUpperCase() ?? '';
+          final bookingStatus =
+              (data['bookingStatus'] as String?)?.trim().toUpperCase() ?? '';
+          final isPaid =
+              status == 1 || paymentStatus == 'PAID' || paymentStatus == 'SUCCESS';
+          final isCancelled =
+              bookingStatus.contains('CANCEL') ||
+              paymentStatus == 'CANCELLED' ||
+              paymentStatus == 'CANCELED' ||
+              paymentStatus == 'REFUND_REQUESTED' ||
+              paymentStatus == 'REFUNDED';
+          return isPaid || isCancelled;
+        }
+
         if (snapshot.hasError) {
-          if (_cachedPaymentDocs.isNotEmpty) {
-            final visibleDocs = _cachedPaymentDocs.where((doc) {
-              final data = doc.data();
-              if ((data['hidden'] as bool?) == true) return false;
-              final status = (data['status'] as num?)?.toInt();
-              final paymentStatus =
-                  (data['paymentStatus'] as String?)?.trim().toUpperCase();
-              return !(status == 3 || paymentStatus == 'FAILED');
-            }).toList();
-            return _buildHistoryList(visibleDocs, const [], const []);
-          }
           return _historyPlaceholder(
             'Unable to load payments.',
-            'Please check your connection and try again.',
+            'Please check your connection and try again.\n${snapshot.error}',
           );
         }
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
         }
-        final docs = snapshot.data?.docs ?? const [];
-        final sortedDocs = List<QueryDocumentSnapshot<Map<String, dynamic>>>.of(
-          docs,
-        )..sort((a, b) {
-            final tsA = a.data()['updatedAt'] as Timestamp?;
-            final tsB = b.data()['updatedAt'] as Timestamp?;
-            if (tsA == null && tsB == null) return 0;
-            if (tsA == null) return 1;
-            if (tsB == null) return -1;
-            return tsB.compareTo(tsA);
-          });
-        if (docs.isNotEmpty) {
-          _cachedPaymentDocs = sortedDocs;
+        final snap = snapshot.data;
+        final docs = snap?.docs ?? const [];
+        if (snap != null && !snap.metadata.isFromCache) {
+          // Avoid brief "flash then disappear" when the first server snapshot is
+          // temporarily empty due to latency/rules propagation. Only overwrite
+          // the server cache when we actually receive documents.
+          if (docs.isNotEmpty) {
+            _paymentDocsFromServer = docs;
+          }
+          _hasSeenPaymentServerSnapshot = true;
         }
 
-        final lastSeen = _lastSeenPaymentHistoryAt;
-        bool isNew(Map<String, dynamic> data) {
-          if (lastSeen == null) return false;
-          final updatedAt = data['updatedAt'] as Timestamp?;
-          return updatedAt != null && updatedAt.compareTo(lastSeen) > 0;
+        // Prevent showing stale local-cache payments that may have been deleted
+        // or updated in Firestore. Prefer server-backed snapshots.
+        final effectiveDocs = _hasSeenPaymentServerSnapshot
+            ? _paymentDocsFromServer
+            : docs;
+
+        // Avoid infinite loading when Firestore stays on cache-only snapshots
+        // (e.g. slow network/rules/index propagation). If cache has docs, show
+        // them immediately. If cache is empty, show a loader briefly, then show
+        // the empty state.
+        final isCacheOnly = snap?.metadata.isFromCache == true;
+        if (!_hasSeenPaymentServerSnapshot && isCacheOnly) {
+          _paymentsCacheFirstSeenAt ??= DateTime.now();
+          final elapsed = DateTime.now().difference(_paymentsCacheFirstSeenAt!);
+          if (docs.isEmpty && elapsed < const Duration(seconds: 2)) {
+            Future.delayed(const Duration(seconds: 2), () {
+              if (!mounted) return;
+              setState(() {});
+            });
+            return const Center(child: CircularProgressIndicator());
+          }
+        } else {
+          _paymentsCacheFirstSeenAt = null;
         }
 
-        bool isCancelled(Map<String, dynamic> data) {
-          final status = (data['status'] as num?)?.toInt();
-          if (status == 3) return true;
-          final paymentStatus =
-              (data['paymentStatus'] as String?)?.trim().toUpperCase();
-          return paymentStatus == 'CANCELLED' || paymentStatus == 'CANCELED';
-        }
-
-        bool isPaid(Map<String, dynamic> data) {
-          final status = (data['status'] as num?)?.toInt();
-          if (status == 1) return true;
-          final paymentStatus =
-              (data['paymentStatus'] as String?)?.trim().toUpperCase();
-          return paymentStatus == 'PAID' || paymentStatus == 'SUCCESS';
-        }
+        final sortedDocs =
+            List<QueryDocumentSnapshot<Map<String, dynamic>>>.of(effectiveDocs)
+              ..sort((a, b) {
+                final tsA = a.data()['updatedAt'] as Timestamp?;
+                final tsB = b.data()['updatedAt'] as Timestamp?;
+                if (tsA == null && tsB == null) return 0;
+                if (tsA == null) return 1;
+                if (tsB == null) return -1;
+                return tsB.compareTo(tsA);
+              });
 
         final visibleDocs = sortedDocs.where((doc) {
+          if (_hiddenPaymentIds.contains(doc.id)) return false;
           final data = doc.data();
-          if ((data['hidden'] as bool?) == true) return false;
+          if (_isPaymentHiddenForUser(data, userId)) return false;
+          if (!isCaregiverVisible(data)) return false;
           final status = (data['status'] as num?)?.toInt();
-          final paymentStatus =
-              (data['paymentStatus'] as String?)?.trim().toUpperCase();
+          final paymentStatus = (data['paymentStatus'] as String?)
+              ?.trim()
+              .toUpperCase();
           return !(status == 3 || paymentStatus == 'FAILED');
         }).toList();
 
-        final cancelledCount =
-            sortedDocs
-                .where((doc) => isCancelled(doc.data()) && isNew(doc.data()))
-                .length;
-        final paidCount =
-            sortedDocs.where((doc) => isPaid(doc.data()) && isNew(doc.data())).length;
+        if (!_isCaregiverPov &&
+            _hasSeenPaymentServerSnapshot &&
+            visibleDocs.isEmpty) {
+          _legacyPaymentsByBookingFuture ??=
+              _loadLegacyPaymentsByBookingId(userId);
+          return FutureBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
+            future: _legacyPaymentsByBookingFuture,
+            builder: (context, legacySnapshot) {
+              if (legacySnapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              final legacyDocs = legacySnapshot.data ?? const [];
+              final merged = legacyDocs.where((doc) {
+                if (_hiddenPaymentIds.contains(doc.id)) return false;
+                final data = doc.data();
+                if (_isPaymentHiddenForUser(data, userId)) return false;
+                final status = (data['status'] as num?)?.toInt();
+                final paymentStatus = (data['paymentStatus'] as String?)
+                    ?.trim()
+                    .toUpperCase();
+                return !(status == 3 || paymentStatus == 'FAILED');
+              }).toList()
+                ..sort((a, b) {
+                  final tsA = a.data()['updatedAt'] as Timestamp?;
+                  final tsB = b.data()['updatedAt'] as Timestamp?;
+                  if (tsA == null && tsB == null) return 0;
+                  if (tsA == null) return 1;
+                  if (tsB == null) return -1;
+                  return tsB.compareTo(tsA);
+                });
+
+              if (merged.isEmpty) {
+                return _historyPlaceholder(
+                  'No payment history yet.',
+                  'Pending and completed payments will appear here.',
+                );
+              }
+              return _buildHistoryList(merged, const [], const []);
+            },
+          );
+        }
 
         final notices = <_HistoryNoticeCard>[];
-        if (!_isCaregiverAccount && cancelledCount > 0) {
+        final pendingMessage = _historyNotificationMessage?.trim() ?? '';
+        if (!_isCaregiverPov &&
+            pendingMessage.isNotEmpty &&
+            !_dismissedPaymentNotices.contains(pendingMessage)) {
           notices.add(
             _HistoryNoticeCard(
-              icon: Icons.cancel_outlined,
-              iconColor: _statusCancelled,
-              statusLabel: 'Cancelled',
-              message: cancelledCount == 1
-                  ? 'A payment was cancelled. You can place the booking again anytime.'
-                  : '$cancelledCount payments were cancelled. You can place those bookings again anytime.',
-            ),
-          );
-        }
-        if (_isCaregiverAccount && paidCount > 0) {
-          notices.add(
-            _HistoryNoticeCard(
-              icon: Icons.check_circle_outline,
-              iconColor: _statusPaid,
-              statusLabel: 'Paid',
-              message: paidCount == 1
-                  ? 'You received a new successful payment.'
-                  : 'You received $paidCount new successful payments.',
-            ),
-          );
-        }
-        if (_isCaregiverAccount && cancelledCount > 0) {
-          notices.add(
-            _HistoryNoticeCard(
-              icon: Icons.event_busy_outlined,
-              iconColor: _statusCancelled,
-              statusLabel: 'Cancelled',
-              message: cancelledCount == 1
-                  ? 'A booking payment was cancelled.'
-                  : '$cancelledCount booking payments were cancelled.',
-            ),
-          );
-        }
-        if (_historyNotificationMessage != null) {
-          notices.add(
-            _HistoryNoticeCard(
-              message: _historyNotificationMessage!,
+              message: pendingMessage,
               statusLabel: 'Pending',
+              onDelete: () => _dismissPendingPaymentNotice(pendingMessage),
             ),
           );
         }
 
-        final withdrawStream = _isCaregiverAccount
+        final withdrawStream = _isCaregiverPov
             ? FirebaseFirestore.instance
                   .collection('withdrawRequests')
                   .where('caregiverId', isEqualTo: userId)
-                  .orderBy('requestedAt', descending: true)
+                  // Avoid composite-index / mixed-type issues on `requestedAt`.
+                  // We sort locally instead.
                   .snapshots()
             : null;
         if (withdrawStream == null) {
@@ -1025,13 +1185,48 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
         return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
           stream: withdrawStream,
           builder: (context, withdrawSnapshot) {
-            final latestWithdrawDocs = withdrawSnapshot.data?.docs ?? [];
-            if (latestWithdrawDocs.isNotEmpty) {
-              _cachedWithdrawDocs = latestWithdrawDocs;
+            if (withdrawSnapshot.hasError) {
+              if (visibleDocs.isEmpty && notices.isEmpty) {
+                return _historyPlaceholder(
+                  'Unable to load withdrawals.',
+                  'Please check your connection and try again.',
+                );
+              }
+              return _buildHistoryList(visibleDocs, notices, const []);
             }
-            final effectiveWithdrawDocs = latestWithdrawDocs.isNotEmpty
-                ? latestWithdrawDocs
-                : _cachedWithdrawDocs;
+
+            final withdrawData = withdrawSnapshot.data;
+            if (withdrawData != null && !withdrawData.metadata.isFromCache) {
+              _withdrawDocsFromServer = List.of(withdrawData.docs)
+                ..sort((a, b) {
+                  final aTs = a.data()['requestedAt'] as Timestamp?;
+                  final bTs = b.data()['requestedAt'] as Timestamp?;
+                  if (aTs == null && bTs == null) return 0;
+                  if (aTs == null) return 1;
+                  if (bTs == null) return -1;
+                  return bTs.compareTo(aTs);
+                });
+              _hasSeenWithdrawServerSnapshot = true;
+            }
+
+            // Avoid showing stale local-cache results (can briefly show deleted
+            // requests). Prefer the first server-backed snapshot instead.
+            final effectiveWithdrawDocs = _hasSeenWithdrawServerSnapshot
+                ? _withdrawDocsFromServer
+                : (withdrawData?.metadata.isFromCache == true
+                    ? const <QueryDocumentSnapshot<Map<String, dynamic>>>[]
+                    : (List<QueryDocumentSnapshot<Map<String, dynamic>>>.of(
+                        withdrawData?.docs ??
+                            const <QueryDocumentSnapshot<Map<String, dynamic>>>[],
+                      )
+                      ..sort((a, b) {
+                        final aTs = a.data()['requestedAt'] as Timestamp?;
+                        final bTs = b.data()['requestedAt'] as Timestamp?;
+                        if (aTs == null && bTs == null) return 0;
+                        if (aTs == null) return 1;
+                        if (bTs == null) return -1;
+                        return bTs.compareTo(aTs);
+                      })));
             if (visibleDocs.isEmpty &&
                 effectiveWithdrawDocs.isEmpty &&
                 notices.isEmpty) {
@@ -1071,27 +1266,14 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     }
 
     final lastSeen = _lastSeenPaymentHistoryAt;
-    final newCount = lastSeen == null
-        ? 0
-        : visibleDocs.where((doc) {
-            final updatedAt = doc.data()['updatedAt'] as Timestamp?;
-            return updatedAt != null && updatedAt.compareTo(lastSeen) > 0;
-          }).length;
-    if (newCount > 0) {
-      entries.add(
-        _HistoryNoticeCard(
-          icon: Icons.notifications_active_outlined,
-          iconColor: _segmentIndicatorColor,
-          statusLabel: 'New updates',
-          message:
-              'You have $newCount new ${newCount == 1 ? 'payment update' : 'payment updates'}.',
-        ),
-      );
-    }
     for (final doc in withdrawDocs) {
       entries.add(_buildWithdrawHistoryCard(doc));
     }
     for (final doc in visibleDocs) {
+      if (_isCancelledOrRefundPayment(doc.data())) {
+        entries.add(_buildCancelRefundNoticeCard(doc));
+        continue;
+      }
       final updatedAt = doc.data()['updatedAt'] as Timestamp?;
       final isNew =
           lastSeen != null &&
@@ -1112,12 +1294,171 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
   ) {
     final data = doc.data();
     final requestedAt = (data['requestedAt'] as Timestamp?)?.toDate();
+    final normalized = ((data['status'] as String?) ?? 'pending').trim().toLowerCase();
+    final receiptUrl = ((data['receiptUrl'] as String?) ?? '').trim();
+    final receiptFileName =
+        ((data['receiptFileName'] as String?) ?? '').trim().isNotEmpty
+            ? ((data['receiptFileName'] as String?) ?? '').trim()
+            : 'withdraw-receipt-${doc.id}.pdf';
+    final iconColor = switch (normalized) {
+      'approved' => _statusPaid,
+      'rejected' => _statusCancelled,
+      'failed' => _statusCancelled,
+      _ => _accentGold,
+    };
     return _HistoryNoticeCard(
       icon: Icons.account_balance_wallet_outlined,
-      iconColor: _accentGold,
+      iconColor: iconColor,
       statusLabel: _withdrawStatusLabel(data),
       message: _withdrawRequestMessage(data),
       requestedAt: requestedAt,
+      footer: normalized == 'approved' && receiptUrl.isNotEmpty
+          ? SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () => _downloadWithdrawReceiptPdf(
+                  url: receiptUrl,
+                  fileName: receiptFileName,
+                  feedbackContext: context,
+                ),
+                icon: const Icon(Icons.download_outlined, size: 18),
+                label: const Text(
+                  'Download receipt',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accentGold,
+                  foregroundColor: Colors.black,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              ),
+            )
+          : null,
+    );
+  }
+
+  bool _isCancelledOrRefundPayment(Map<String, dynamic> data) {
+    final bookingStatus =
+        (data['bookingStatus'] as String?)?.trim().toUpperCase() ?? '';
+    final paymentStatus =
+        (data['paymentStatus'] as String?)?.trim().toUpperCase() ?? '';
+    return bookingStatus.contains('CANCEL') ||
+        paymentStatus == 'CANCELLED' ||
+        paymentStatus == 'CANCELED' ||
+        paymentStatus.startsWith('REFUND');
+  }
+
+  String _refundNoticeStatusLabel({
+    required String bookingStatus,
+    required String paymentStatus,
+    required bool verified,
+  }) {
+    if (verified) return 'Refund verified';
+    if (paymentStatus == 'REFUNDED') return 'Refund verified';
+    if (paymentStatus == 'REFUND_REQUESTED') return 'Refund verification pending';
+    if (bookingStatus.contains('CANCEL')) return 'Refund verification pending';
+    if (paymentStatus == 'CANCELLED' || paymentStatus == 'CANCELED') {
+      return 'Cancelled';
+    }
+    return 'Refund verification pending';
+  }
+
+  String _refundNoticeMessage(Map<String, dynamic> data) {
+    final booking =
+        (data['booking'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final caregiverName =
+        (booking['caregiverName'] as String?)?.trim() ??
+        (data['caregiverName'] as String?)?.trim() ??
+        '';
+    final personName =
+        (booking['personName'] as String?)?.trim() ??
+        (data['personName'] as String?)?.trim() ??
+        '';
+    final date = (booking['date'] as String?)?.trim() ?? (data['date'] as String?)?.trim() ?? '';
+    final time = (booking['time'] as String?)?.trim() ?? (data['time'] as String?)?.trim() ?? '';
+    final amount =
+        (data['amount'] as num?)?.toDouble() ??
+        (booking['servicePrice'] as num?)?.toDouble() ??
+        0.0;
+
+    final bookingLineParts = <String>[
+      if (caregiverName.isNotEmpty) caregiverName,
+      if (personName.isNotEmpty) personName,
+    ];
+    final bookingLine = bookingLineParts.isEmpty
+        ? ''
+        : 'Booking: ${bookingLineParts.join(' • ')}';
+
+    final scheduleParts = <String>[
+      if (date.isNotEmpty) date,
+      if (time.isNotEmpty) time,
+    ];
+    final scheduleLine =
+        scheduleParts.isEmpty ? '' : 'Schedule: ${scheduleParts.join(' • ')}';
+
+    final lines = <String>[
+      (data['verified'] == true)
+          ? 'Refund verified.'
+          : 'Booking cancelled. Refund verification pending.',
+      if (bookingLine.isNotEmpty) bookingLine,
+      if (scheduleLine.isNotEmpty) scheduleLine,
+      'Amount: ${_toCurrency(amount)}',
+    ];
+    return lines.join('\n');
+  }
+
+  Widget _buildCancelRefundNoticeCard(
+    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data();
+    final bookingStatus =
+        (data['bookingStatus'] as String?)?.trim().toUpperCase() ?? '';
+    final paymentStatus =
+        (data['paymentStatus'] as String?)?.trim().toUpperCase() ?? '';
+    final verified = data['verified'] == true;
+    final updatedAt = (data['updatedAt'] as Timestamp?)?.toDate();
+
+    final statusLabel = _refundNoticeStatusLabel(
+      bookingStatus: bookingStatus,
+      paymentStatus: paymentStatus,
+      verified: verified,
+    );
+    final iconColor =
+        verified || paymentStatus == 'REFUNDED' ? _statusPaid : _accentGold;
+
+    return _HistoryNoticeCard(
+      icon: Icons.assignment_return_outlined,
+      iconColor: iconColor,
+      statusLabel: statusLabel,
+      message: _refundNoticeMessage(data),
+      requestedAt: updatedAt,
+      footer: SizedBox(
+        width: double.infinity,
+        child: ElevatedButton.icon(
+          onPressed: () => _openPaymentReceiptSheet(
+            paymentId: doc.id,
+            payment: data,
+          ),
+          icon: const Icon(Icons.remove_red_eye_outlined, size: 18),
+          label: const Text(
+            'View details',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _accentGold,
+            foregroundColor: Colors.black,
+            elevation: 0,
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -1138,14 +1479,238 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
   String _withdrawRequestMessage(Map<String, dynamic> data) {
     final rawStatus = (data['status'] as String?) ?? 'pending';
     final normalized = rawStatus.trim().toLowerCase();
+    final requested = _toCurrency(
+      _readMoney(data['thisWeekAmount']) > 0
+          ? _readMoney(data['thisWeekAmount'])
+          : _readMoney(data['payoutAmount']),
+    );
+    final approved = _toCurrency(
+      _readMoney(data['approvedAmount']) > 0
+          ? _readMoney(data['approvedAmount'])
+          : (_readMoney(data['payoutAmount']) > 0
+              ? _readMoney(data['payoutAmount'])
+              : _readMoney(data['thisWeekAmount'])),
+    );
     switch (normalized) {
       case 'approved':
-        return 'Your withdrawal request has been approved. Funds will reach your payout account shortly.';
+        return 'Withdraw request approved.\nRequested: $requested\nApproved: $approved';
       case 'rejected':
       case 'failed':
-        return 'Your withdrawal request was declined. Please contact support for more information.';
+        return 'Withdraw request declined.\nRequested: $requested';
       default:
-        return 'Withdrawal request sent. Please allow up to 24 hours for admin verification.';
+        return 'Withdraw request sent.\nRequested: $requested\nPlease allow up to 24 hours for admin verification.';
+    }
+  }
+
+  String _toCurrency(double value) {
+    if (value <= 0) return 'RM 0.00';
+    return 'RM ${_formatMoney(value)}';
+  }
+
+  Future<void> _downloadWithdrawReceiptPdf({
+    required String url,
+    required String fileName,
+    required BuildContext feedbackContext,
+  }) async {
+    if (kIsWeb) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          title: const Text(
+            'Download unavailable',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          content: const Text(
+            'Download is not available on web.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.black54, fontSize: 12),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: [
+            SizedBox(
+              width: 120,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accentGold,
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: const Text(
+                  'OK',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    if (!(Platform.isAndroid || Platform.isIOS || Platform.isFuchsia)) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          title: const Text(
+            'Download unavailable',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          content: const Text(
+            'Download is not available on this platform.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.black54, fontSize: 12),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: [
+            SizedBox(
+              width: 120,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accentGold,
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: const Text(
+                  'OK',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    BuildContext? loadingDialogContext;
+    var loadingOpen = true;
+    void closeLoadingIfOpen() {
+      if (!loadingOpen) return;
+      final ctx = loadingDialogContext;
+      if (ctx == null) return;
+      final nav = Navigator.of(ctx, rootNavigator: true);
+      if (nav.canPop()) nav.pop();
+      loadingOpen = false;
+    }
+
+    showDialog<void>(
+      context: context,
+      useRootNavigator: true,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        loadingDialogContext = dialogContext;
+        return const AlertDialog(
+          backgroundColor: Colors.white,
+          content: Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2.2),
+                ),
+                SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    'Downloading receipt...',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    try {
+      final uri = Uri.tryParse(url);
+      if (uri == null) {
+        throw Exception('Invalid URL');
+      }
+      final response = await http.get(uri);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception('Failed to download (${response.statusCode})');
+      }
+      final bytes = response.bodyBytes;
+      if (bytes.isEmpty) {
+        throw Exception('Empty file');
+      }
+
+      final dir = await getApplicationDocumentsDirectory();
+      final safeName =
+          fileName.trim().isNotEmpty ? fileName.trim() : 'withdraw-receipt.pdf';
+      final path = '${dir.path}/$safeName';
+      final file = File(path);
+      await file.writeAsBytes(bytes, flush: true);
+
+      closeLoadingIfOpen();
+
+      await OpenFilex.open(path);
+      if (!mounted) return;
+      ScaffoldMessenger.of(feedbackContext).showSnackBar(
+        const SnackBar(content: Text('Receipt downloaded.')),
+      );
+    } catch (e) {
+      closeLoadingIfOpen();
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          title: const Text(
+            'Unable to download receipt',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          content: Text(
+            e.toString(),
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.black54, fontSize: 12),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: [
+            SizedBox(
+              width: 120,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accentGold,
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: const Text(
+                  'OK',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      closeLoadingIfOpen();
     }
   }
 
@@ -1179,15 +1744,24 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     final amount = (data['servicePrice'] as num?)?.toDouble() ?? 0;
     final bookingStatus =
         (data['status'] as String?)?.toUpperCase() ?? 'PENDING';
+    final paymentStatus =
+        (data['paymentStatus'] as String?)?.trim().toUpperCase() ?? '';
     final reason = (data['cancellationReason'] as String?) ?? '';
     final personName = (data['personName'] as String?) ?? '';
     final caregiverName = (data['caregiverName'] as String?) ?? '';
     final personAddress = (data['personAddress'] as String?) ?? '';
-    final caregiverPhoto = (data['caregiverPhoto'] as String?)?.trim();
     final date = (data['date'] as String?) ?? '';
     final time = (data['time'] as String?) ?? '';
-    final notes = (data['notes'] as String?) ?? '';
-    final showRefundInProgress = bookingStatus.contains('CANCEL');
+    final notes =
+        (data['personNotes'] as String?) ?? (data['notes'] as String?) ?? '';
+    final showRefundInProgress =
+        bookingStatus.contains('CANCEL') || paymentStatus.startsWith('REFUND');
+    final String? refundStatusLabel = () {
+      if (paymentStatus == 'REFUNDED') return 'Refund verified';
+      if (paymentStatus == 'REFUND_REQUESTED') return 'Refund verification pending';
+      if (bookingStatus.contains('CANCEL')) return 'Refund verification pending';
+      return null;
+    }();
 
     return _SwipeableHistoryCard(
       backgroundBuilder: (onDeleteTap) => _buildDeleteBackground(onDeleteTap),
@@ -1210,16 +1784,6 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
               children: [
                 Row(
                   children: [
-                    DefaultProfileAvatar(
-                      radius: 20,
-                      photoUrl: caregiverPhoto?.isNotEmpty == true
-                          ? caregiverPhoto
-                          : null,
-                      label: caregiverName.isNotEmpty
-                          ? caregiverName
-                          : (service.isNotEmpty ? service : '?'),
-                    ),
-                    const SizedBox(width: 10),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1247,13 +1811,7 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                       children: [
                         _StatusChip(bookingStatus: bookingStatus),
                         const SizedBox(height: 6),
-                        isNew
-                            ? const _CountPill(count: 1)
-                            : const Icon(
-                                Icons.chevron_right,
-                                size: 18,
-                                color: Colors.black38,
-                              ),
+                        if (isNew) const _CountPill(count: 1),
                       ],
                     ),
                   ],
@@ -1316,13 +1874,6 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                   ),
                   child: Row(
                     children: [
-                      DefaultProfileAvatar(
-                        radius: 16,
-                        label: personName.isNotEmpty
-                            ? personName
-                            : caregiverName,
-                      ),
-                      const SizedBox(width: 8),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1366,9 +1917,9 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                     ),
                     const Spacer(),
                     if (showRefundInProgress)
-                      const Text(
-                        'Refund in progress (ToyyibPay)',
-                        style: TextStyle(fontSize: 11, color: Colors.black54),
+                      Text(
+                        refundStatusLabel ?? 'Refund verification pending',
+                        style: const TextStyle(fontSize: 11, color: Colors.black54),
                       ),
                   ],
                 ),
@@ -1396,7 +1947,8 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     Map<String, dynamic> data, {
     bool isNew = false,
   }) {
-    final booking = (data['booking'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final booking =
+        (data['booking'] as Map?)?.cast<String, dynamic>() ?? const {};
     final caregiverName =
         (booking['caregiverName'] as String?)?.trim() ?? 'Caregiver';
     final caregiverPhoto = (booking['caregiverPhoto'] as String?)?.trim();
@@ -1407,16 +1959,30 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     final service = serviceLabel.isNotEmpty
         ? serviceLabel
         : (booking['service'] as String?)?.trim() ?? 'Service';
-    final amount = (data['amount'] as num?)?.toDouble() ??
+    final amount =
+        (data['amount'] as num?)?.toDouble() ??
         (booking['servicePrice'] as num?)?.toDouble() ??
         0.0;
+    const serviceFee = 1.0;
+    final afterServiceFee = (amount - serviceFee).clamp(0.0, double.infinity);
+    final platformFee = (afterServiceFee * 0.07).clamp(0.0, double.infinity);
+    final netAmount =
+        (afterServiceFee - platformFee).clamp(0.0, double.infinity);
+    final displayedAmount = _isCaregiverPov ? netAmount : amount;
     final paymentStatus =
         (data['paymentStatus'] as String?)?.trim().toUpperCase() ?? 'PENDING';
     final bookingStatus =
         (data['bookingStatus'] as String?)?.trim().toUpperCase() ?? '';
-
-    final statusLabel = paymentStatus == 'PAID' ? 'Paid' : 'Pending';
-    final statusColor = paymentStatus == 'PAID' ? _statusPaid : _statusPending;
+    final bool showRefundNotice = !_isCaregiverPov &&
+        (paymentStatus == 'REFUND_REQUESTED' ||
+            paymentStatus == 'REFUNDED' ||
+            bookingStatus.contains('CANCEL'));
+    final String? refundNoticeLabel = () {
+      if (paymentStatus == 'REFUNDED') return 'Refund verified';
+      if (paymentStatus == 'REFUND_REQUESTED') return 'Refund verification pending';
+      if (bookingStatus.contains('CANCEL')) return 'Refund verification pending';
+      return null;
+    }();
 
     return _SwipeableHistoryCard(
       backgroundBuilder: (onDeleteTap) => _buildDeleteBackground(onDeleteTap),
@@ -1424,7 +1990,7 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          onTap: () {},
+          onTap: () => _openPaymentReceiptSheet(paymentId: id, payment: data),
           borderRadius: _historyCardBorderRadius,
           child: Container(
             padding: const EdgeInsets.all(14),
@@ -1440,26 +2006,35 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                 Row(
                   children: [
                     DefaultProfileAvatar(
-                      radius: 20,
+                      radius: 18,
                       photoUrl: caregiverPhoto?.isNotEmpty == true
                           ? caregiverPhoto
                           : null,
-                      label: caregiverName.isNotEmpty
-                          ? caregiverName
-                          : (service.isNotEmpty ? service : '?'),
+                      label: caregiverName.isNotEmpty ? caregiverName : '?',
                     ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            caregiverName,
-                            style: const TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                              color: _profileDarkText,
-                            ),
+                        Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  caregiverName,
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                    color: _profileDarkText,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              if (bookingStatus.isNotEmpty)
+                                _StatusChip(bookingStatus: bookingStatus),
+                            ],
                           ),
                           if (service.isNotEmpty)
                             Text(
@@ -1469,6 +2044,8 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                                 fontWeight: FontWeight.w600,
                                 color: Colors.black54,
                               ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
                         ],
                       ),
@@ -1476,15 +2053,7 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
-                        _PaymentStatusChip(label: statusLabel, color: statusColor),
-                        const SizedBox(height: 6),
-                        isNew
-                            ? const _CountPill(count: 1)
-                            : const Icon(
-                                Icons.chevron_right,
-                                size: 18,
-                                color: Colors.black38,
-                              ),
+                        if (isNew) const _CountPill(count: 1),
                       ],
                     ),
                   ],
@@ -1495,7 +2064,7 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                     const Icon(Icons.payments_outlined, size: 12),
                     const SizedBox(width: 6),
                     Text(
-                      'RM ${amount.toStringAsFixed(2)}',
+                      'RM ${displayedAmount.toStringAsFixed(2)}',
                       style: const TextStyle(
                         fontWeight: FontWeight.w700,
                         fontSize: 12,
@@ -1503,26 +2072,22 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    Text(
-                      statusLabel,
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: statusColor,
-                      ),
-                    ),
+                    _PaymentStatusChip(paymentStatus: paymentStatus),
                     const Spacer(),
-                    if (bookingStatus.isNotEmpty)
-                      Text(
-                        bookingStatus,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.black54,
-                        ),
-                      ),
+                    // booking status shown in the top chip
                   ],
                 ),
+                if (showRefundNotice && refundNoticeLabel != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    refundNoticeLabel,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.black54,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 6),
                 Row(
                   children: [
@@ -1566,6 +2131,1260 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  String _formatMoney(double value) => value.toStringAsFixed(2);
+
+  double _readMoney(Object? raw) {
+    if (raw is num) return raw.toDouble();
+    if (raw is String) return double.tryParse(raw.trim()) ?? 0.0;
+    return 0.0;
+  }
+
+  String? _stringValue(Object? value) {
+    if (value is String && value.trim().isNotEmpty) return value.trim();
+    if (value is Iterable) {
+      final joinable = value.whereType<String>().toList();
+      if (joinable.isNotEmpty) return joinable.join(', ');
+    }
+    if (value != null) return value.toString();
+    return null;
+  }
+
+  static const TextStyle _receiptSectionHeaderTextStyle = TextStyle(
+    fontWeight: FontWeight.w800,
+    fontSize: 14,
+    color: _profileDarkText,
+    letterSpacing: -0.15,
+  );
+
+  static const TextStyle _receiptFieldLabelTextStyle = TextStyle(
+    fontSize: 11,
+    fontWeight: FontWeight.w700,
+    color: _receiptMutedText,
+  );
+
+  static const TextStyle _receiptFieldValueTextStyle = TextStyle(
+    fontSize: 12,
+    fontWeight: FontWeight.w700,
+    color: _profileDarkText,
+    height: 1.25,
+  );
+
+  BoxDecoration _receiptPremiumCardDecoration({double radius = 18}) {
+    return BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(radius),
+      border: Border.all(color: _receiptCardBorderStrong),
+      boxShadow: const [
+        BoxShadow(
+          color: _receiptCardShadow,
+          blurRadius: 12,
+          offset: Offset(0, 6),
+        ),
+      ],
+    );
+  }
+
+  Widget _receiptSectionHeader({required String title, String? hint}) {
+    final trimmedHint = (hint ?? '').trim();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 6, 4, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(title, style: _receiptSectionHeaderTextStyle),
+              ),
+              if (trimmedHint.isNotEmpty) ...[
+                const SizedBox(width: 6),
+                Icon(
+                  Icons.info_outline,
+                  size: 16,
+                  color: Colors.black.withValues(alpha: 0.45),
+                ),
+              ],
+            ],
+          ),
+          if (trimmedHint.isNotEmpty) ...[
+            const SizedBox(height: 3),
+            Text(
+              trimmedHint,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Colors.black.withValues(alpha: 0.50),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _receiptTabContent(List<Widget> children) {
+    return Container(
+      decoration: _receiptPremiumCardDecoration(),
+      margin: const EdgeInsets.only(top: 6),
+      child: Column(children: children),
+    );
+  }
+
+  Widget _receiptInfoRow({
+    required IconData icon,
+    required String title,
+    required String value,
+    bool showBorder = true,
+  }) {
+    final display = value.trim().isNotEmpty ? value.trim() : 'Unavailable';
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: showBorder
+              ? BorderSide(color: Colors.black.withValues(alpha: 0.06))
+              : BorderSide.none,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 17, color: _reminderIconColor),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: _receiptFieldLabelTextStyle),
+                const SizedBox(height: 4),
+                Text(display, style: _receiptFieldValueTextStyle),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<Map<String, dynamic>> _loadBookingSummaryForPayment({
+    required String paymentId,
+    required Map<String, dynamic> payment,
+  }) async {
+    final booking =
+        (payment['booking'] as Map?)?.cast<String, dynamic>() ??
+        <String, dynamic>{};
+    final bookingId =
+        (payment['bookingId'] as String?)?.trim() ??
+        (booking['bookingId'] as String?)?.trim() ??
+        '';
+    final ownerUserId =
+        (payment['userId'] as String?)?.trim() ??
+        (booking['userId'] as String?)?.trim() ??
+        '';
+    var resolvedBooking = Map<String, dynamic>.from(booking);
+    if (bookingId.isNotEmpty) {
+      final snap = await FirebaseFirestore.instance
+          .collection('bookings')
+          .doc(bookingId)
+          .get();
+      if (snap.exists) {
+        resolvedBooking = {...resolvedBooking, ...?snap.data()};
+      }
+    }
+
+    String? ownerName;
+    String? ownerPhone;
+    if (ownerUserId.isNotEmpty) {
+      try {
+        final ownerSnap = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(ownerUserId)
+            .get();
+        final data = ownerSnap.data();
+        if (data != null) {
+          final personId =
+              (resolvedBooking['personId'] as String?)?.trim() ?? '';
+          final addressId =
+              (resolvedBooking['addressId'] as String?)?.trim() ?? '';
+          final entries =
+              (data['address'] as List?)?.whereType<Map>().toList() ?? const [];
+          Map? selectedEntry;
+          if (personId.trim().isNotEmpty) {
+            for (final entry in entries) {
+              final entryId =
+                  entry['id']?.toString() ?? entry['personId']?.toString();
+              if (entryId != null && entryId == personId.trim()) {
+                selectedEntry = entry;
+                break;
+              }
+            }
+          }
+          if (selectedEntry == null && bookingId.trim().isNotEmpty) {
+            for (final entry in entries) {
+              final entryBookingId = entry['bookingId']?.toString();
+              if (entryBookingId != null &&
+                  entryBookingId == bookingId.trim()) {
+                selectedEntry = entry;
+                break;
+              }
+            }
+          }
+          if (selectedEntry == null && addressId.trim().isNotEmpty) {
+            for (final entry in entries) {
+              final entryAddressId = entry['addressId']?.toString();
+              if (entryAddressId != null &&
+                  entryAddressId == addressId.trim()) {
+                selectedEntry = entry;
+                break;
+              }
+            }
+          }
+
+          ownerName = (data['name'] as String?)?.trim();
+          ownerPhone =
+              (data['phone'] as String?)?.trim() ??
+              (data['phoneNumber'] as String?)?.trim();
+
+          // Match ActivityBookingDetailsScreen: prefer selected address entry phone.
+          if (selectedEntry != null) {
+            final pickedPhone = _stringValue(selectedEntry['phone']);
+            if (pickedPhone != null) {
+              resolvedBooking['personPhone'] = pickedPhone;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    final caregiverId =
+        (resolvedBooking['caregiverId'] as String?)?.trim() ??
+        (payment['caregiverId'] as String?)?.trim() ??
+        '';
+    String? caregiverPhone;
+    if (caregiverId.isNotEmpty) {
+      try {
+        final caregiverSnap = await FirebaseFirestore.instance
+            .collection('caregivers')
+            .doc(caregiverId)
+            .get();
+        final data = caregiverSnap.data();
+        if (data != null) {
+          caregiverPhone =
+              (data['phone'] as String?)?.trim() ??
+              (data['phoneNumber'] as String?)?.trim();
+        }
+      } catch (_) {}
+    }
+
+    final personPhone =
+        _stringValue(resolvedBooking['personPhone']) ??
+        _stringValue(resolvedBooking['phone']) ??
+        _stringValue(resolvedBooking['personContact']) ??
+        _stringValue(resolvedBooking['personNumber']) ??
+        '';
+
+    final paymentStatus =
+        (payment['paymentStatus'] as String?)?.trim().toUpperCase() ??
+        'PENDING';
+    final bookingStatus =
+        (payment['bookingStatus'] as String?)?.trim().toUpperCase() ??
+        (resolvedBooking['status'] as String?)?.trim().toUpperCase() ??
+        '';
+    final paidAt = payment['paidAt'] ?? resolvedBooking['paidAt'];
+    final updatedAt = payment['updatedAt'] ?? resolvedBooking['updatedAt'];
+    final servicePrice = _readMoney(resolvedBooking['servicePrice']);
+    final distanceKm = _readMoney(resolvedBooking['distanceKm']);
+    final distanceCharge = _readMoney(resolvedBooking['distanceCharge']);
+    final amount = _readMoney(payment['amount']);
+    final total = amount > 0 ? amount : (servicePrice + distanceCharge);
+
+    return {
+      'paymentId': paymentId,
+      'bookingId': bookingId,
+      'billCode': (payment['billCode'] as String?)?.trim() ?? '',
+      'paymentUrl': (payment['paymentUrl'] as String?)?.trim() ?? '',
+      'paymentStatus': paymentStatus,
+      'bookingStatus': bookingStatus,
+      'paidAt': paidAt,
+      'updatedAt': updatedAt,
+      'paymentMethod':
+          (payment['paymentMethod'] as String?)?.trim() ??
+          (resolvedBooking['paymentMethod'] as String?)?.trim() ??
+          'ToyyibPay',
+      'amount': total,
+      'servicePrice': servicePrice,
+      'distanceKm': distanceKm,
+      'distanceCharge': distanceCharge,
+      'caregiverId': caregiverId,
+      'caregiverName':
+          (resolvedBooking['caregiverName'] as String?)?.trim() ?? '',
+      'caregiverPhoto':
+          (resolvedBooking['caregiverPhoto'] as String?)?.trim() ?? '',
+      'caregiverPhone':
+          (resolvedBooking['caregiverPhone'] as String?)?.trim() ??
+          (resolvedBooking['caregiverContact'] as String?)?.trim() ??
+          caregiverPhone ??
+          '',
+      'service':
+          extractServiceLabelFromFirestore(resolvedBooking).trim().isNotEmpty
+          ? extractServiceLabelFromFirestore(resolvedBooking).trim()
+          : (resolvedBooking['service'] as String?)?.trim() ?? 'Service',
+      'date': (resolvedBooking['date'] as String?)?.trim() ?? '',
+      'time': (resolvedBooking['time'] as String?)?.trim() ?? '',
+      'startTime': (resolvedBooking['startTime'] as String?)?.trim() ?? '',
+      'endTime': (resolvedBooking['endTime'] as String?)?.trim() ?? '',
+      'personId': (resolvedBooking['personId'] as String?)?.trim() ?? '',
+      'personName': (resolvedBooking['personName'] as String?)?.trim() ?? '',
+      'personAddress':
+          (resolvedBooking['personAddress'] as String?)?.trim() ?? '',
+      'personPhone': personPhone,
+      'personPhotoUrl':
+          (resolvedBooking['personPhotoUrl'] as String?)?.trim() ??
+          (resolvedBooking['personPhoto'] as String?)?.trim() ??
+          (resolvedBooking['personAvatarUrl'] as String?)?.trim() ??
+          (resolvedBooking['personImageUrl'] as String?)?.trim() ??
+          '',
+      'personNotes':
+          (resolvedBooking['personNotes'] as String?) ??
+          (resolvedBooking['notes'] as String?) ??
+          '',
+      'bookingNotes':
+          (resolvedBooking['bookingNotes'] as String?)?.trim() ?? '',
+      'ownerName':
+          (resolvedBooking['ownerName'] as String?)?.trim() ??
+          (resolvedBooking['bookedBy'] as String?)?.trim() ??
+          ownerName ??
+          '',
+      'ownerPhone':
+          (resolvedBooking['ownerPhone'] as String?)?.trim() ??
+          ownerPhone ??
+          '',
+    };
+  }
+
+  Future<({String fileName, Uint8List bytes})> _generateReceiptPdf({
+    required String paymentId,
+  }) async {
+    final callable = _functions.httpsCallable(
+      'generatePaymentReceiptPdf',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+    );
+    final result = await callable
+        .call(<String, dynamic>{'paymentId': paymentId})
+        .timeout(const Duration(seconds: 75));
+    final map = Map<String, dynamic>.from(result.data as Map);
+    final pdfBase64 = (map['pdfBase64'] as String?) ?? '';
+    final fileName = (map['fileName'] as String?) ?? 'payment-receipt.pdf';
+    if (pdfBase64.trim().isEmpty) {
+      throw Exception('Missing pdfBase64');
+    }
+    return (fileName: fileName, bytes: base64Decode(pdfBase64));
+  }
+
+  Future<void> _downloadReceiptPdf(
+    String paymentId,
+    BuildContext feedbackContext,
+  ) async {
+    if (kIsWeb) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          title: const Text(
+            'Download unavailable',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          content: const Text(
+            'Download is not available on web.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.black54, fontSize: 12),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: [
+            SizedBox(
+              width: 120,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accentGold,
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: const Text(
+                  'OK',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    if (!(Platform.isAndroid || Platform.isIOS || Platform.isFuchsia)) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          title: const Text(
+            'Download unavailable',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          content: const Text(
+            'Download is not available on this platform.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.black54, fontSize: 12),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: [
+            SizedBox(
+              width: 120,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accentGold,
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: const Text(
+                  'OK',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    BuildContext? loadingDialogContext;
+    var loadingOpen = true;
+
+    void closeLoadingIfOpen() {
+      if (!loadingOpen) return;
+      final ctx = loadingDialogContext;
+      if (ctx == null) return;
+      final nav = Navigator.of(ctx, rootNavigator: true);
+      if (nav.canPop()) nav.pop();
+      loadingOpen = false;
+    }
+
+    showDialog<void>(
+      context: context,
+      useRootNavigator: true,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        loadingDialogContext = dialogContext;
+        return const AlertDialog(
+          backgroundColor: Colors.white,
+          content: Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2.2),
+                ),
+                SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    'Preparing receipt…',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    try {
+      final generated = await _generateReceiptPdf(paymentId: paymentId);
+      final dir = await getApplicationDocumentsDirectory();
+      final path = '${dir.path}/${generated.fileName}';
+      final file = File(path);
+      await file.writeAsBytes(generated.bytes, flush: true);
+      closeLoadingIfOpen();
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          title: const Text(
+            'Receipt saved',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          content: Text(
+            generated.fileName,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.black54, fontSize: 12),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: [
+            SizedBox(
+              width: 120,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accentGold,
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: const Text(
+                  'OK',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      closeLoadingIfOpen();
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          title: const Text(
+            'Unable to download receipt',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          content: Text(
+            e.toString(),
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.black54, fontSize: 12),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: [
+            SizedBox(
+              width: 120,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accentGold,
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: const Text(
+                  'OK',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
+  Future<void> _shareReceiptPdf(
+    String paymentId,
+    BuildContext feedbackContext,
+  ) async {
+    if (kIsWeb) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          title: const Text(
+            'Share unavailable',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          content: const Text(
+            'Share is not available on web.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.black54, fontSize: 12),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: [
+            SizedBox(
+              width: 120,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accentGold,
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: const Text(
+                  'OK',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    if (!(Platform.isAndroid || Platform.isIOS || Platform.isFuchsia)) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          title: const Text(
+            'Share unavailable',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          content: const Text(
+            'Share is not available on this platform.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.black54, fontSize: 12),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: [
+            SizedBox(
+              width: 120,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accentGold,
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: const Text(
+                  'OK',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    BuildContext? loadingDialogContext;
+    var loadingOpen = true;
+
+    void closeLoadingIfOpen() {
+      if (!loadingOpen) return;
+      final ctx = loadingDialogContext;
+      if (ctx == null) return;
+      final nav = Navigator.of(ctx, rootNavigator: true);
+      if (nav.canPop()) nav.pop();
+      loadingOpen = false;
+    }
+
+    showDialog<void>(
+      context: context,
+      useRootNavigator: true,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        loadingDialogContext = dialogContext;
+        return const AlertDialog(
+          backgroundColor: Colors.white,
+          content: Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2.2),
+                ),
+                SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    'Preparing receipt…',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    try {
+      final generated = await _generateReceiptPdf(paymentId: paymentId);
+      final dir = await getApplicationDocumentsDirectory();
+      final path = '${dir.path}/${generated.fileName}';
+      final file = File(path);
+      await file.writeAsBytes(generated.bytes, flush: true);
+      closeLoadingIfOpen();
+      if (!mounted) return;
+      await Share.shareXFiles([
+        XFile(path, mimeType: 'application/pdf', name: generated.fileName),
+      ], subject: generated.fileName);
+    } catch (e) {
+      closeLoadingIfOpen();
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          title: const Text(
+            'Unable to share receipt',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          content: Text(
+            e.toString(),
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.black54, fontSize: 12),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actions: [
+            SizedBox(
+              width: 120,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _accentGold,
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: const Text(
+                  'OK',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
+  Future<void> _openPaymentReceiptSheet({
+    required String paymentId,
+    required Map<String, dynamic> payment,
+  }) async {
+    final future = _loadBookingSummaryForPayment(
+      paymentId: paymentId,
+      payment: payment,
+    );
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: 0.45),
+      builder: (sheetContext) {
+        final maxHeight = MediaQuery.sizeOf(sheetContext).height * 0.9;
+        return Align(
+          alignment: Alignment.bottomCenter,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: maxHeight),
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 8, 10),
+                    child: Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'Payment Summary',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                              color: _profileDarkText,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.of(sheetContext).pop(),
+                          icon: const Icon(Icons.close),
+                          color: Colors.black54,
+                          splashRadius: 18,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1),
+                  Flexible(
+                    child: FutureBuilder<Map<String, dynamic>>(
+                      future: future,
+                      builder: (context, snapshot) {
+                        if (snapshot.connectionState ==
+                            ConnectionState.waiting) {
+                          return const Center(
+                            child: Padding(
+                              padding: EdgeInsets.all(18),
+                              child: CircularProgressIndicator(),
+                            ),
+                          );
+                        }
+                        if (snapshot.hasError) {
+                          return Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Text(
+                              snapshot.error.toString(),
+                              style: const TextStyle(
+                                color: Colors.redAccent,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          );
+                        }
+                        final d = snapshot.data ?? const <String, dynamic>{};
+                        final caregiverName =
+                            (d['caregiverName'] as String?)?.trim() ?? '';
+                        final caregiverPhone =
+                            (d['caregiverPhone'] as String?)?.trim() ?? '';
+                        final service =
+                            (d['service'] as String?)?.trim() ?? 'Service';
+                        final date = (d['date'] as String?)?.trim() ?? '';
+                        final time = (d['time'] as String?)?.trim() ?? '';
+                        final startTime =
+                            (d['startTime'] as String?)?.trim() ?? '';
+                        final endTime = (d['endTime'] as String?)?.trim() ?? '';
+                        final personName =
+                            (d['personName'] as String?)?.trim() ?? '';
+                        final personAddress =
+                            (d['personAddress'] as String?)?.trim() ?? '';
+                        final personPhone =
+                            (d['personPhone'] as String?)?.trim() ?? '';
+                        final personNotes =
+                            (d['personNotes'] as String?)?.trim() ?? '';
+                        final bookingNotes =
+                            (d['bookingNotes'] as String?)?.trim() ?? '';
+                        final paymentStatus =
+                            (d['paymentStatus'] as String?)?.trim() ?? '';
+                        final bookingStatus =
+                            (d['bookingStatus'] as String?)?.trim() ?? '';
+                        final paymentMethod =
+                            (d['paymentMethod'] as String?)?.trim() ?? '';
+                        final ownerName =
+                            (d['ownerName'] as String?)?.trim() ?? '';
+                        final ownerPhone =
+                            (d['ownerPhone'] as String?)?.trim() ?? '';
+                        final bookingId =
+                            (d['bookingId'] as String?)?.trim() ?? '';
+                        final billCode =
+                            (d['billCode'] as String?)?.trim() ?? '';
+                        final total = _readMoney(d['amount']);
+                        final servicePrice = _readMoney(d['servicePrice']);
+                        final distanceKm = _readMoney(d['distanceKm']);
+                        final distanceCharge = _readMoney(d['distanceCharge']);
+                        const serviceFee = 1.0;
+                        final afterServiceFee =
+                            (total - serviceFee).clamp(0.0, double.infinity);
+                        final platformFee =
+                            (afterServiceFee * 0.07).clamp(0.0, double.infinity);
+                        final netTotal = (afterServiceFee - platformFee)
+                            .clamp(0.0, double.infinity);
+                        final displayedTotal = _isCaregiverPov ? netTotal : total;
+
+                        String scheduleLine() {
+                          final parts = <String>[
+                            if (date.isNotEmpty) date,
+                            if (time.isNotEmpty) time,
+                            if (startTime.isNotEmpty && endTime.isNotEmpty)
+                              '$startTime - $endTime',
+                          ];
+                          return parts.join(' • ');
+                        }
+
+                        return ScrollConfiguration(
+                          behavior: const _NoOverscrollScrollBehavior(),
+                          child: SingleChildScrollView(
+                            physics: const ClampingScrollPhysics(),
+                            padding: const EdgeInsets.only(bottom: 14),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    16,
+                                    14,
+                                    16,
+                                    10,
+                                  ),
+                                  child: Container(
+                                    padding: const EdgeInsets.all(14),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white,
+                                      borderRadius: BorderRadius.circular(18),
+                                      border: Border.all(
+                                        color: _cardBorderColor,
+                                      ),
+                                      boxShadow: [_historyCardShadow],
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                service,
+                                                style: const TextStyle(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.w800,
+                                                  color: _profileDarkText,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                caregiverName.isNotEmpty
+                                                    ? caregiverName
+                                                    : 'Caregiver',
+                                                style: const TextStyle(
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight.w600,
+                                                  color: Colors.black54,
+                                                ),
+                                              ),
+                                              if (caregiverPhone
+                                                  .isNotEmpty) ...[
+                                                const SizedBox(height: 2),
+                                                Text(
+                                                  caregiverPhone,
+                                                  style: const TextStyle(
+                                                    fontSize: 12,
+                                                    fontWeight: FontWeight.w600,
+                                                    color: Colors.black54,
+                                                  ),
+                                                ),
+                                              ],
+                                              if (scheduleLine()
+                                                  .isNotEmpty) ...[
+                                                const SizedBox(height: 8),
+                                                Text(
+                                                  scheduleLine(),
+                                                  style: const TextStyle(
+                                                    fontSize: 11,
+                                                    fontWeight: FontWeight.w600,
+                                                    color: Colors.black87,
+                                                  ),
+                                                ),
+                                              ],
+                                            ],
+                                          ),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.end,
+                                          children: [
+                                            Text(
+                                              'RM ${_formatMoney(displayedTotal)}',
+                                              style: const TextStyle(
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w900,
+                                                color: _profileDarkText,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      _receiptSectionHeader(
+                                        title: 'Selected person',
+                                      ),
+                                      _receiptTabContent([
+                                        _receiptInfoRow(
+                                          icon: Icons.person,
+                                          title: 'Name',
+                                          value: personName,
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.phone_android,
+                                          title: 'Contact',
+                                          value: personPhone,
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.home,
+                                          title: 'Location',
+                                          value: personAddress,
+                                          showBorder: true,
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.sticky_note_2_outlined,
+                                          title: 'Notes',
+                                          value: personNotes.trim(),
+                                          showBorder: false,
+                                        ),
+                                      ]),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 14),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      _receiptSectionHeader(
+                                        title: 'Booking details',
+                                      ),
+                                      _receiptTabContent([
+                                        _receiptInfoRow(
+                                          icon: Icons.tag_outlined,
+                                          title: 'Booking ID',
+                                          value: bookingId,
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.medical_services_outlined,
+                                          title: 'Services',
+                                          value: service,
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.schedule_outlined,
+                                          title: 'Schedule',
+                                          value: scheduleLine(),
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.info_outline,
+                                          title: 'Booking status',
+                                          value: bookingStatus,
+                                          showBorder: true,
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.person_outline,
+                                          title: 'Booked by',
+                                          value: ownerName,
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.phone_android,
+                                          title: 'Owner contact',
+                                          value: ownerPhone,
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.notes_outlined,
+                                          title: 'Booking notes',
+                                          value: bookingNotes.trim(),
+                                          showBorder: false,
+                                        ),
+                                      ]),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 14),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      _receiptSectionHeader(title: 'Payment'),
+                                      _receiptTabContent([
+                                        _receiptInfoRow(
+                                          icon: Icons.receipt_long_outlined,
+                                          title: 'Payment ID',
+                                          value: paymentId,
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons
+                                              .confirmation_number_outlined,
+                                          title: 'Bill code',
+                                          value: billCode,
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.verified_outlined,
+                                          title: 'Payment status',
+                                          value: paymentStatus,
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.payment_outlined,
+                                          title: 'Payment method',
+                                          value: paymentMethod,
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.attach_money_outlined,
+                                          title: 'Service price',
+                                          value: servicePrice > 0
+                                              ? 'RM ${_formatMoney(servicePrice)}'
+                                              : '-',
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.route_outlined,
+                                          title: 'Distance',
+                                          value: distanceKm > 0
+                                              ? '${distanceKm.toStringAsFixed(1)} km'
+                                              : '-',
+                                        ),
+                                        _receiptInfoRow(
+                                          icon: Icons.add_road_outlined,
+                                          title: 'Distance charge',
+                                          value: distanceCharge > 0
+                                              ? 'RM ${_formatMoney(distanceCharge)}'
+                                              : '-',
+                                        ),
+                                        if (_isCaregiverPov) ...[
+                                          _receiptInfoRow(
+                                            icon: Icons.calculate_outlined,
+                                            title: 'Total',
+                                            value: 'RM ${_formatMoney(total)}',
+                                          ),
+                                          _receiptInfoRow(
+                                            icon: Icons.remove_circle_outline,
+                                            title: 'Payment service charge',
+                                            value: '- RM ${_formatMoney(serviceFee)}',
+                                          ),
+                                          _receiptInfoRow(
+                                            icon: Icons.percent_outlined,
+                                            title: 'Platform payment charge (7%)',
+                                            value: '- RM ${_formatMoney(platformFee)}',
+                                          ),
+                                          _receiptInfoRow(
+                                            icon: Icons.calculate_outlined,
+                                            title: 'New total',
+                                            value: 'RM ${_formatMoney(netTotal)}',
+                                            showBorder: false,
+                                          ),
+                                        ] else
+                                          _receiptInfoRow(
+                                            icon: Icons.calculate_outlined,
+                                            title: 'Total',
+                                            value: 'RM ${_formatMoney(total)}',
+                                            showBorder: false,
+                                          ),
+                                      ]),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+                    child: Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: _receiptPremiumCardDecoration(),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: () =>
+                                  _downloadReceiptPdf(paymentId, sheetContext),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: Colors.black,
+                                side: BorderSide(
+                                  color: Colors.black.withValues(alpha: 0.12),
+                                ),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                              child: const Text(
+                                'Download receipt',
+                                style: TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: ElevatedButton(
+                              onPressed: () =>
+                                  _shareReceiptPdf(paymentId, sheetContext),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: _accentGold,
+                                foregroundColor: Colors.black,
+                                elevation: 0,
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                              child: const Text(
+                                'Share receipt',
+                                style: TextStyle(fontWeight: FontWeight.w800),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -1648,12 +3467,12 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
         backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         title: const Text(
-          'Hide this payment?',
+          'Delete this payment?',
           textAlign: TextAlign.center,
           style: TextStyle(fontWeight: FontWeight.w700),
         ),
         content: const Text(
-          'This hides the payment entry from your history.',
+          'This will remove the payment from your history.',
           textAlign: TextAlign.center,
           style: TextStyle(color: Colors.black87),
         ),
@@ -1695,7 +3514,7 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                     textStyle: const TextStyle(fontWeight: FontWeight.w700),
                     elevation: 0,
                   ),
-                  child: const Text('Hide'),
+                  child: const Text('Delete'),
                 ),
               ),
             ],
@@ -1704,10 +3523,21 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       ),
     );
     if (result == true) {
-      await FirebaseFirestore.instance
-          .collection('payments')
-          .doc(paymentId)
-          .set({'hidden': true}, SetOptions(merge: true));
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+      if (uid.isNotEmpty) {
+        setState(() => _hiddenPaymentIds.add(paymentId));
+        await FirebaseFirestore.instance
+            .collection('payments')
+            .doc(paymentId)
+            .set({
+              'hiddenFor': {uid: true},
+            }, SetOptions(merge: true));
+      } else {
+        await FirebaseFirestore.instance
+            .collection('payments')
+            .doc(paymentId)
+            .set({'hidden': true}, SetOptions(merge: true));
+      }
     }
     return result ?? false;
   }
@@ -1861,6 +3691,8 @@ class _HistoryNoticeCard extends StatelessWidget {
     this.requestedAt,
     this.icon = Icons.check_circle_outline,
     this.iconColor = _reminderIconColor,
+    this.onDelete,
+    this.footer,
   });
 
   final String message;
@@ -1868,6 +3700,8 @@ class _HistoryNoticeCard extends StatelessWidget {
   final DateTime? requestedAt;
   final IconData icon;
   final Color iconColor;
+  final VoidCallback? onDelete;
+  final Widget? footer;
 
   @override
   Widget build(BuildContext context) {
@@ -1896,6 +3730,26 @@ class _HistoryNoticeCard extends StatelessWidget {
                   fontWeight: FontWeight.w700,
                 ),
               ),
+              const Spacer(),
+              if (onDelete != null)
+                InkWell(
+                  onTap: onDelete,
+                  borderRadius: BorderRadius.circular(10),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 6,
+                    ),
+                    child: Text(
+                      'Delete',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.black.withValues(alpha: 0.55),
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
           const SizedBox(height: 8),
@@ -1903,17 +3757,21 @@ class _HistoryNoticeCard extends StatelessWidget {
             message,
             style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
           ),
-          if (dateLabel != null) ...[
-            const SizedBox(height: 6),
-            Text(
-              dateLabel,
-              style: const TextStyle(fontSize: 11, color: Colors.black54),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
+           if (dateLabel != null) ...[
+             const SizedBox(height: 6),
+             Text(
+               dateLabel,
+               style: const TextStyle(fontSize: 11, color: Colors.black54),
+             ),
+           ],
+           if (footer != null) ...[
+             const SizedBox(height: 10),
+             footer!,
+           ],
+         ],
+       ),
+     );
+   }
 }
 
 class _CountPill extends StatelessWidget {
@@ -1949,16 +3807,6 @@ class _StatusChip extends StatelessWidget {
   String get _normalizedBooking => bookingStatus.trim().toLowerCase();
 
   bool get _isCancelled => _normalizedBooking.contains('cancel');
-
-  Color get _dotColor {
-    if (_isCancelled) return _statusCancelled;
-    return switch (_normalizedBooking) {
-      'completed' || 'done' || 'finished' => _statusPaid,
-      'ongoing' || 'in_progress' || 'assigned' => _statusPending,
-      'pending' || 'scheduled' => _statusPending,
-      _ => Colors.grey.shade600,
-    };
-  }
 
   String get _label {
     if (_isCancelled) return 'Cancelled';
@@ -1999,12 +3847,6 @@ class _StatusChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            width: 5,
-            height: 5,
-            decoration: BoxDecoration(color: _dotColor, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 4),
           Text(
             _label,
             style: const TextStyle(
@@ -2020,29 +3862,72 @@ class _StatusChip extends StatelessWidget {
 }
 
 class _PaymentStatusChip extends StatelessWidget {
-  const _PaymentStatusChip({required this.label, required this.color});
+  const _PaymentStatusChip({required this.paymentStatus});
 
-  final String label;
-  final Color color;
+  final String paymentStatus;
+
+  String get _normalized => paymentStatus.trim().toLowerCase();
+
+  bool get _isPaid => _normalized == 'paid' || _normalized == 'success';
+
+  bool get _isCancelled =>
+      _normalized.contains('cancel') || _normalized.contains('refund');
+
+  bool get _isFailed => _normalized == 'failed';
+
+  String get _label {
+    if (_isPaid) return 'Paid';
+    if (_isFailed) return 'Failed';
+    if (_normalized == 'refund_requested') return 'Refund';
+    if (_isCancelled) return 'Cancelled';
+    if (_normalized == 'pending') return 'Pending';
+    return paymentStatus.trim().isEmpty ? 'Status' : paymentStatus.trim();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: color.withValues(alpha: 0.35)),
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _cardBorderColor),
+        boxShadow: const [
+          BoxShadow(color: Colors.black26, blurRadius: 2, offset: Offset(0, 1)),
+        ],
       ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w700,
-          color: color,
-        ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            _label,
+            style: const TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 10,
+              color: Colors.black87,
+            ),
+          ),
+        ],
       ),
     );
+  }
+}
+
+class _NoOverscrollScrollBehavior extends ScrollBehavior {
+  const _NoOverscrollScrollBehavior();
+
+  @override
+  Widget buildOverscrollIndicator(
+    BuildContext context,
+    Widget child,
+    ScrollableDetails details,
+  ) {
+    return child;
+  }
+
+  @override
+  ScrollPhysics getScrollPhysics(BuildContext context) {
+    return const ClampingScrollPhysics();
   }
 }
 
@@ -2052,29 +3937,34 @@ Widget _buildEmptyReminder({
   required String explanation,
   Color iconColor = _reminderIconColor,
 }) {
-  return Padding(
-    padding: const EdgeInsets.symmetric(vertical: 12),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        Icon(icon, size: 32, color: iconColor),
-        const SizedBox(height: 10),
-        Text(
-          headline,
-          style: const TextStyle(
-            fontWeight: FontWeight.w700,
-            fontSize: 15,
-            color: _profileDarkText,
-          ),
-          textAlign: TextAlign.center,
+  return Center(
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 32, color: iconColor),
+            const SizedBox(height: 10),
+            Text(
+              headline,
+              style: const TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 15,
+                color: _profileDarkText,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              explanation,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+          ],
         ),
-        const SizedBox(height: 4),
-        Text(
-          explanation,
-          style: const TextStyle(fontSize: 12, color: Colors.black54),
-          textAlign: TextAlign.center,
-        ),
-      ],
+      ),
     ),
   );
 }

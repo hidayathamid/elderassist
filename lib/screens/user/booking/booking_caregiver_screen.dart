@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:geocoding/geocoding.dart' as geocoding;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -19,7 +20,7 @@ import 'package:emergencies_disability_assistance_app/widgets/service_tag_chip.d
 import 'package:emergencies_disability_assistance_app/utils/map_styles.dart';
 
 import '../../../models/caregiver_model.dart';
-import '../../../models/recommendation_rules.dart';
+import '../activity/activity_booking_details_screen.dart';
 import 'booking_person_screen.dart';
 import 'booking_summary_screen.dart';
 
@@ -36,7 +37,7 @@ const Color _pageBackground = Color(0xFFF7F8FA);
 
 const Color _primaryColor = Color(0xFFF4B63D);
 const double _mapPadding = 56;
-const double _mapMarkerSize = 92.0;
+const double _mapMarkerSize = 75.0;
 const double _boundsExtraFactor = 0.35;
 
 class CaregiverOption {
@@ -116,6 +117,7 @@ class BookingCaregiverScreen extends StatefulWidget {
 
 class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     with TickerProviderStateMixin {
+  static const bool _enablePanelDragGesture = false;
   static const double _minSheetSize = 0.40;
   static const double _maxSheetSize = 0.85;
   static const SpringDescription _panelSpring = SpringDescription(
@@ -126,10 +128,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
 
   GoogleMapController? _mapController;
   late final AnimationController _panelController;
-  double _backdropOpacity = 0.0;
   bool _modalSheetScrimVisible = false;
-  double _panelBlend = 0.0;
-  bool _hideFrontPanel = false;
   double _lastDragDelta = 0;
   final ScrollController _listController = ScrollController();
   final GlobalKey _listKey = GlobalKey();
@@ -156,6 +155,14 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _assignedBookingSub;
   final Set<String> _assignedCaregiverIds = <String>{};
   List<CaregiverOption> _candidateCaregivers = <CaregiverOption>[];
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> _lastCaregiverDocs =
+      const [];
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _ruleMatrixSub;
+  List<_RecommendationMatrixRule> _recommendationMatrix = const [];
+  double? _clientBudget;
+  final Map<String, LatLng> _defaultAddressLatLng = {};
+  final Map<String, String> _defaultAddressKey = {};
+  final Set<String> _defaultAddressResolving = {};
   DateTime? _lastTap;
   late final AnimationController _shineController;
   late final TabController _categoryTabController;
@@ -180,8 +187,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
 
   late LatLng _currentLatLng;
   List<String> _clientServicePrefs = [];
-  RecommendationRules _recommendationRules = RecommendationRules.defaults();
-  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _rulesSub;
+  // Recommendation is now driven by the Firestore matrix (`recommendationRules/*`).
+  // We intentionally avoid fallback "score config" to keep behavior fully DB-driven.
   CaregiverCategory _selectedCategory = CaregiverCategory.forYou;
   bool _didInitialHeaderHide = false;
 
@@ -214,7 +221,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       upperBound: 1,
       value: 0,
       duration: const Duration(milliseconds: 320),
-    )..addListener(_updatePanelVisuals);
+    );
 
     _currentLatLng = LatLng(
       widget.person.latitude ?? 3.1390,
@@ -225,9 +232,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       _updateSelectedMarkers();
     });
     _listController.addListener(_handleScrollCategoryDetection);
-    _updatePanelVisuals();
     _listenAssignedCaregivers();
-    _listenForRecommendationRules();
+    _listenForRecommendationRuleMatrix();
     _loadClientPreferences();
     _shineController = AnimationController(
       vsync: this,
@@ -258,25 +264,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     _mapController?.dispose();
     _caregiverSub?.cancel();
     _assignedBookingSub?.cancel();
-    _rulesSub?.cancel();
+    _ruleMatrixSub?.cancel();
     super.dispose();
-  }
-
-  void _listenForRecommendationRules() {
-    _rulesSub?.cancel();
-    _rulesSub = FirebaseFirestore.instance
-        .collection('recommendationRules')
-        .doc('current')
-        .snapshots()
-        .listen((doc) {
-          if (!mounted) return;
-          setState(() {
-            _recommendationRules = RecommendationRules.fromFirestore(
-              doc,
-              fallback: _recommendationRules,
-            );
-          });
-        });
   }
 
   void _listenAssignedCaregivers() {
@@ -396,6 +385,36 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     }
   }
 
+  void _listenForRecommendationRuleMatrix() {
+    _ruleMatrixSub?.cancel();
+    _ruleMatrixSub = FirebaseFirestore.instance
+        .collection('recommendationRules')
+        .snapshots()
+        .listen((snap) {
+          final rules = <_RecommendationMatrixRule>[];
+          for (final doc in snap.docs) {
+            if (doc.id == 'current') continue;
+            final data = doc.data();
+            final rule = _RecommendationMatrixRule.tryParse(data);
+            if (rule != null) rules.add(rule);
+          }
+          rules.sort(_RecommendationMatrixRule.compare);
+          if (!mounted) return;
+          setState(() => _recommendationMatrix = rules);
+          if (_candidateCaregivers.isNotEmpty) {
+            _candidateCaregivers = _lastCaregiverDocs
+                .map(_mapDocToCaregiverOption)
+                .where((c) => c.distanceKm <= _maxSearchDistanceKm)
+                .toList();
+            _rebuildFromCandidates();
+          }
+        }, onError: (e) {
+          debugPrint('Recommendation rules matrix listener error: $e');
+          if (!mounted) return;
+          setState(() => _recommendationMatrix = const []);
+        });
+  }
+
   Future<void> _loadClientPreferences() async {
     try {
       final uid = FirebaseAuth.instance.currentUser?.uid;
@@ -408,9 +427,16 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         final dynamic raw =
             data?['servicePreferences'] ?? data?['services'] ?? data?['skills'];
         _clientServicePrefs = _stringListFromField(raw);
+        final budget = _safeDouble(data?['budget']);
+        if (budget != null && budget > 0) {
+          _clientBudget = budget.clamp(10.0, 150.0);
+        } else {
+          _clientBudget = null;
+        }
       }
     } catch (_) {
       _clientServicePrefs = [];
+      _clientBudget = null;
     } finally {
       _fetchCaregivers();
     }
@@ -435,12 +461,40 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
 
   void _handleCaregiverSnapshot(QuerySnapshot<Map<String, dynamic>> snapshot) {
     if (!mounted) return;
-    final list = snapshot.docs
+    _lastCaregiverDocs = snapshot.docs;
+    _candidateCaregivers = _lastCaregiverDocs
         .map(_mapDocToCaregiverOption)
         .where((c) => c.distanceKm <= _maxSearchDistanceKm)
         .toList();
-    _candidateCaregivers = list;
     _rebuildFromCandidates();
+  }
+
+  Future<void> _resolveDefaultAddressLocation({
+    required String caregiverId,
+    required String address,
+  }) async {
+    final id = caregiverId.trim();
+    final trimmedAddress = address.trim();
+    if (id.isEmpty || trimmedAddress.isEmpty) return;
+    if (_defaultAddressResolving.contains(id)) return;
+    _defaultAddressResolving.add(id);
+    try {
+      final locations = await geocoding.locationFromAddress(trimmedAddress);
+      if (locations.isEmpty) return;
+      final first = locations.first;
+      _defaultAddressLatLng[id] = LatLng(first.latitude, first.longitude);
+      _defaultAddressKey[id] = trimmedAddress;
+      if (!mounted) return;
+      _candidateCaregivers = _lastCaregiverDocs
+          .map(_mapDocToCaregiverOption)
+          .where((c) => c.distanceKm <= _maxSearchDistanceKm)
+          .toList();
+      _rebuildFromCandidates();
+    } catch (_) {
+      // ignore: geocoding failures fall back to hiding caregiver from map
+    } finally {
+      _defaultAddressResolving.remove(id);
+    }
   }
 
   void _rebuildFromCandidates() {
@@ -460,7 +514,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         _markers = {_selectedMarker()};
         _route = {};
         _errorMessage =
-            'Tiada caregiver dalam ${_maxSearchDistanceKm.toStringAsFixed(0)}km.';
+            'No caregivers within ${_maxSearchDistanceKm.toStringAsFixed(0)} km.';
       });
       return;
     }
@@ -476,7 +530,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         _markers = {_selectedMarker()};
         _route = {};
         _errorMessage =
-            'Tiada caregiver dalam ${_maxSearchDistanceKm.toStringAsFixed(0)}km.';
+            'No caregivers within ${_maxSearchDistanceKm.toStringAsFixed(0)} km.';
       });
       return;
     }
@@ -531,16 +585,42 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     final List<Map<String, dynamic>> addresses = _extractAddressList(
       data['address'] ?? data['addresses'],
     );
-    final Map<String, dynamic>? primaryAddress = addresses.isNotEmpty
-        ? addresses.first
-        : null;
-    final LatLng? loc =
-        _latLngFromMap(primaryAddress) ?? _latLngFromDocument(data);
+    final Map<String, dynamic>? primaryAddress = _pickDefaultAddress(addresses);
+    // Booking screen: show caregiver's registered/default address (static),
+    // not the caregiver device live GPS location fields on the document.
+    LatLng? loc = _latLngFromMap(primaryAddress);
+    if (loc == null) {
+      for (final entry in addresses) {
+        loc = _latLngFromMap(entry);
+        if (loc != null) break;
+      }
+    }
+    final defaultAddressText =
+        (data['defaultAddress'] as String?)?.trim() ?? '';
+    if (loc == null && defaultAddressText.isNotEmpty) {
+      final existingKey = _defaultAddressKey[doc.id];
+      if (existingKey != null && existingKey != defaultAddressText) {
+        _defaultAddressKey.remove(doc.id);
+        _defaultAddressLatLng.remove(doc.id);
+      }
+      loc ??= _defaultAddressLatLng[doc.id];
+      if (loc == null) {
+        unawaited(
+          _resolveDefaultAddressLocation(
+            caregiverId: doc.id,
+            address: defaultAddressText,
+          ),
+        );
+      }
+    }
     final double distanceKm = loc != null
         ? _distanceKm(_currentLatLng, loc)
         : double.infinity;
-    final double rating = (data['rating'] as num?)?.toDouble() ?? 4.5;
-    final String addressLine = _buildAddressLine(primaryAddress);
+    final double rating = _safeDouble(data['rating']) ?? 4.5;
+    final String addressLine =
+        _buildAddressLine(primaryAddress).trim().isNotEmpty
+        ? _buildAddressLine(primaryAddress)
+        : defaultAddressText;
 
     final bool available =
         (data['availability'] as bool?) ??
@@ -558,10 +638,14 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       price: priceValue,
       matchCount: matchCount,
     );
-    final int recommendationClass = _recommendationClassFromScore(
-      score,
+    final int recommendationClass = _recommendationClassFromMatrixOrFallback(
+      distanceKm: distanceKm,
+      priceValue: priceValue,
+      matchCount: matchCount,
+      requestedServiceCount: _clientServicePrefs.length,
+      caregiverServiceCount: services.length,
+      fallbackScore: score,
       caregiverRating: rating,
-      caregiverDistanceKm: distanceKm,
     );
 
     return CaregiverOption(
@@ -584,34 +668,155 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     );
   }
 
+  int _recommendationClassFromMatrixOrFallback({
+    required double distanceKm,
+    required double priceValue,
+    required int matchCount,
+    required int requestedServiceCount,
+    required int caregiverServiceCount,
+    required double fallbackScore,
+    required double caregiverRating,
+  }) {
+    final budget = (_clientBudget ?? 150.0).clamp(10.0, 150.0);
+    final rules = _recommendationMatrix;
+    if (rules.isNotEmpty) {
+      final features = _RecommendationMatrixFeatures.from(
+        distanceKm: distanceKm,
+        caregiverPrice: priceValue,
+        clientBudget: budget,
+        caregiverRating: caregiverRating,
+        matchCount: matchCount,
+        requestedServiceCount: requestedServiceCount,
+        caregiverServiceCount: caregiverServiceCount,
+      );
+      final exact = rules.firstWhere(
+        (r) => r.matches(features),
+        orElse: () => const _RecommendationMatrixRule.empty(),
+      );
+      if (exact.isValid) return exact.recommendationClass;
+
+      _RecommendationMatrixRule? best;
+      int bestDistance = 1 << 30;
+      for (final rule in rules) {
+        final d = rule.distanceTo(features);
+        if (d < bestDistance) {
+          bestDistance = d;
+          best = rule;
+          continue;
+        }
+        if (d == bestDistance &&
+            best != null &&
+            rule.recommendationClass < best.recommendationClass) {
+          best = rule;
+        }
+      }
+      if (best != null) return best.recommendationClass;
+    }
+
+    // If the matrix isn't available (not seeded yet), default to Not ideal.
+    // This keeps behavior consistent (matrix-driven) instead of using legacy scoring.
+    return 3;
+  }
+
+  Map<String, dynamic>? _pickDefaultAddress(
+    List<Map<String, dynamic>> addresses,
+  ) {
+    if (addresses.isEmpty) return null;
+    for (final entry in addresses) {
+      if (entry['isDefault'] == true) return entry;
+    }
+    return addresses.first;
+  }
+
   List<CaregiverOption> _applyCategories(List<CaregiverOption> source) {
     final ranked = List<CaregiverOption>.from(source)
-      ..sort((a, b) {
-        final classCmp = a.recommendationClass.compareTo(b.recommendationClass);
-        if (classCmp != 0) return classCmp;
-        final matchCmp = b.matchCount.compareTo(a.matchCount);
-        if (matchCmp != 0) return matchCmp;
-        final ratingCmp = b.rating.compareTo(a.rating);
-        if (ratingCmp != 0) return ratingCmp;
-        final priceCmp = a.priceValue.compareTo(b.priceValue);
-        if (priceCmp != 0) return priceCmp;
-        return a.distanceKm.compareTo(b.distanceKm);
-      });
+      ..sort(_compareCaregiversForRanking);
     return ranked;
+  }
+
+  int _compareCaregiversForRanking(CaregiverOption a, CaregiverOption b) {
+    final classCmp = a.recommendationClass.compareTo(b.recommendationClass);
+    if (classCmp != 0) return classCmp;
+    final matchCmp = b.matchCount.compareTo(a.matchCount);
+    if (matchCmp != 0) return matchCmp;
+    final ratingCmp = b.rating.compareTo(a.rating);
+    if (ratingCmp != 0) return ratingCmp;
+    final priceCmp = a.priceValue.compareTo(b.priceValue);
+    if (priceCmp != 0) return priceCmp;
+    return a.distanceKm.compareTo(b.distanceKm);
   }
 
   List<CaregiverOption> _buildRecommendationList(
     List<CaregiverOption> available,
   ) {
-    final qualified = available
-        .where((c) => !_shouldExcludeCaregiver(c))
-        .toList();
-    final class1 = qualified.where((c) => c.recommendationClass == 1).toList();
-    final class2 = qualified.where((c) => c.recommendationClass == 2).toList();
-    final recommended = [...class1, ...class2];
-    final fallback = qualified.take(3).toList();
-    final pool = recommended.isNotEmpty ? recommended : fallback;
-    return pool.take(3).toList();
+    final ranked = List<CaregiverOption>.from(available)
+      ..sort(_compareCaregiversForRanking);
+    final qualified =
+        ranked.where((c) => !_shouldExcludeCaregiver(c)).toList();
+
+    final byClass = <int, List<CaregiverOption>>{
+      1: [],
+      2: [],
+      3: [],
+    };
+    for (final c in qualified) {
+      byClass[(c.recommendationClass).clamp(1, 3)]!.add(c);
+    }
+
+    final class1 = byClass[1]!;
+    final class2 = byClass[2]!;
+    final class3 = byClass[3]!;
+
+    // We want the "Recommendation" section ordered by rank:
+    // Class 1 first, then Class 2, then Class 3 (Not ideal).
+    // But we still try to include a Class 3 item (if any) as the last card,
+    // so users can see why something becomes the third tier.
+    final result = <CaregiverOption>[];
+    final used = <String>{};
+
+    void addIfAvailable(List<CaregiverOption> list, int index) {
+      if (index < 0 || index >= list.length) return;
+      final item = list[index];
+      if (used.add(item.id)) result.add(item);
+    }
+
+    // Slot 1 (best available from class1 -> class2 -> class3)
+    if (class1.isNotEmpty) {
+      addIfAvailable(class1, 0);
+    } else if (class2.isNotEmpty) {
+      addIfAvailable(class2, 0);
+    } else if (class3.isNotEmpty) {
+      addIfAvailable(class3, 0);
+    }
+
+    // Slot 2 (next best from class1/class2, prefer higher rank)
+    if (result.length < 2) {
+      if (class1.isNotEmpty) {
+        addIfAvailable(class1, 1);
+      }
+      if (result.length < 2 && class2.isNotEmpty) {
+        addIfAvailable(class2, 0);
+      }
+      if (result.length < 2 && class3.isNotEmpty) {
+        addIfAvailable(class3, 0);
+      }
+    }
+
+    // Slot 3 (prefer showing one class3 if it exists, otherwise fill normally)
+    if (result.length < 3) {
+      if (class3.isNotEmpty && !used.contains(class3.first.id)) {
+        addIfAvailable(class3, 0);
+      } else if (class2.isNotEmpty && class2.length > 1) {
+        addIfAvailable(class2, 1);
+      } else {
+        addIfAvailable(class1, 2);
+        addIfAvailable(class2, 0);
+        addIfAvailable(class3, 0);
+      }
+    }
+
+    result.sort(_compareCaregiversForRanking);
+    return result.take(3).toList();
   }
 
   List<CaregiverOption> _buildNearbyList(List<CaregiverOption> available) {
@@ -629,21 +834,8 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   }
 
   bool _shouldExcludeCaregiver(CaregiverOption caregiver) {
-    if (caregiver.rating < _recommendationRules.minAcceptableRating) return true;
-    if (caregiver.distanceKm > _recommendationRules.maxRuleDistanceKm) return true;
-    return false;
-  }
-
-  int _recommendationClassFromScore(
-    double score, {
-    required double caregiverRating,
-    required double caregiverDistanceKm,
-  }) {
-    if (caregiverRating < _recommendationRules.minAcceptableRating) return 3;
-    if (caregiverDistanceKm > _recommendationRules.maxRuleDistanceKm) return 3;
-    if (score >= _recommendationRules.recommendationTier1MinScore) return 1;
-    if (score >= _recommendationRules.recommendationTier2MinScore) return 2;
-    return 3;
+    // Hard rule: don't show beyond search radius.
+    return caregiver.distanceKm > _maxSearchDistanceKm;
   }
 
   double _score({
@@ -653,21 +845,34 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     required double price,
     required int matchCount,
   }) {
-    final rules = _recommendationRules;
+    // Legacy score (kept for card ordering stability).
+    // Recommendation class is matrix-driven, so these values do not decide tiers.
+    const preferredDistanceKm = 6.0;
+    const distanceScoreMultiplier = 8.0;
+    const ratingScoreMultiplier = 15.0;
+    const matchScoreMultiplier = 1200.0;
+    const serviceScoreMultiplier = 3.0;
+    const serviceScoreCap = 6;
+    const priceScoreMultiplier = -6.0;
+    const ratingPenaltyThreshold = 3.5;
+    const ratingPenaltyValue = -10.0;
+    const distancePenaltyMultiplier = -2.0;
     final double normalizedDistance = max(
       0,
-      rules.preferredDistanceKm - min(distanceKm, rules.preferredDistanceKm),
+      preferredDistanceKm - min(distanceKm, preferredDistanceKm),
     );
-    final double distanceScore = normalizedDistance * rules.distanceScoreMultiplier;
-    final double ratingScore = rating * rules.ratingScoreMultiplier;
-    final double matchScore = matchCount * rules.matchScoreMultiplier;
+    final double distanceScore =
+        normalizedDistance * distanceScoreMultiplier;
+    final double ratingScore = rating * ratingScoreMultiplier;
+    final double matchScore = matchCount * matchScoreMultiplier;
     final double serviceScore =
-        min(serviceCount, rules.serviceScoreCap) * rules.serviceScoreMultiplier;
-    final double priceScore = price * rules.priceScoreMultiplier;
-    final double ratingPenalty =
-        rating < rules.ratingPenaltyThreshold ? rules.ratingPenaltyValue : 0;
-    final double distancePenalty = distanceKm > rules.preferredDistanceKm
-        ? (distanceKm - rules.preferredDistanceKm) * rules.distancePenaltyMultiplier
+        min(serviceCount, serviceScoreCap) * serviceScoreMultiplier;
+    final double priceScore = price * priceScoreMultiplier;
+    final double ratingPenalty = rating < ratingPenaltyThreshold
+        ? ratingPenaltyValue
+        : 0;
+    final double distancePenalty = distanceKm > preferredDistanceKm
+        ? (distanceKm - preferredDistanceKm) * distancePenaltyMultiplier
         : 0;
     return distanceScore +
         ratingScore +
@@ -705,15 +910,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
           _panelController.value,
         )! *
         MediaQuery.of(context).size.height;
-  }
-
-  void _updatePanelVisuals() {
-    final double t = _panelController.value;
-    setState(() {
-      _backdropOpacity = t * 0.22;
-      _panelBlend = t;
-      _hideFrontPanel = t > 0.55;
-    });
   }
 
   void _onHandleDragStart(DragStartDetails details) {
@@ -937,6 +1133,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       await showModalBottomSheet<void>(
         context: context,
         isScrollControlled: true,
+        enableDrag: false,
         barrierColor: Colors.transparent,
         backgroundColor: Colors.transparent,
         builder: (ctx) {
@@ -1206,6 +1403,26 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                     if (value == null) return null;
                     final v = value.trim();
                     if (v.isEmpty) return null;
+
+                    // Supports "HH:mm" and "hh:mm am/pm".
+                    final ampm = RegExp(r'^(\d{1,2}):(\d{2})\s*([ap]m)$');
+                    final match = ampm.firstMatch(v.toLowerCase());
+                    if (match != null) {
+                      var hour = int.tryParse(match.group(1) ?? '');
+                      final minute = int.tryParse(match.group(2) ?? '');
+                      final period = match.group(3);
+                      if (hour == null || minute == null) return null;
+                      if (hour < 1 || hour > 12 || minute < 0 || minute > 59) {
+                        return null;
+                      }
+                      if (period == 'am') {
+                        if (hour == 12) hour = 0;
+                      } else {
+                        if (hour != 12) hour += 12;
+                      }
+                      return TimeOfDay(hour: hour, minute: minute);
+                    }
+
                     final parts = v.split(':');
                     if (parts.length != 2) return null;
                     final h = int.tryParse(parts[0]);
@@ -1245,8 +1462,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
               }) {
                 final startMinutes = toMinutes(start);
                 final endMinutes = toMinutes(end);
-                if (minuteInterval <= 0 || endMinutes < startMinutes)
+                if (minuteInterval <= 0 || endMinutes < startMinutes) {
                   return const [];
+                }
 
                 int first = startMinutes;
                 if (first % minuteInterval != 0) {
@@ -1575,8 +1793,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                                       dayNumber,
                                     );
 
-                                    if (isBlocked(date))
+                                    if (isBlocked(date)) {
                                       return const SizedBox.shrink();
+                                    }
 
                                     final available = isAvailableDay(date);
                                     final selected =
@@ -2123,6 +2342,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       await showModalBottomSheet<void>(
         context: context,
         isScrollControlled: true,
+        enableDrag: false,
         barrierColor: Colors.transparent,
         backgroundColor: Colors.white,
         shape: const RoundedRectangleBorder(
@@ -2772,7 +2992,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
               : (widget.person.address.isNotEmpty
                     ? widget.person.address
                     : 'Care location'));
-    final double panelHeight = _currentSheetHeight(context);
     final double bottomInset = MediaQuery.of(context).padding.bottom;
     final mediaPadding = MediaQuery.of(context).padding;
     final screenHeight = MediaQuery.of(context).size.height;
@@ -2780,9 +2999,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     // Keep Google attribution/logo above the bottom sheet + front card.
     final minPanelHeight = _minSheetSize * screenHeight;
     final mapBottomPadding = minPanelHeight + mediaPadding.bottom + 1;
-    final double frontBottom = _hideFrontPanel
-        ? -110
-        : (bottomInset + 2).clamp(4.0, double.infinity);
     final entryFade = _entryFade ?? const AlwaysStoppedAnimation<double>(1);
     final entrySlide =
         _entrySlide ?? const AlwaysStoppedAnimation<Offset>(Offset.zero);
@@ -2852,40 +3068,52 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                 ],
               ),
               clipBehavior: Clip.hardEdge,
-              child: Stack(
-                children: [
-                  Positioned(
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    child: GoogleMap(
-                      initialCameraPosition: _cameraPosition(_currentLatLng),
-                      style: boldMapStyle,
-                      myLocationEnabled: false,
-                      mapToolbarEnabled: false,
-                      compassEnabled: false,
-                      zoomControlsEnabled: false,
-                      padding: EdgeInsets.fromLTRB(
-                        0,
-                        mapTopPadding,
-                        0,
-                        mapBottomPadding,
-                      ),
-                      markers: _markers.isNotEmpty
-                          ? _markers
-                          : {_selectedMarker()},
-                      polylines: _route,
-                      onMapCreated: (c) {
-                        _mapController = c;
-                      },
+              child: AnimatedBuilder(
+                animation: _panelController,
+                child: Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: GoogleMap(
+                    initialCameraPosition: _cameraPosition(_currentLatLng),
+                    style: boldMapStyle,
+                    myLocationEnabled: false,
+                    mapToolbarEnabled: false,
+                    compassEnabled: false,
+                    zoomControlsEnabled: false,
+                    padding: EdgeInsets.fromLTRB(
+                      0,
+                      mapTopPadding,
+                      0,
+                      mapBottomPadding,
                     ),
+                    markers:
+                        _markers.isNotEmpty ? _markers : {_selectedMarker()},
+                    polylines: _route,
+                    onMapCreated: (c) {
+                      _mapController = c;
+                    },
                   ),
+                ),
+                builder: (context, mapChild) {
+                  final t = _panelController.value;
+                  final panelHeight = _currentSheetHeight(context);
+                  final backdropOpacity =
+                      (t * 0.22).clamp(0.0, 0.22).toDouble();
+                  final double frontBottom = t > 0.55
+                      ? -110.0
+                      : (bottomInset + 2)
+                            .clamp(4.0, double.infinity)
+                            .toDouble();
+                  return Stack(
+                    children: [
+                      if (mapChild != null) mapChild,
                   IgnorePointer(
                     ignoring: true,
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 180),
-                      color: Colors.black.withValues(alpha: _backdropOpacity),
+                      color: Colors.black.withValues(alpha: backdropOpacity),
                     ),
                   ),
                   IgnorePointer(
@@ -2927,9 +3155,15 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                           children: [
                             GestureDetector(
                               behavior: HitTestBehavior.opaque,
-                              onVerticalDragStart: _onHandleDragStart,
-                              onVerticalDragUpdate: _onHandleDragUpdate,
-                              onVerticalDragEnd: _onHandleDragEnd,
+                              onVerticalDragStart: _enablePanelDragGesture
+                                  ? _onHandleDragStart
+                                  : null,
+                              onVerticalDragUpdate: _enablePanelDragGesture
+                                  ? _onHandleDragUpdate
+                                  : null,
+                              onVerticalDragEnd: _enablePanelDragGesture
+                                  ? _onHandleDragEnd
+                                  : null,
                               child: SizedBox(
                                 height: 42,
                                 width: double.infinity,
@@ -2944,10 +3178,10 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                                       borderRadius: BorderRadius.circular(24),
                                     ),
                                   ),
-                                ),
                               ),
                             ),
-                            _categoryTabs(show: _panelController.value > 0.05),
+                          ),
+                            _categoryTabs(show: t > 0.05),
                             const Divider(height: 1),
                             Expanded(
                               child: NotificationListener<ScrollNotification>(
@@ -3026,7 +3260,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                       child: _frontSheet(subtitle),
                     ),
                   ),
-                ],
+                    ],
+                  );
+                },
               ),
             ),
           ),
@@ -3109,12 +3345,16 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                   const SizedBox(width: 12),
                   Expanded(
                     child: ElevatedButton(
-                      onPressed: _selectedCaregiver != null
-                          ? _goToSummary
-                          : null,
+                      onPressed:
+                          (_selectedCaregiver != null &&
+                                  _selectedCaregiver?.available == true)
+                              ? _goToSummary
+                              : null,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: primary,
                         foregroundColor: const Color.fromARGB(255, 20, 20, 20),
+                        disabledBackgroundColor: Colors.grey.shade300,
+                        disabledForegroundColor: Colors.grey.shade600,
                         padding: const EdgeInsets.symmetric(vertical: 12),
                         textStyle: const TextStyle(
                           fontWeight: FontWeight.w800,
@@ -3125,7 +3365,12 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                         ),
                         elevation: 0,
                       ),
-                      child: const Text('Book caregiver'),
+                      child: Text(
+                        (_selectedCaregiver != null &&
+                                _selectedCaregiver?.available == false)
+                            ? 'Unavailable now'
+                            : 'Book caregiver',
+                      ),
                     ),
                   ),
                 ],
@@ -3150,6 +3395,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     final end = endTime ?? _endTimeFromStart(start);
     final computedPrice =
         _selectedCaregiver?.priceValue ?? _caregiverPrice(caregiver);
+    final distanceKm = _selectedCaregiver?.distanceKm;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => BookingSummaryScreen(
@@ -3159,6 +3405,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
           startTime: start,
           endTime: end,
           price: computedPrice,
+          distanceKm: distanceKm,
           selectedAddress: widget.selectedAddress,
           showScheduleSection: showSchedule,
         ),
@@ -3406,10 +3653,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     final Color accent = isSelected
         ? const Color(0xFF00B8C6)
         : Colors.grey.withValues(alpha: 0.08);
-    final String initials = caregiver.name.trim().isNotEmpty
-        ? caregiver.name.trim()[0].toUpperCase()
-        : 'C';
-    final bool hasAvatar = caregiver.avatarUrl?.trim().isNotEmpty == true;
     final servicesDisplay = _servicesForDisplay(
       caregiver,
       matchedOnly: isRecommendation,
@@ -3421,7 +3664,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       key: _tileKeyFor(caregiver.id, tileCategory),
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 5),
-        constraints: const BoxConstraints(minHeight: 92, maxHeight: 124),
+        constraints: BoxConstraints(minHeight: 92, maxHeight: isRecommendation ? 140 : 124),
         decoration: BoxDecoration(
           color: isSelected ? const Color(0xFFE8F4FF) : Colors.white,
           borderRadius: BorderRadius.circular(14),
@@ -3439,8 +3682,10 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
           ],
         ),
         child: InkWell(
-          onTap: () =>
-              _updateRouteAndMap(caregiver, sourceCategory: tileCategory),
+          onTap: () => _openCaregiverDetails(
+            caregiver,
+            sourceCategory: tileCategory,
+          ),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             child: Row(
@@ -3583,13 +3828,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                                                   foregroundColor:
                                                       _serviceTagBlue,
                                                   borderColor: _serviceTagBlue,
-                                                  fontSize: 8,
-                                                  padding:
-                                                      const EdgeInsets.symmetric(
-                                                        horizontal: 6,
-                                                        vertical: 2,
-                                                      ),
-                                                  minHeight: 18,
                                                 ),
                                               ),
                                             )
@@ -3602,6 +3840,17 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                             ),
                           ),
                         ],
+                        const SizedBox(height: 6),
+                        const Text(
+                          'Tap to view caregiver details',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.black54,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -3622,12 +3871,18 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                             color: Colors.grey.withValues(alpha: 0.25),
                           ),
                           const SizedBox(width: 8),
-                          Text(
-                            caregiver.price,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w800,
-                              fontSize: 11,
+                          Expanded(
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.center,
+                              child: Text(
+                                caregiver.price,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 11,
+                                ),
+                              ),
                             ),
                           ),
                         ],
@@ -3638,6 +3893,28 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  void _openCaregiverDetails(
+    CaregiverOption caregiver, {
+    required CaregiverCategory sourceCategory,
+  }) {
+    _updateRouteAndMap(caregiver, sourceCategory: sourceCategory);
+
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ActivityBookingDetailsScreen(
+          bookingId: '',
+          hideBookingDetailsTab: true,
+          caregiverId: caregiver.id,
+          person: widget.person,
+          selectedAddress: widget.selectedAddress,
+          initialTabIndex: 0,
+          showTrackFrontSheet: false,
+          showPreviewFrontSheet: false,
         ),
       ),
     );
@@ -4163,25 +4440,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       canvas.drawImageRect(avatar, src, dst, Paint());
       canvas.restore();
     }
-    if (avatar == null && label != null && label.isNotEmpty) {
-      const TextStyle textStyle = TextStyle(
-        color: Colors.black,
-        fontSize: 22,
-        fontWeight: FontWeight.bold,
-      );
-      final TextPainter textPainter = TextPainter(
-        text: TextSpan(
-          text: label,
-          style: textStyle.copyWith(color: textColor),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      final Offset offset = Offset(
-        radius - textPainter.width / 2,
-        circleCenterY - textPainter.height / 2,
-      );
-      textPainter.paint(canvas, offset);
-    }
+    // Intentionally do not render initials when there's no avatar image.
     final ui.Picture picture = recorder.endRecording();
     final ui.Image image = await picture.toImage(size.toInt(), size.toInt());
     final ByteData? byteData = await image.toByteData(
@@ -4235,19 +4494,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     return null;
   }
 
-  LatLng? _latLngFromDocument(Map<String, dynamic> data) {
-    final geo = data['location'];
-    if (geo is GeoPoint) {
-      return LatLng(geo.latitude, geo.longitude);
-    }
-    final double? lat = _safeDouble(data['lat'] ?? data['latitude']);
-    final double? lng = _safeDouble(
-      data['lng'] ?? data['longitude'] ?? data['long'],
-    );
-    if (lat != null && lng != null) return LatLng(lat, lng);
-    return null;
-  }
-
   double? _safeDouble(dynamic value) {
     if (value is num) return value.toDouble();
     if (value is String && value.trim().isNotEmpty) {
@@ -4278,10 +4524,10 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
 
   List<Widget> _serviceChips(
     List<String> services, {
-      required Set<String> prefsLower,
-      required bool isRecommendation,
-      required int matchCount,
-    }) {
+    required Set<String> prefsLower,
+    required bool isRecommendation,
+    required int matchCount,
+  }) {
     final List<Widget> chips = [];
     for (final s in services) {
       chips.add(
@@ -4313,12 +4559,94 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   }
 
   List<String> _recommendationReasons(CaregiverOption caregiver) {
-    final List<String> reasons = [];
-    if (caregiver.matchCount > 0) reasons.add('Matching services');
-    if (caregiver.rating >= 4.5) reasons.add('High rating');
-    if (caregiver.distanceKm <= 3) reasons.add('Close distance');
-    if (caregiver.priceValue < 120) reasons.add('Reasonable price');
-    return reasons;
+    final budget = (_clientBudget ?? 150.0).clamp(10.0, 150.0);
+    final requestedServiceCount = _clientServicePrefs.length;
+    final classLevel = caregiver.recommendationClass.clamp(1, 3);
+
+    final features = _RecommendationMatrixFeatures.from(
+      distanceKm: caregiver.distanceKm,
+      caregiverPrice: caregiver.priceValue,
+      clientBudget: budget,
+      caregiverRating: caregiver.rating,
+      matchCount: caregiver.matchCount,
+      requestedServiceCount: requestedServiceCount,
+      caregiverServiceCount: caregiver.services.length,
+    );
+
+    final positives = <String>[];
+    final negatives = <String>[];
+
+    // Budget (price_gap_level)
+    if (features.priceGapLevel <= 2) {
+      positives.add('Within budget');
+    } else if (features.priceGapLevel >= 4) {
+      negatives.add('Over budget');
+    }
+
+    // Service match (match_level)
+    if (requestedServiceCount > 0) {
+      if (features.matchLevel <= 2) {
+        if (caregiver.matchCount >= requestedServiceCount) {
+          positives.add('Full match');
+        } else {
+          positives.add('Matches ${caregiver.matchCount}/$requestedServiceCount');
+        }
+      } else if (features.matchLevel >= 4) {
+        negatives.add('Low match');
+      }
+    } else if (caregiver.matchCount > 0) {
+      positives.add('Matches ${caregiver.matchCount}');
+    }
+
+    // Rating (rating_level)
+    if (features.ratingLevel <= 2) {
+      positives.add('High rating');
+    } else if (features.ratingLevel >= 4) {
+      negatives.add('Low rating');
+    }
+
+    // Distance (distance_level)
+    if (features.distanceLevel == 1) {
+      positives.add('Very close');
+    } else if (features.distanceLevel == 2) {
+      positives.add('Near you');
+    } else {
+      negatives.add('Far');
+    }
+
+    // Service variety (service_count_level)
+    if (features.serviceCountLevel <= 2) {
+      positives.add('Many services');
+    } else if (features.serviceCountLevel >= 4) {
+      negatives.add('Limited services');
+    }
+
+    // Keep chips compact: pick top 3 based on class.
+    if (classLevel <= 2) {
+      final picked = <String>[];
+      for (final r in positives) {
+        if (!picked.contains(r)) picked.add(r);
+        if (picked.length == 3) break;
+      }
+      if (picked.isEmpty) {
+        for (final r in negatives) {
+          if (!picked.contains(r)) picked.add(r);
+          if (picked.length == 2) break;
+        }
+      }
+      return picked;
+    }
+
+    final picked = <String>[];
+    for (final r in negatives) {
+      if (!picked.contains(r)) picked.add(r);
+      if (picked.length == 2) break;
+    }
+    for (final r in positives) {
+      if (!picked.contains(r)) picked.add(r);
+      if (picked.length == 3) break;
+    }
+    return picked;
   }
 
   List<String> _servicesForDisplay(
@@ -4403,4 +4731,191 @@ class _WeeklyTimeRange {
 
   final TimeOfDay start;
   final TimeOfDay end;
+}
+
+class _RecommendationMatrixFeatures {
+  const _RecommendationMatrixFeatures({
+    required this.ratingLevel,
+    required this.distanceLevel,
+    required this.matchLevel,
+    required this.priceGapLevel,
+    required this.serviceCountLevel,
+  });
+
+  final int ratingLevel;
+  final int priceGapLevel;
+  final int distanceLevel;
+  final int matchLevel;
+  final int serviceCountLevel;
+
+  static _RecommendationMatrixFeatures from({
+    required double distanceKm,
+    required double caregiverPrice,
+    required double clientBudget,
+    required double caregiverRating,
+    required int matchCount,
+    required int requestedServiceCount,
+    required int caregiverServiceCount,
+  }) {
+    final priceGapLevel = () {
+      // For this app, `clientBudget` is the maximum the client is willing to pay.
+      // If the caregiver price is within budget, treat it as the best match.
+      if (clientBudget <= 0) return 3;
+      if (caregiverPrice <= clientBudget) return 1;
+
+      // If above budget, bucket by how much it exceeds the budget.
+      final overPercent = ((caregiverPrice - clientBudget) / clientBudget) * 100.0;
+      if (overPercent <= 5) return 2;
+      if (overPercent <= 15) return 3;
+      if (overPercent <= 30) return 4;
+      return 5;
+    }();
+
+    final ratingLevel = () {
+      if (caregiverRating >= 4.8) return 1;
+      if (caregiverRating >= 4.5) return 2;
+      if (caregiverRating >= 4.0) return 3;
+      if (caregiverRating >= 3.5) return 4;
+      return 5;
+    }();
+
+    final distanceLevel = () {
+      if (distanceKm <= 5) return 1;
+      if (distanceKm <= 15) return 2;
+      if (distanceKm <= 25) return 3;
+      if (distanceKm <= 40) return 4;
+      return 5;
+    }();
+
+    final matchLevel = () {
+      if (requestedServiceCount <= 0) return 3;
+      final ratio = matchCount / requestedServiceCount;
+      if (ratio >= 1.0) return 1;
+      if (ratio >= 0.66) return 2;
+      if (ratio >= 0.34) return 3;
+      if (ratio > 0.0) return 4;
+      return 5;
+    }();
+
+    final serviceCountLevel = () {
+      if (caregiverServiceCount >= 5) return 1;
+      if (caregiverServiceCount >= 3) return 2;
+      if (caregiverServiceCount >= 2) return 3;
+      if (caregiverServiceCount >= 1) return 4;
+      return 5;
+    }();
+
+    return _RecommendationMatrixFeatures(
+      ratingLevel: ratingLevel,
+      distanceLevel: distanceLevel,
+      matchLevel: matchLevel,
+      priceGapLevel: priceGapLevel,
+      serviceCountLevel: serviceCountLevel,
+    );
+  }
+}
+
+class _RecommendationMatrixRule {
+  const _RecommendationMatrixRule({
+    required this.ratingLevel,
+    required this.distanceLevel,
+    required this.matchLevel,
+    required this.priceGapLevel,
+    required this.serviceCountLevel,
+    required this.recommendationClass,
+  });
+
+  final int ratingLevel;
+  final int distanceLevel;
+  final int matchLevel;
+  final int priceGapLevel;
+  final int serviceCountLevel;
+  final int recommendationClass;
+
+  bool get isValid =>
+      ratingLevel > 0 &&
+      distanceLevel > 0 &&
+      matchLevel > 0 &&
+      priceGapLevel > 0 &&
+      serviceCountLevel > 0 &&
+      recommendationClass > 0;
+
+  bool matches(_RecommendationMatrixFeatures features) {
+    return ratingLevel == features.ratingLevel &&
+        distanceLevel == features.distanceLevel &&
+        matchLevel == features.matchLevel &&
+        priceGapLevel == features.priceGapLevel &&
+        serviceCountLevel == features.serviceCountLevel;
+  }
+
+  int distanceTo(_RecommendationMatrixFeatures features) {
+    return (ratingLevel - features.ratingLevel).abs() +
+        (distanceLevel - features.distanceLevel).abs() +
+        (matchLevel - features.matchLevel).abs() +
+        (priceGapLevel - features.priceGapLevel).abs() +
+        (serviceCountLevel - features.serviceCountLevel).abs();
+  }
+
+  static _RecommendationMatrixRule? tryParse(Map<String, dynamic> data) {
+    int? readInt(dynamic value) {
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) return int.tryParse(value.trim());
+      return null;
+    }
+
+    final ratingLevel = readInt(data['rating_level'] ?? data['ratingLevel']);
+    final distanceLevel = readInt(data['distance_level'] ?? data['distanceLevel']);
+    final matchLevel = readInt(data['match_level'] ?? data['matchLevel']);
+    final priceGapLevel = readInt(data['price_gap_level'] ?? data['priceGapLevel']);
+    final serviceCountLevel = readInt(
+      data['service_count_level'] ?? data['serviceCountLevel'],
+    );
+    final recommendationClass = readInt(
+      data['recommendation_class'] ??
+          data['recommendationClass'] ??
+          data['classLevel'],
+    );
+
+    if (ratingLevel == null ||
+        distanceLevel == null ||
+        matchLevel == null ||
+        priceGapLevel == null ||
+        serviceCountLevel == null ||
+        recommendationClass == null) {
+      return null;
+    }
+
+    final safeClass = recommendationClass.clamp(1, 3);
+    return _RecommendationMatrixRule(
+      ratingLevel: ratingLevel.clamp(1, 5),
+      distanceLevel: distanceLevel.clamp(1, 5),
+      matchLevel: matchLevel.clamp(1, 5),
+      priceGapLevel: priceGapLevel.clamp(1, 5),
+      serviceCountLevel: serviceCountLevel.clamp(1, 5),
+      recommendationClass: safeClass,
+    );
+  }
+
+  static int compare(_RecommendationMatrixRule a, _RecommendationMatrixRule b) {
+    final c0 = a.recommendationClass.compareTo(b.recommendationClass);
+    if (c0 != 0) return c0;
+    final c1 = a.ratingLevel.compareTo(b.ratingLevel);
+    if (c1 != 0) return c1;
+    final c2 = a.matchLevel.compareTo(b.matchLevel);
+    if (c2 != 0) return c2;
+    final c3 = a.priceGapLevel.compareTo(b.priceGapLevel);
+    if (c3 != 0) return c3;
+    final c4 = a.distanceLevel.compareTo(b.distanceLevel);
+    if (c4 != 0) return c4;
+    return a.serviceCountLevel.compareTo(b.serviceCountLevel);
+  }
+
+  const _RecommendationMatrixRule.empty()
+    : ratingLevel = 0,
+      distanceLevel = 0,
+      matchLevel = 0,
+      priceGapLevel = 0,
+      serviceCountLevel = 0,
+      recommendationClass = 0;
 }

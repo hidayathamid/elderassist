@@ -11,6 +11,7 @@ import 'package:emergencies_disability_assistance_app/widgets/default_profile_av
 import 'package:emergencies_disability_assistance_app/widgets/schedule_booking_telegram_sheet.dart';
 
 import 'booking_person_screen.dart';
+import '../user_root_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/profile/profile_addresses_screen.dart';
 import '../../../constants/service_options.dart';
 import '../../../models/caregiver_model.dart';
@@ -65,6 +66,7 @@ class BookingSummaryScreen extends StatefulWidget {
     required this.price,
     required this.selectedAddress,
     required this.showScheduleSection,
+    this.distanceKm,
     this.editingBookingId,
     this.lockedService,
     this.lockedPaymentMethod,
@@ -80,6 +82,7 @@ class BookingSummaryScreen extends StatefulWidget {
   final double price;
   final AddressItem selectedAddress;
   final bool showScheduleSection;
+  final double? distanceKm;
   final String? editingBookingId;
   final String? lockedService;
   final String? lockedPaymentMethod;
@@ -94,7 +97,12 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     with WidgetsBindingObserver {
   bool _isLoading = false;
   String _selectedService = '';
-  static const bool _forceToyyibTestAmount = true;
+  Map<String, Map<String, dynamic>> _serviceCatalogByName = const {};
+  bool _serviceCatalogLoading = false;
+  final TextEditingController _bookingNotesController = TextEditingController();
+  double? _distanceKmOverride;
+  double? _distanceChargeOverride;
+  static const bool _forceToyyibTestAmount = false;
   static const int _minMinutesBetweenStartEnd = 15;
   TimeOfDay? _bookInAdvanceStartOverride;
   TimeOfDay? _bookInAdvanceEndOverride;
@@ -186,6 +194,53 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
       _selectedService = widget.lockedService!;
     }
     _selectedPaymentMethod = widget.lockedPaymentMethod;
+    _loadServiceCatalog();
+    _loadBookingMetadataForEdit();
+  }
+
+  Future<void> _loadBookingMetadataForEdit() async {
+    final bookingId = widget.editingBookingId?.trim() ?? '';
+    if (bookingId.isEmpty) return;
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('bookings')
+          .doc(bookingId)
+          .get();
+      final data = snap.data();
+      if (!mounted || data == null) return;
+      final notes = (data['bookingNotes'] as String?)?.trim() ?? '';
+      final distanceKm = _coerceToDouble(data['distanceKm']);
+      final distanceCharge = _coerceToDouble(data['distanceCharge']);
+      setState(() {
+        _bookingNotesController.text = notes;
+        _distanceKmOverride = distanceKm;
+        _distanceChargeOverride = distanceCharge;
+      });
+    } catch (_) {
+      // Ignore; edit screen remains usable.
+    }
+  }
+
+  Future<void> _loadServiceCatalog() async {
+    if (_serviceCatalogLoading) return;
+    setState(() => _serviceCatalogLoading = true);
+    try {
+      final snapshot =
+          await FirebaseFirestore.instance.collection('services').get();
+      final next = <String, Map<String, dynamic>>{};
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final name = (data['name'] as String?)?.trim();
+        if (name == null || name.isEmpty) continue;
+        next[name] = data;
+      }
+      if (!mounted) return;
+      setState(() => _serviceCatalogByName = next);
+    } catch (_) {
+      if (!mounted) return;
+    } finally {
+      if (mounted) setState(() => _serviceCatalogLoading = false);
+    }
   }
 
   @override
@@ -609,6 +664,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     _timeSnapDebounce?.cancel();
     _scheduleScrollController.dispose();
     _timeScrollController.dispose();
+    _bookingNotesController.dispose();
     super.dispose();
   }
 
@@ -626,9 +682,44 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
 
   bool get _hasSelectedPaymentMethod => _selectedPaymentMethod != null;
 
+  double _selectedServicePriceValue() {
+    final selectedName = _selectedService.trim().isEmpty
+        ? (widget.lockedService?.trim() ?? '')
+        : _selectedService.trim();
+    final details = _serviceCatalogByName[selectedName];
+    final catalogPrice = _coerceToDouble(details?['price']);
+    if (catalogPrice != null && catalogPrice > 0) return catalogPrice;
+    return 0;
+  }
+
+  String? _selectedServicePerLabel() {
+    final selectedName = _selectedService.trim().isEmpty
+        ? (widget.lockedService?.trim() ?? '')
+        : _selectedService.trim();
+    final details = _serviceCatalogByName[selectedName];
+    final per = (details?['per'] as String?)?.trim();
+    return (per == null || per.isEmpty) ? null : per;
+  }
+
   bool get _canConfirmBooking {
     if (_isEditingBooking) return !_isLoading;
-    return !_isLoading && _hasSelectedService && _hasSelectedPaymentMethod;
+    final servicePrice = _selectedServicePriceValue();
+    return !_isLoading &&
+        !_serviceCatalogLoading &&
+        _hasSelectedService &&
+        _hasSelectedPaymentMethod &&
+        servicePrice > 0;
+  }
+
+  double _distanceKmValue() {
+    return _distanceKmOverride ??
+        widget.distanceKm ??
+        widget.selectedAddress.distanceKm ??
+        0.0;
+  }
+
+  double _distanceChargeValue() {
+    return _distanceChargeOverride ?? widget.price;
   }
 
   Future<void> _confirmBooking() async {
@@ -645,6 +736,16 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Please select a service'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    if (_serviceCatalogLoading || _selectedServicePriceValue() <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Service price is not available yet. Please try again.'),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -672,14 +773,26 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
       final endTimeValue = _selectedEndTimeValue;
       final personAddress =
           (_activeAddress.addressLine ?? _activeAddress.subtitle).trim();
-      final billingAmount = _forceToyyibTestAmount ? 2.0 : widget.price;
+      final selectedServicePrice = _selectedServicePriceValue();
+      final distanceKm = _distanceKmValue();
+      final distanceCharge = _distanceChargeValue();
+      final totalAmount = (selectedServicePrice + distanceCharge)
+          .clamp(0.0, 999999.0)
+          .toDouble();
+      final billingAmount = _forceToyyibTestAmount ? 2.0 : totalAmount;
       final formattedDate = _formatDate(_selectedDate);
       final formattedTime = _formatTimeOfDay(startTimeValue);
       final formattedEndTime = _formatTimeOfDay(endTimeValue);
-      final billName = 'Booking: $serviceLabel';
-      final billDescription = _isBookInAdvance
-          ? 'Care booking for $serviceLabel on ${intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate)} from $formattedTime to $formattedEndTime'
-          : 'Care booking for $serviceLabel on ${intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate)} at $formattedTime';
+      final billName = _sanitizeToyyibText(
+        'Booking $serviceLabel',
+        maxLength: 30,
+      );
+      final billDescription = _sanitizeToyyibText(
+        _isBookInAdvance
+            ? 'Care booking for $serviceLabel on ${intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate)} from $formattedTime to $formattedEndTime'
+            : 'Care booking for $serviceLabel on ${intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate)} at $formattedTime',
+        maxLength: 200,
+      );
 
       final bookingInfo = <String, dynamic>{
         'caregiverId': widget.caregiver.id,
@@ -693,8 +806,11 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
         'addressLabel': _activeAddress.label ?? _currentPerson.label ?? '',
         'date': formattedDate,
         'paymentMethod': _selectedPaymentMethod!,
-        'servicePrice': widget.price,
-        'notes': pickupDetails,
+        'servicePrice': selectedServicePrice,
+        'distanceKm': distanceKm,
+        'distanceCharge': distanceCharge,
+        'bookingNotes': _bookingNotesController.text.trim(),
+        'personNotes': pickupDetails,
       };
       if (_isBookInAdvance) {
         bookingInfo['startTime'] = formattedTime;
@@ -756,6 +872,9 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
         'addressLabel': _activeAddress.label ?? _currentPerson.label ?? '',
         'caregiverName': widget.caregiver.name,
         'addressId': _activeAddress.id,
+        'bookingNotes': _bookingNotesController.text.trim(),
+        'distanceKm': _distanceKmValue(),
+        'distanceCharge': _distanceChargeValue(),
         'updatedAt': FieldValue.serverTimestamp(),
       };
       if (_isBookInAdvance) {
@@ -888,6 +1007,10 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
                         (service) => _buildServiceRow(service: service),
                       ),
                     ],
+                    const SizedBox(height: 16),
+                    _buildSectionTitle('Booking Notes'),
+                    const SizedBox(height: 6),
+                    _buildBookingNotesCard(),
                     const SizedBox(height: 16),
                     _buildSectionTitle('Booking Summary'),
                     const SizedBox(height: 8),
@@ -1812,93 +1935,392 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     return '${hour.toString().padLeft(2, '0')}:$minute $suffix';
   }
 
+  String _sanitizeToyyibText(
+    String value, {
+    required int maxLength,
+    bool collapseSpaces = true,
+  }) {
+    // Keep it simple: allow alphanumeric + space + underscore + dash + dot + comma.
+    final sanitized =
+        value.replaceAll(RegExp(r"[^A-Za-z0-9 _\\-\\.,]"), " ").trim();
+    final collapsed = collapseSpaces
+        ? sanitized.replaceAll(RegExp(r"\\s+"), " ")
+        : sanitized;
+    if (collapsed.length <= maxLength) return collapsed;
+    return collapsed.substring(0, maxLength).trim();
+  }
+
+  double? _coerceToDouble(Object? value) {
+    if (value == null) return null;
+    if (value is num) return value.toDouble();
+    if (value is String) return double.tryParse(value);
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> _fetchServiceDetails(String serviceName) async {
+    final cached = _serviceCatalogByName[serviceName];
+    if (cached != null) return cached;
+    final snapshot =
+        await FirebaseFirestore.instance
+            .collection('services')
+            .where('name', isEqualTo: serviceName)
+            .limit(1)
+            .get();
+    if (snapshot.docs.isEmpty) return null;
+    return snapshot.docs.first.data();
+  }
+
+  Future<void> _showServiceDetailsSheet(String serviceName) async {
+    final theme = Theme.of(context);
+    if (!mounted) return;
+    setState(() => _modalSheetScrimVisible = true);
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: false,
+        isDismissible: true,
+        enableDrag: false,
+        barrierColor: Colors.transparent,
+        backgroundColor: Colors.transparent,
+        builder: (context) {
+          final mediaQuery = MediaQuery.of(context);
+          final bottomInset = mediaQuery.viewInsets.bottom;
+          return SafeArea(
+            top: false,
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(22),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.10),
+                    blurRadius: 18,
+                    offset: const Offset(0, -6),
+                  ),
+                ],
+              ),
+              child: ClipRRect(
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(22),
+                ),
+                child: Material(
+                  color: Colors.white,
+                  child: Padding(
+                    padding: EdgeInsets.only(bottom: 14 + bottomInset),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  'Service Details',
+                                  style: theme.textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.w800,
+                                    color: _bookingAppBarText,
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                visualDensity: VisualDensity.compact,
+                                splashRadius: 18,
+                                icon: const Icon(Icons.close_rounded),
+                                onPressed: () => Navigator.of(context).pop(),
+                              ),
+                            ],
+                          ),
+                        ),
+                        FutureBuilder<Map<String, dynamic>?>(
+                          future: _fetchServiceDetails(serviceName),
+                          builder: (context, snapshot) {
+                            if (snapshot.connectionState ==
+                                ConnectionState.waiting) {
+                              return const Padding(
+                                padding: EdgeInsets.only(top: 22, bottom: 18),
+                                child: Center(
+                                  child: SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }
+
+                            final data = snapshot.data;
+                            final name = (data?['name'] as String?)?.trim();
+                            final description =
+                                (data?['description'] as String?) ??
+                                (data?['descriptions'] as String?) ??
+                                (kServiceDescriptions[serviceName] ??
+                                    'No description available.');
+                            final imageUrl =
+                                (data?['imageUrl'] as String?)?.trim() ??
+                                (data?['image'] as String?)?.trim() ??
+                                '';
+                            final price =
+                                _coerceToDouble(data?['price']) ??
+                                _coerceToDouble(data?['amount']);
+                            final per = (data?['per'] as String?)?.trim();
+
+                            final priceLabel = price == null
+                                ? null
+                                : 'RM ${price.toStringAsFixed(2)}';
+                            final perLabel =
+                                (per == null || per.isEmpty) ? null : per;
+
+                            Widget imageWidget;
+                            if (imageUrl.isNotEmpty) {
+                              imageWidget = Image.network(
+                                imageUrl,
+                                width: double.infinity,
+                                height: 200,
+                                fit: BoxFit.cover,
+                                filterQuality: FilterQuality.medium,
+                                errorBuilder: (context, error, stackTrace) {
+                                  return Container(
+                                    width: double.infinity,
+                                    height: 200,
+                                    color: Colors.grey[100],
+                                    child: const Center(
+                                      child: Icon(
+                                        Icons.room_service_outlined,
+                                        color: Colors.black26,
+                                        size: 40,
+                                      ),
+                                    ),
+                                  );
+                                },
+                              );
+                            } else {
+                              imageWidget = Container(
+                                width: double.infinity,
+                                height: 200,
+                                color: Colors.grey[100],
+                                child: const Center(
+                                  child: Icon(
+                                    Icons.room_service_outlined,
+                                    color: Colors.black26,
+                                    size: 40,
+                                  ),
+                                ),
+                              );
+                            }
+
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                RepaintBoundary(child: imageWidget),
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    16,
+                                    14,
+                                    16,
+                                    0,
+                                  ),
+                                  child: ConstrainedBox(
+                                    constraints:
+                                        const BoxConstraints(maxWidth: 420),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.stretch,
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          (name == null || name.isEmpty)
+                                              ? serviceName
+                                              : name,
+                                          style: const TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w800,
+                                            color: _bookingAppBarText,
+                                          ),
+                                        ),
+                                        if (priceLabel != null)
+                                          Padding(
+                                            padding:
+                                                const EdgeInsets.only(top: 6),
+                                            child: Text(
+                                              perLabel == null
+                                                  ? priceLabel
+                                                  : '$priceLabel / $perLabel',
+                                              style: const TextStyle(
+                                                fontSize: 12.5,
+                                                fontWeight: FontWeight.w700,
+                                                color: Colors.black87,
+                                              ),
+                                            ),
+                                          ),
+                                        Padding(
+                                          padding:
+                                              const EdgeInsets.only(top: 10),
+                                          child: Text(
+                                            description,
+                                            textAlign: TextAlign.justify,
+                                            style: const TextStyle(
+                                              fontSize: 12,
+                                              height: 1.45,
+                                              color: Colors.black54,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      );
+    } finally {
+      if (mounted) setState(() => _modalSheetScrimVisible = false);
+    }
+  }
+
   Widget _buildServiceRow({required String service}) {
     final selected = _selectedService == service;
     final bool canSelect = !_lockServiceAndPayment;
-    final description = kServiceDescriptions[service] ?? 'Book now with doctor';
+    final details = _serviceCatalogByName[service];
+    final imageUrl = (details?['imageUrl'] as String?)?.trim() ?? '';
+    final price = _coerceToDouble(details?['price']);
+    final per = (details?['per'] as String?)?.trim();
+    final String? priceLabel = price == null ? null : 'RM ${price.toStringAsFixed(2)}';
+    final String? perLabel = (per == null || per.isEmpty) ? null : per;
+    final String secondaryText = priceLabel == null
+        ? 'RM --'
+        : (perLabel == null ? priceLabel : '$priceLabel / $perLabel');
     const Color accent = Color(0xFF00A8A7);
     return Padding(
       padding: const EdgeInsets.only(top: 6),
-      child: GestureDetector(
-        onTap: canSelect
-            ? () => setState(() => _selectedService = service)
-            : null,
-        child: Container(
-          constraints: const BoxConstraints(minHeight: 48),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: selected ? accent : Colors.grey[300]!,
-              width: selected ? 1.5 : 1,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: selected ? 0.08 : 0.03),
-                blurRadius: selected ? 12 : 4,
-                offset: const Offset(0, 4),
-              ),
-            ],
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: selected ? accent : Colors.grey[300]!,
+            width: selected ? 1.5 : 1,
           ),
-          child: Row(
-            children: [
-              CircleAvatar(
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: selected ? 0.08 : 0.03),
+              blurRadius: selected ? 12 : 4,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                if (canSelect) setState(() => _selectedService = service);
+                _showServiceDetailsSheet(service);
+              },
+              child: CircleAvatar(
                 radius: 16,
                 backgroundColor: accent.withValues(alpha: 0.1),
-                child: const Icon(
-                  Icons.room_service_outlined,
-                  color: accent,
-                  size: 18,
-                ),
+                child: (imageUrl.isNotEmpty)
+                    ? ClipOval(
+                        child: Image.network(
+                          imageUrl,
+                          width: 32,
+                          height: 32,
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) {
+                            return const Icon(
+                              Icons.room_service_outlined,
+                              color: accent,
+                              size: 18,
+                            );
+                          },
+                        ),
+                      )
+                    : const Icon(
+                        Icons.room_service_outlined,
+                        color: accent,
+                        size: 18,
+                      ),
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      if (canSelect) setState(() => _selectedService = service);
+                      _showServiceDetailsSheet(service);
+                    },
+                    child: Text(
                       service,
                       style: const TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    Text(
-                      description,
-                      style: const TextStyle(
-                        fontSize: 10,
-                        color: Colors.black54,
-                      ),
+                  ),
+                  Text(
+                    secondaryText,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: Colors.black54,
                     ),
-                  ],
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              width: 22,
+              height: 22,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: selected ? accent : Colors.grey,
+                  width: 1.5,
                 ),
               ),
-              Container(
-                width: 22,
-                height: 22,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: selected ? accent : Colors.grey,
-                    width: 1.5,
-                  ),
-                ),
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {
+                  if (!canSelect) return;
+                  setState(() => _selectedService = service);
+                },
                 child: selected
                     ? const Icon(Icons.check, size: 16, color: accent)
                     : null,
               ),
-              if (!canSelect)
-                const Padding(
-                  padding: EdgeInsets.only(left: 8),
-                  child: Icon(
-                    Icons.lock_outline,
-                    size: 14,
-                    color: Colors.black26,
-                  ),
+            ),
+            if (!canSelect)
+              const Padding(
+                padding: EdgeInsets.only(left: 8),
+                child: Icon(
+                  Icons.lock_outline,
+                  size: 14,
+                  color: Colors.black26,
                 ),
-            ],
-          ),
+              ),
+          ],
         ),
       ),
     );
@@ -1908,10 +2330,16 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     final dateLabel = intl.DateFormat('EEE, d MMM yyyy').format(_selectedDate);
     final timeLabel = _formatTimeOfDay(_selectedStartTimeValue);
     final endTimeLabel = _formatTimeOfDay(_selectedEndTimeValue);
-    final serviceLabel = _selectedService.isEmpty
+    final selectedServiceName = _selectedService.isEmpty
         ? 'General care'
         : _selectedService;
-    final servicePrice = widget.price;
+    final servicePriceValue = _selectedServicePriceValue();
+    final perLabel = _selectedServicePerLabel();
+    final servicePriceLabel = 'RM ${servicePriceValue.toStringAsFixed(2)}'
+        '${perLabel == null ? '' : ' / $perLabel'}';
+    final distanceKmValue = _distanceKmValue();
+    final distanceChargeValue = _distanceChargeValue();
+    final totalValue = (servicePriceValue + distanceChargeValue).clamp(0, 999999);
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -1935,23 +2363,67 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
             _buildSummaryRow(label: 'End time', amount: endTimeLabel),
           ] else
             _buildSummaryRow(label: 'Time', amount: timeLabel),
-          _buildSummaryRow(label: 'Service', amount: serviceLabel),
+          _buildSummaryRow(label: 'Service', amount: selectedServiceName),
+          _buildSummaryRow(
+            label: 'Service Price',
+            amount: servicePriceLabel,
+          ),
+          _buildSummaryRow(
+            label: 'Distance',
+            amount: '${distanceKmValue.toStringAsFixed(1)} km',
+          ),
+          _buildSummaryRow(
+            label: 'Distance Charge',
+            amount: 'RM ${distanceChargeValue.toStringAsFixed(2)}',
+          ),
           const Divider(height: 1, color: Colors.grey),
           const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text(
-                'Service Price',
+                'Total',
                 style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
               ),
               Text(
-                _formatCurrency(servicePrice),
+                'RM ${totalValue.toStringAsFixed(2)}',
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildBookingNotesCard() {
+    final locked = _lockServiceAndPayment;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.black12.withValues(alpha: 0.08)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: TextField(
+        controller: _bookingNotesController,
+        enabled: !locked,
+        maxLines: 3,
+        textInputAction: TextInputAction.newline,
+        style: const TextStyle(fontSize: 12, color: Colors.black87),
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: 'Add instructions for the caregiver…',
+          hintStyle: const TextStyle(fontSize: 12, color: Colors.black45),
+          border: InputBorder.none,
+        ),
       ),
     );
   }
@@ -2267,6 +2739,7 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
 
   String? _stringValue(dynamic value) {
     if (value is String && value.isNotEmpty) return value;
+    if (value is GeoPoint) return null;
     if (value is Iterable) {
       final joinable = value.whereType<String>().toList();
       if (joinable.isNotEmpty) return joinable.join(', ');
@@ -2581,50 +3054,80 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
     required String message,
   }) async {
     if (!mounted) return;
-    await _showPaymentDialog(title: title, message: message);
+    final shouldRedirectToActivity =
+        title.trim().toLowerCase() == 'payment successful';
+    await _showPaymentDialog(
+      title: title,
+      message: message,
+      onOk: shouldRedirectToActivity
+          ? () {
+              if (!mounted) return;
+              Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(
+                  builder: (_) => const UserRootScreen(
+                    initialIndex: 3,
+                    activityInitialCategoryIndex: 0,
+                  ),
+                ),
+                (_) => false,
+              );
+            }
+          : null,
+    );
   }
 
   Future<void> _showPaymentDialog({
     required String title,
     required String message,
+    VoidCallback? onOk,
   }) async {
     if (!mounted) return;
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: Text(
-          title,
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontWeight: FontWeight.w700),
-        ),
-        content: Text(
-          message,
-          textAlign: TextAlign.center,
-          style: const TextStyle(color: Colors.black87),
-        ),
-        actionsAlignment: MainAxisAlignment.center,
-        actionsPadding: const EdgeInsets.only(bottom: 12),
-        actions: [
-          SizedBox(
-            width: 120,
-            child: ElevatedButton(
-              onPressed: () => Navigator.of(context).pop(),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _actionGold,
-                foregroundColor: Colors.black,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                textStyle: const TextStyle(fontWeight: FontWeight.w700),
-              ),
-              child: const Text('OK'),
-            ),
+      builder: (_) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
           ),
-        ],
+          title: Text(
+            title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+          content: Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.black87),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actionsPadding: const EdgeInsets.only(bottom: 12),
+          actions: [
+            SizedBox(
+              width: 120,
+              child: ElevatedButton(
+                onPressed: () {
+                  Navigator.of(context).pop();
+                  if (onOk != null) {
+                    WidgetsBinding.instance.addPostFrameCallback((_) => onOk());
+                  }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _actionGold,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  textStyle: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                child: const Text('OK'),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

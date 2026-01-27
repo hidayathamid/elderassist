@@ -33,6 +33,14 @@ const TextStyle _sectionTitleStyle = TextStyle(
 int _alphaFromOpacity(double opacity) =>
     (opacity * 255).clamp(0.0, 255.0).round();
 
+class _DefaultSelectionKey {
+  const _DefaultSelectionKey({required this.address, this.lat, this.lng});
+
+  final String address;
+  final double? lat;
+  final double? lng;
+}
+
 enum AllCaregiverCategory { all, nearby, recommended }
 
 class AllCaregiverScreen extends StatefulWidget {
@@ -68,6 +76,7 @@ class _AllCaregiverScreenState extends State<AllCaregiverScreen> {
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _userDocSubscription;
   List<_HomeAddressItem> _homeAddresses = const [];
   int _selectedHomeAddressIndex = 0;
+  _DefaultSelectionKey? _lastAppliedDefaultSelectionKey;
   String? _userPhoneNumber;
   bool _modalSheetScrimVisible = false;
 
@@ -232,15 +241,45 @@ class _AllCaregiverScreenState extends State<AllCaregiverScreen> {
     );
     resolved.removeWhere((e) => e.address.isEmpty);
 
-    final nextIndex = _resolveSelectedIndex(
+    final baseIndex = _resolveSelectedIndex(
       items: resolved,
       currentIndex: _selectedHomeAddressIndex,
     );
+
+    final int defaultIndex = resolved.indexWhere((e) => !e.isUser && e.isDefault);
+    final _HomeAddressItem? defaultItem =
+        defaultIndex == -1 ? null : resolved[defaultIndex];
+    final _DefaultSelectionKey? defaultKey = defaultItem == null
+        ? null
+        : _DefaultSelectionKey(
+            address: defaultItem.address,
+            lat: defaultItem.lat,
+            lng: defaultItem.lng,
+          );
+    final bool defaultChanged =
+        defaultKey != null &&
+        (_lastAppliedDefaultSelectionKey == null ||
+            _lastAppliedDefaultSelectionKey!.address != defaultKey.address ||
+            _lastAppliedDefaultSelectionKey!.lat != defaultKey.lat ||
+            _lastAppliedDefaultSelectionKey!.lng != defaultKey.lng);
+
+    final bool hasExplicitInitialSelection =
+        widget.selectedAddress != null ||
+        (widget.originLat != null && widget.originLng != null);
+    final bool hasLocalSelection = _originLat != null && _originLng != null;
+    final bool allowAutoSelectDefault = !hasExplicitInitialSelection && !hasLocalSelection;
+
+    final bool shouldForceDefault =
+        defaultIndex != -1 &&
+        allowAutoSelectDefault &&
+        (defaultChanged || (_originLat == null && _originLng == null));
+    final int nextIndex = shouldForceDefault ? defaultIndex : baseIndex;
 
     setState(() {
       _homeAddresses = resolved;
       _selectedHomeAddressIndex = nextIndex;
       _userPhoneNumber = phone?.isNotEmpty == true ? phone : _userPhoneNumber;
+      if (defaultKey != null) _lastAppliedDefaultSelectionKey = defaultKey;
       final item = (resolved.isNotEmpty)
           ? resolved[nextIndex.clamp(0, resolved.length - 1)]
           : null;
@@ -790,7 +829,7 @@ class _AllCaregiverScreenState extends State<AllCaregiverScreen> {
                               crossAxisCount: 2,
                               mainAxisSpacing: 12,
                               crossAxisSpacing: 12,
-                              childAspectRatio: 0.74,
+                              childAspectRatio: 0.69,
                             ),
                             itemCount: items.length,
                             itemBuilder: (context, index) {
@@ -859,19 +898,23 @@ class _AllCaregiverScreenState extends State<AllCaregiverScreen> {
 
 class _HomeAddressItem {
   const _HomeAddressItem({
+    this.id,
     required this.name,
     required this.label,
     required this.address,
     this.isUser = false,
+    this.isDefault = false,
     this.photoUrl,
     this.lat,
     this.lng,
   });
 
+  final String? id;
   final String name;
   final String label;
   final String address;
   final bool isUser;
+  final bool isDefault;
   final String? photoUrl;
   final double? lat;
   final double? lng;
@@ -885,6 +928,8 @@ class _HomeAddressItem {
   }
 
   factory _HomeAddressItem.fromMap(Map<String, dynamic> map, {bool isUser = false}) {
+    final id = map['id']?.toString().trim();
+    final isDefault = map['isDefault'] == true;
     final lat = _safeDouble(map['lat']) ?? _safeDouble(map['latitude']);
     final lng =
         _safeDouble(map['long']) ??
@@ -905,12 +950,14 @@ class _HomeAddressItem {
         map['city'] ??
         '';
     return _HomeAddressItem(
+      id: id?.isNotEmpty == true ? id : null,
       name: isUser
-          ? 'You'
-          : ('$nameValue'.trim().isNotEmpty ? '$nameValue'.trim() : 'Person'),
+           ? 'You'
+           : ('$nameValue'.trim().isNotEmpty ? '$nameValue'.trim() : 'Person'),
       label: isUser ? '' : '$labelValue'.trim(),
       address: '$addressValue'.trim(),
       isUser: isUser,
+      isDefault: !isUser && isDefault,
       photoUrl: photoUrl?.trim().isNotEmpty == true ? photoUrl!.trim() : null,
       lat: lat,
       lng: lng,
@@ -1594,53 +1641,32 @@ class _EmptyCaregiverPlaceholder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF9FAFB),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: Colors.black.withValues(alpha: 0.06),
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.bolt_rounded, size: 32, color: _accentTeal),
+            const SizedBox(height: 10),
+            Text(
+              message,
+              style: const TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 15,
+                color: _primaryText,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              explanation,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+          ],
         ),
-      ),
-      constraints: const BoxConstraints(maxWidth: 340),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              color: _accentTeal.withValues(alpha: 0.12),
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(
-              Icons.bolt_rounded,
-              size: 22,
-              color: _accentTeal,
-            ),
-          ),
-          const SizedBox(height: 10),
-          Text(
-            message,
-            style: const TextStyle(
-              fontSize: 13,
-              color: _primaryText,
-              fontWeight: FontWeight.w700,
-            ),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 4),
-          Text(
-            explanation,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              color: Colors.black.withValues(alpha: 0.6),
-            ),
-          ),
-        ],
       ),
     );
   }

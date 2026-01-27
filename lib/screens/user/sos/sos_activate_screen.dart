@@ -10,8 +10,9 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 
+import '../activity/activity_booking_details_screen.dart';
+import '../activity/track_caregiver_screen.dart';
 import '../profile/profile_addresses_screen.dart';
-import 'sos_tracking_screen.dart';
 
 const Color _sosHeadingColor = Color(0xFF1B1D29);
 const Color _sosSubTextColor = Color(0xFF4C4F65);
@@ -25,7 +26,7 @@ const Color _pickerPrimaryBlue = Color(0xFF00A8A7);
 int _alphaFromOpacity(double opacity) =>
     (opacity * 255).clamp(0.0, 255.0).round();
 
-enum _SosActivateMode { idle, calling }
+enum _SosActivateMode { idle, calling, assigned }
 enum _SosMatchState { searching, busy }
 
 class _AddressSelectionKey {
@@ -467,9 +468,14 @@ class _SosActivateScreenState extends State<SosActivateScreen>
   String? _pendingResumeSosId;
   bool _didAttemptResume = false;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _sosSubscription;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
+      _bookingDocSubscription;
+  String? _bookingDocSubscriptionId;
   Timer? _acceptTimeoutTimer;
   Timer? _busyMessageTimer;
   Timer? _offerAdvanceTimer;
+  String? _assignedCaregiverName;
+  bool _pushedTrackingAfterAccept = false;
 
   late final AnimationController _callingController;
   late final Animation<double> _pulse;
@@ -564,6 +570,94 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     } catch (_) {}
   }
 
+  bool _isFinalSosData(Map<String, dynamic> data) {
+    String norm(dynamic value) =>
+        (value?.toString() ?? '').toUpperCase().trim();
+
+    final status = norm(data['status']);
+    final isFinalStatus = status == 'RESOLVED' ||
+        status == 'COMPLETED' ||
+        status == 'CANCELLED' ||
+        status == 'TIMEOUT' ||
+        status == 'NO_MATCH' ||
+        status == 'NO_RESPONDER';
+    if (isFinalStatus) return true;
+
+    final stage = norm(data['caregiverSessionStage']);
+    final ongoingStatus = norm(data['ongoingStatus']);
+    final bookingStatus = norm(data['bookingStatus']);
+    if (stage == 'COMPLETED' ||
+        ongoingStatus == 'COMPLETED' ||
+        bookingStatus == 'COMPLETED') {
+      return true;
+    }
+
+    if (data['resolvedAt'] != null || data['completedAt'] != null) return true;
+    return false;
+  }
+
+  bool _isFinalBookingStatus(String status) {
+    final normalized = status.toUpperCase().trim();
+    return normalized == 'COMPLETED' ||
+        normalized == 'CANCELLED' ||
+        normalized == 'CANCELED';
+  }
+
+  void _attachBookingWatcher({
+    required String sosId,
+    required String bookingId,
+  }) {
+    final normalizedBookingId = bookingId.trim();
+    if (normalizedBookingId.isEmpty) {
+      _bookingDocSubscription?.cancel();
+      _bookingDocSubscription = null;
+      _bookingDocSubscriptionId = null;
+      return;
+    }
+
+    if (_bookingDocSubscriptionId == normalizedBookingId &&
+        _bookingDocSubscription != null) {
+      return;
+    }
+
+    _bookingDocSubscription?.cancel();
+    _bookingDocSubscriptionId = normalizedBookingId;
+    _bookingDocSubscription = FirebaseFirestore.instance
+        .collection('bookings')
+        .doc(normalizedBookingId)
+        .snapshots()
+        .listen((snap) async {
+      if (!mounted) return;
+      if (!snap.exists) return;
+      final data = snap.data();
+      if (data == null) return;
+
+      final bookingStatus =
+          (data['status'] as String?)?.toUpperCase().trim() ?? '';
+      if (!_isFinalBookingStatus(bookingStatus)) return;
+
+      // Always reset SOS UI based on booking completion/cancellation.
+      _cancelSosWaiters();
+      _resetToIdle();
+
+      // Best-effort: mirror booking final status back into sos doc so other
+      // SOS views stay consistent even if sos.status wasn't updated.
+      try {
+        final normalizedSosId = sosId.trim();
+        if (normalizedSosId.isEmpty) return;
+        await FirebaseFirestore.instance.collection('sos').doc(normalizedSosId).set(
+          {
+            'status': bookingStatus == 'COMPLETED' ? 'COMPLETED' : 'CANCELLED',
+            'statusUpdatedAt': FieldValue.serverTimestamp(),
+            if (bookingStatus == 'COMPLETED')
+              'completedAt': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
+      } catch (_) {}
+    });
+  }
+
   void _resetToIdle() {
     _clearActiveSosPointer();
     setState(() {
@@ -571,6 +665,8 @@ class _SosActivateScreenState extends State<SosActivateScreen>
       _matchState = _SosMatchState.searching;
       _tapCount = 0;
       _activeSosId = null;
+      _assignedCaregiverName = null;
+      _pushedTrackingAfterAccept = false;
     });
     _setAddressPickerVisible(true);
   }
@@ -578,6 +674,9 @@ class _SosActivateScreenState extends State<SosActivateScreen>
   void _cancelSosWaiters() {
     _sosSubscription?.cancel();
     _sosSubscription = null;
+    _bookingDocSubscription?.cancel();
+    _bookingDocSubscription = null;
+    _bookingDocSubscriptionId = null;
     _acceptTimeoutTimer?.cancel();
     _acceptTimeoutTimer = null;
     _busyMessageTimer?.cancel();
@@ -598,7 +697,6 @@ class _SosActivateScreenState extends State<SosActivateScreen>
 
   Future<void> _maybeResumeFromSosId(String sosId) async {
     if (!mounted) return;
-    if (_mode == _SosActivateMode.calling) return;
     if (_activeSosId == sosId) return;
 
     final isTabActive =
@@ -617,13 +715,42 @@ class _SosActivateScreenState extends State<SosActivateScreen>
       }
 
       final data = snap.data() ?? const <String, dynamic>{};
-      final status = (data['status'] as String?)?.toUpperCase().trim() ?? '';
-      if (status == 'RESOLVED' ||
-          status == 'CANCELLED' ||
-          status == 'TIMEOUT' ||
-          status == 'NO_MATCH' ||
-          status == 'NO_RESPONDER') {
+      if (_isFinalSosData(data)) {
         await _clearActiveSosPointer();
+        if (mounted) {
+          setState(() {
+            _mode = _SosActivateMode.idle;
+            _matchState = _SosMatchState.searching;
+            _tapCount = 0;
+            _activeSosId = null;
+            _assignedCaregiverName = null;
+            _pushedTrackingAfterAccept = false;
+          });
+          _setAddressPickerVisible(true);
+        }
+        return;
+      }
+
+      final status = (data['status'] as String?)?.toUpperCase().trim() ?? '';
+      final bookingId = (data['bookingId'] as String?)?.trim() ?? '';
+      final caregiverId = (data['caregiverId'] as String?)?.trim() ?? '';
+      final caregiverName = (data['caregiverName'] as String?)?.trim() ?? '';
+      if (bookingId.isNotEmpty) {
+        _attachBookingWatcher(sosId: sosId, bookingId: bookingId);
+      }
+      if (status == 'RESPONDER_ASSIGNED' &&
+          bookingId.isNotEmpty &&
+          caregiverId.isNotEmpty) {
+        setState(() {
+          _mode = _SosActivateMode.assigned;
+          _matchState = _SosMatchState.searching;
+          _tapCount = 0;
+          _activeSosId = sosId;
+          _assignedCaregiverName = caregiverName;
+          _pushedTrackingAfterAccept = true;
+        });
+        _setAddressPickerVisible(false);
+        _listenForSosAssignment(sosId);
         return;
       }
 
@@ -648,6 +775,8 @@ class _SosActivateScreenState extends State<SosActivateScreen>
         _matchState = _SosMatchState.searching;
         _tapCount = _requiredTaps;
         _activeSosId = sosId;
+        _assignedCaregiverName = null;
+        _pushedTrackingAfterAccept = false;
       });
       _setAddressPickerVisible(false);
       _listenForSosAssignment(sosId);
@@ -688,25 +817,71 @@ class _SosActivateScreenState extends State<SosActivateScreen>
         .snapshots()
         .listen((doc) {
           if (!mounted) return;
-          if (!doc.exists) return;
+          if (!doc.exists) {
+            _cancelSosWaiters();
+            _showBusyMessageThenReset();
+            return;
+          }
           final data = doc.data();
           if (data == null) return;
           final status = (data['status'] as String?)?.toUpperCase().trim() ?? '';
           final caregiverId = (data['caregiverId'] as String?)?.trim() ?? '';
-          if (status == 'RESPONDER_ASSIGNED' && caregiverId.isNotEmpty) {
+          final bookingId = (data['bookingId'] as String?)?.trim() ?? '';
+          final caregiverName = (data['caregiverName'] as String?)?.trim() ?? '';
+          if (bookingId.isNotEmpty) {
+            _attachBookingWatcher(sosId: sosId, bookingId: bookingId);
+          }
+
+          if (_isFinalSosData(data)) {
             _cancelSosWaiters();
-            _setActiveSosPointer(sosId);
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => SosTrackingScreen(
-                  sosId: sosId,
-                  caregiverId: caregiverId,
-                ),
-              ),
-            );
+            _resetToIdle();
             return;
           }
+
+          if (status == 'RESPONDER_ASSIGNED' &&
+              caregiverId.isNotEmpty &&
+              bookingId.isNotEmpty) {
+            _acceptTimeoutTimer?.cancel();
+            _acceptTimeoutTimer = null;
+            _offerAdvanceTimer?.cancel();
+            _offerAdvanceTimer = null;
+            _busyMessageTimer?.cancel();
+            _busyMessageTimer = null;
+
+            _setActiveSosPointer(sosId);
+            setState(() {
+              _mode = _SosActivateMode.assigned;
+              _matchState = _SosMatchState.searching;
+              _tapCount = 0;
+              _activeSosId = sosId;
+              _assignedCaregiverName = caregiverName;
+            });
+            _setAddressPickerVisible(false);
+
+            if (!_pushedTrackingAfterAccept && _wasActive) {
+              _pushedTrackingAfterAccept = true;
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => TrackCaregiverScreen(
+                    bookingId: bookingId,
+                    caregiverName:
+                        caregiverName.isNotEmpty ? caregiverName : 'Caregiver',
+                    caregiverId: caregiverId,
+                    sosId: sosId,
+                    forceSosSheetStyle: true,
+                    personId: (data['personId'] as String?)?.trim().isNotEmpty ==
+                            true
+                        ? (data['personId'] as String).trim()
+                        : null,
+                    showStatusUpdateButton: false,
+                    exitToUserActivityOnBack: true,
+                  ),
+                ),
+              );
+            }
+            return;
+          }
+
           if (status == 'NO_MATCH' || status == 'NO_RESPONDER') {
             _cancelSosWaiters();
             _showBusyMessageThenReset();
@@ -1126,6 +1301,7 @@ class _SosActivateScreenState extends State<SosActivateScreen>
       final record = _selectedAddressRecord(snapshot);
       final sosId = await _createSosRequest(record);
       await _setActiveSosPointer(sosId);
+      _sendEmergencySmsNotifications(sosId);
       if (!mounted) return;
       setState(() => _activeSosId = sosId);
       _listenForSosAssignment(sosId);
@@ -1164,26 +1340,17 @@ class _SosActivateScreenState extends State<SosActivateScreen>
           if (!mounted) return;
           if (_mode != _SosActivateMode.calling || _activeSosId != sosId) return;
 
-          final data = result.data;
-          final caregiverId =
-              data is Map ? (data['caregiverId']?.toString().trim() ?? '') : '';
+           final data = result.data;
+           final caregiverId =
+               data is Map ? (data['caregiverId']?.toString().trim() ?? '') : '';
            if (caregiverId.isNotEmpty) {
              // Back-compat: if function returns direct assignment.
-             _cancelSosWaiters();
-             Navigator.push(
-               context,
-               MaterialPageRoute(
-                 builder: (_) => SosTrackingScreen(
-                   sosId: sosId,
-                   caregiverId: caregiverId,
-                 ),
-               ),
-             );
+             // The realtime listener will handle navigation/state updates.
            }
-         } on FirebaseFunctionsException catch (error) {
-           if (!mounted) return;
-           debugPrint('matchSosCaregiver failed: ${error.code} ${error.message}');
-           _cancelSosWaiters();
+          } on FirebaseFunctionsException catch (error) {
+            if (!mounted) return;
+            debugPrint('matchSosCaregiver failed: ${error.code} ${error.message}');
+            _cancelSosWaiters();
            _showBusyMessageThenReset();
          } catch (_) {
            _cancelSosWaiters();
@@ -1200,6 +1367,28 @@ class _SosActivateScreenState extends State<SosActivateScreen>
      }
    }
 
+  void _sendEmergencySmsNotifications(String sosId) {
+    final trimmed = sosId.trim();
+    if (trimmed.isEmpty) return;
+    try {
+      final callable = _functions.httpsCallable(
+        'sendSosSmsToEmergencyContacts',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 25)),
+      );
+      // Fire-and-forget: SOS flow should continue even if SMS fails.
+      // ignore: discarded_futures
+      () async {
+        try {
+          await callable.call(<String, dynamic>{'sosId': trimmed});
+        } catch (e) {
+          debugPrint('sendSosSmsToEmergencyContacts failed: $e');
+        }
+      }();
+    } catch (e) {
+      debugPrint('sendSosSmsToEmergencyContacts setup failed: $e');
+    }
+  }
+
   Future<String> _createSosRequest(_AddressRecord record) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
@@ -1207,12 +1396,37 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     }
     final now = DateTime.now();
     const reason = 'Emergency SOS';
+    const serviceLabel = 'Emergency Alert';
     final selectedName = (record.data['name']?.toString().trim().isNotEmpty ==
             true)
         ? record.data['name'].toString().trim()
         : 'You';
     final selectedLabel = record.data['label']?.toString().trim();
     final selectedType = record.data['type']?.toString().trim();
+    final personId = (record.data['id'] ?? record.data['personId'] ?? '')
+        .toString()
+        .trim();
+
+    String formatDate(DateTime dt) {
+      final y = dt.year.toString().padLeft(4, '0');
+      final m = dt.month.toString().padLeft(2, '0');
+      final d = dt.day.toString().padLeft(2, '0');
+      return '$y-$m-$d';
+    }
+
+    String formatTime24(DateTime dt) {
+      final h = dt.hour.toString().padLeft(2, '0');
+      final m = dt.minute.toString().padLeft(2, '0');
+      return '$h:$m';
+    }
+
+    final date = formatDate(now);
+    final time = formatTime24(now);
+    final addressText = record.display.secondary.trim();
+
+    final db = FirebaseFirestore.instance;
+    final sosRef = db.collection('sos').doc();
+
     final data = <String, dynamic>{
       'userId': user.uid,
       'userName': user.displayName ?? 'You',
@@ -1226,6 +1440,24 @@ class _SosActivateScreenState extends State<SosActivateScreen>
         'selectedPersonType': selectedType,
       'reason': reason,
       'status': 'SEARCHING',
+      'bookingId': '',
+      'bookingStatus': '',
+      'caregiverId': '',
+      'caregiverName': '',
+      'personId': personId,
+      'personName': selectedName,
+      'personAddress': addressText,
+      'addressId': personId,
+      'service': serviceLabel,
+      'date': date,
+      'scheduledDate': date,
+      'time': time,
+      'startTime': '',
+      'endTime': '',
+      'paymentMethod': '',
+      'servicePrice': '',
+      'personNotes': '',
+      'cancellationReason': '',
       'tracking': [
         {
           'label': 'SOS activated',
@@ -1248,8 +1480,10 @@ class _SosActivateScreenState extends State<SosActivateScreen>
       data['userLat'] = lat;
       data['userLng'] = lng;
     }
-    final doc = await FirebaseFirestore.instance.collection('sos').add(data);
-    return doc.id;
+
+    await sosRef.set(data, SetOptions(merge: true));
+
+    return sosRef.id;
   }
 
   Future<void> _markSafe() async {
@@ -1583,6 +1817,431 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     );
   }
 
+  Widget _buildAssignedSection(BuildContext context) {
+    final sosId = (_activeSosId ?? '').trim();
+    if (sosId.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance.collection('sos').doc(sosId).snapshots(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData || !snapshot.data!.exists) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final data = snapshot.data!.data() ?? const <String, dynamic>{};
+        if (_isFinalSosData(data)) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            _cancelSosWaiters();
+            _resetToIdle();
+          });
+          return const SizedBox.shrink();
+        }
+        final bookingId = (data['bookingId'] as String?)?.trim() ?? '';
+        final caregiverId = (data['caregiverId'] as String?)?.trim() ?? '';
+        final caregiverName =
+            (data['caregiverName'] as String?)?.trim() ?? _assignedCaregiverName ?? 'Caregiver';
+        final personId = (data['personId'] as String?)?.trim() ?? '';
+        final personName = (data['personName'] as String?)?.trim() ??
+            (data['selectedPersonName'] as String?)?.trim() ??
+            'Selected person';
+        final personAddress = (data['personAddress'] as String?)?.trim() ??
+            (data['address'] as String?)?.trim() ??
+            'Address unavailable';
+        final selectedPersonLabel =
+            (data['selectedPersonLabel'] as String?)?.trim() ?? '';
+        final addressMetaRaw = data['addressMeta'];
+        final addressMeta = (addressMetaRaw is Map)
+            ? Map<String, dynamic>.from(addressMetaRaw)
+            : const <String, dynamic>{};
+        final personPhotoUrl = (addressMeta['photoUrl'] as String?)?.trim() ?? '';
+        final personPhone =
+            (addressMeta['phone']?.toString().trim().isNotEmpty == true)
+                ? addressMeta['phone'].toString().trim()
+                : (addressMeta['phoneNumber']?.toString().trim().isNotEmpty ==
+                        true)
+                    ? addressMeta['phoneNumber'].toString().trim()
+                    : (data['personPhone']?.toString().trim().isNotEmpty == true)
+                        ? data['personPhone'].toString().trim()
+                        : '';
+
+        return SingleChildScrollView(
+          padding: EdgeInsets.zero,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.08),
+                      blurRadius: 14,
+                      offset: const Offset(0, 8),
+                    ),
+                  ],
+                ),
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: _pickerPrimaryBlue.withValues(alpha: 0.10),
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: _pickerPrimaryBlue.withValues(alpha: 0.22),
+                        ),
+                      ),
+                      child: const Icon(
+                        Icons.verified_rounded,
+                        color: _pickerPrimaryBlue,
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Caregiver assigned',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w800,
+                        color: _sosHeadingColor,
+                        letterSpacing: -0.2,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Stay calm. Your caregiver is on the way.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: _sosSubTextColor,
+                        height: 1.35,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Divider(
+                      height: 1,
+                      thickness: 1,
+                      color: Colors.black.withValues(alpha: 0.06),
+                    ),
+                    const SizedBox(height: 14),
+                    if (caregiverId.isNotEmpty)
+                      StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                        stream: FirebaseFirestore.instance
+                            .collection('caregivers')
+                            .doc(caregiverId)
+                            .snapshots(),
+                        builder: (context, caregiverSnap) {
+                          final caregiverData = caregiverSnap.data?.data();
+                          final avatar =
+                              (caregiverData?['photoUrl'] as String?)?.trim() ??
+                                  '';
+                          final phone = (caregiverData?['phone'] as String?)?.trim() ??
+                              (caregiverData?['phoneNumber'] as String?)?.trim() ??
+                              '';
+                          final caregiverAddress =
+                              (caregiverData?['defaultAddress'] as String?)?.trim() ??
+                                  (caregiverData?['address'] as String?)?.trim() ??
+                                  '';
+
+                          return Container(
+                            decoration: BoxDecoration(
+                              color: _accentGold,
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(
+                                color: Colors.black.withValues(alpha: 0.08),
+                              ),
+                            ),
+                            padding: const EdgeInsets.all(14),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                ClipOval(
+                                  child: SizedBox(
+                                    width: 46,
+                                    height: 46,
+                                    child:
+                                        SafeNetworkImage(avatar, fit: BoxFit.cover),
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        caregiverName.isNotEmpty
+                                            ? caregiverName
+                                            : 'Caregiver',
+                                        style: const TextStyle(
+                                          fontSize: 14.5,
+                                          fontWeight: FontWeight.w800,
+                                          color: _sosHeadingColor,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 3),
+                                      const Text(
+                                        'Caregiver',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                          color: Colors.black45,
+                                        ),
+                                      ),
+                                      if (phone.isNotEmpty) ...[
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          phone,
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w600,
+                                            color: Colors.black54,
+                                          ),
+                                        ),
+                                      ],
+                                      if (caregiverAddress.isNotEmpty) ...[
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          caregiverAddress,
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w600,
+                                            color: Colors.black54,
+                                            height: 1.25,
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    const SizedBox(height: 14),
+                    Center(
+                      child: AnimatedBuilder(
+                        animation: _pulse,
+                        builder: (context, _) {
+                          return Transform.translate(
+                            offset: Offset(0, 10 * (1 - _pulse.value)),
+                            child: const Icon(
+                              Icons.keyboard_double_arrow_down_rounded,
+                              color: _pickerPrimaryBlue,
+                              size: 26,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: _accentGold,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: Colors.black.withValues(alpha: 0.08),
+                        ),
+                      ),
+                      padding: const EdgeInsets.all(14),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          ClipOval(
+                            child: SizedBox(
+                              width: 46,
+                              height: 46,
+                              child: SafeNetworkImage(
+                                personPhotoUrl,
+                                fit: BoxFit.cover,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  personName,
+                                  style: const TextStyle(
+                                    fontSize: 14.5,
+                                    fontWeight: FontWeight.w800,
+                                    color: _sosHeadingColor,
+                                  ),
+                                ),
+                                if (selectedPersonLabel.isNotEmpty) ...[
+                                  const SizedBox(height: 5),
+                                  Text(
+                                    selectedPersonLabel,
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700,
+                                      color: Colors.black45,
+                                    ),
+                                  ),
+                                ],
+                                if (personPhone.isNotEmpty) ...[
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    personPhone,
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.black54,
+                                    ),
+                                  ),
+                                ],
+                                const SizedBox(height: 6),
+                                Text(
+                                  personAddress,
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.black54,
+                                    height: 1.25,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    const Divider(height: 0),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: (bookingId.isEmpty || caregiverId.isEmpty)
+                                ? null
+                                : () {
+                                    Navigator.of(context).push(
+                                      MaterialPageRoute(
+                                        builder: (_) => TrackCaregiverScreen(
+                                          bookingId: bookingId,
+                                          caregiverName: caregiverName.isNotEmpty
+                                              ? caregiverName
+                                              : 'Caregiver',
+                                          caregiverId: caregiverId,
+                                          sosId: sosId,
+                                          forceSosSheetStyle: true,
+                                          personId: personId.trim().isEmpty
+                                              ? null
+                                              : personId.trim(),
+                                          showStatusUpdateButton: false,
+                                          exitToUserActivityOnBack: true,
+                                        ),
+                                      ),
+                                    );
+                                  },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: _pickerPrimaryBlue,
+                              foregroundColor: Colors.white,
+                              shape: const RoundedRectangleBorder(
+                                borderRadius:
+                                    BorderRadius.all(Radius.circular(22)),
+                              ),
+                              minimumSize: const Size(0, 34),
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 16),
+                              shadowColor: Colors.black.withValues(alpha: 38),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.navigation_outlined,
+                                  size: 16,
+                                  color: Colors.white,
+                                ),
+                                SizedBox(width: 6),
+                                Text(
+                                  'Track',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 13,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: bookingId.isEmpty
+                                ? null
+                                : () {
+                                    Navigator.of(context).push(
+                                      MaterialPageRoute(
+                                        builder: (_) =>
+                                            ActivityBookingDetailsScreen(
+                                          bookingId: bookingId,
+                                        ),
+                                      ),
+                                    );
+                                  },
+                            style: OutlinedButton.styleFrom(
+                              backgroundColor: Colors.white,
+                              foregroundColor: _sosHeadingColor,
+                              side: BorderSide(
+                                color: Colors.black.withValues(alpha: 0.12),
+                              ),
+                              shape: const RoundedRectangleBorder(
+                                borderRadius:
+                                    BorderRadius.all(Radius.circular(22)),
+                              ),
+                              minimumSize: const Size(0, 34),
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 16),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.info_outline,
+                                  size: 16,
+                                  color: _sosHeadingColor,
+                                ),
+                                SizedBox(width: 6),
+                                Text(
+                                  'View Details',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 13,
+                                    color: _sosHeadingColor,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -1590,6 +2249,7 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     final entrySlide =
         _entrySlide ?? const AlwaysStoppedAnimation<Offset>(Offset.zero);
     final isCalling = _mode == _SosActivateMode.calling;
+    final isAssigned = _mode == _SosActivateMode.assigned;
     const background = _pageBackground;
 
     return FadeTransition(
@@ -1602,7 +2262,7 @@ class _SosActivateScreenState extends State<SosActivateScreen>
           body: SafeArea(
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: isCalling ? null : _registerTap,
+              onTap: (isCalling || isAssigned) ? null : _registerTap,
               child: Stack(
                 children: [
                   Center(
@@ -1615,24 +2275,26 @@ class _SosActivateScreenState extends State<SosActivateScreen>
                           kScreenHorizontalPaddingValue,
                           18,
                         ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            isCalling
-                                ? _buildCallingHeroSection(context)
-                                : _buildHeroSection(context),
-                            if (!isCalling && _isTriggering) ...[
-                              const SizedBox(height: 10),
-                              Text(
-                                'Broadcasting SOS...',
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: Colors.black.withValues(alpha: 0.55),
-                                  fontWeight: FontWeight.w700,
-                                ),
+                        child: isAssigned
+                            ? _buildAssignedSection(context)
+                            : Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  isCalling
+                                      ? _buildCallingHeroSection(context)
+                                      : _buildHeroSection(context),
+                                  if (!isCalling && _isTriggering) ...[
+                                    const SizedBox(height: 10),
+                                    Text(
+                                      'Broadcasting SOS...',
+                                      style: theme.textTheme.bodySmall?.copyWith(
+                                        color: Colors.black.withValues(alpha: 0.55),
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ],
+                                ],
                               ),
-                            ],
-                          ],
-                        ),
                       ),
                     ),
                   ),

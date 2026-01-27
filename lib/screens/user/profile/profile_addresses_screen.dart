@@ -316,21 +316,21 @@ class _DashedAddCard extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: _accentGold,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.grey.shade300, width: 1.1),
+          border: Border.all(color: _accentGold.withValues(alpha: 0.55), width: 1.1),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: const [
-            Icon(Icons.add, color: Colors.black54, size: 18),
+            Icon(Icons.add, color: Colors.black, size: 18),
             SizedBox(width: 8),
             Text(
               "Add New Address",
               style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
-                color: Colors.black87,
+                color: Colors.black,
               ),
             ),
           ],

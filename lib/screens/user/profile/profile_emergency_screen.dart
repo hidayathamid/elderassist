@@ -8,6 +8,7 @@ import 'package:emergencies_disability_assistance_app/widgets/default_profile_av
 import 'profile_emergency_edit_screen.dart';
 
 const Color _tealAccent = Color(0xFF00A8A7);
+const Color _accentGold = Color(0xFFF4B63D);
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _reminderIconColor = Color(0xFF00A8A7);
 const TextStyle _emergencyNameStyle = TextStyle(
@@ -226,24 +227,24 @@ class _DashedAddCard extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: _accentGold,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: Colors.grey.shade300,
+            color: _accentGold.withValues(alpha: 0.55),
             width: 1.1,
           ),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.add, color: Colors.black54, size: 18),
+            const Icon(Icons.add, color: Colors.black, size: 18),
             const SizedBox(width: 8),
             Text(
               label,
               style: const TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
-                color: Colors.black87,
+                color: Colors.black,
               ),
             ),
           ],

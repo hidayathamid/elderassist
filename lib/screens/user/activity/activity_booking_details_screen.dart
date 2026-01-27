@@ -19,6 +19,7 @@ import '../../../utils/service_preferences.dart';
 import 'track_caregiver_screen.dart';
 import '../booking/booking_person_screen.dart';
 import '../booking/booking_summary_screen.dart';
+import '../user_root_screen.dart';
 import '../../../models/caregiver_model.dart';
 import '../../../widgets/schedule_booking_telegram_sheet.dart';
 
@@ -26,12 +27,28 @@ const Color _cardBorder = Color(0xFFEBEDF0);
 const Color _accentGreen = Color(0xFF00A8A7);
 const Color _accentBlue = _accentGreen; // Match Home screen blue.
 const Color _profileDarkText = Color(0xFF1B1D29);
-const Color _screenBackground = Colors.white;
+const Color _screenBackground = Color(0xFFF7F8FA);
 const Color _cardShadow = Color(0x1A0B0C10);
 const Color _cardBorderStrong = Color(0xFFE1E4EA);
 const double _cardRadius = 18;
 const Color _mutedText = Color(0xFF6B7280);
 const Color _accentGold = Color(0xFFF4B63D);
+const Color _avatarOutlineColor = Colors.white;
+
+BoxDecoration _premiumCardDecoration({double radius = _cardRadius}) {
+  return BoxDecoration(
+    color: Colors.white,
+    borderRadius: BorderRadius.circular(radius),
+    border: Border.all(color: _cardBorderStrong),
+    boxShadow: const [
+      BoxShadow(
+        color: _cardShadow,
+        blurRadius: 12,
+        offset: Offset(0, 6),
+      ),
+    ],
+  );
+}
 
 const TextStyle _sectionHeaderTextStyle = TextStyle(
   fontWeight: FontWeight.w800,
@@ -267,6 +284,7 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
           child: ConstrainedBox(
             constraints: BoxConstraints(maxHeight: maxHeight),
             child: Column(
+              mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const SizedBox(height: 10),
@@ -350,7 +368,7 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
                                 const SizedBox(height: 10),
                             ],
                           ],
-                        const SizedBox(height: 14),
+                        const SizedBox(height: 12),
                         Text(
                           'Reason',
                           style: TextStyle(
@@ -359,7 +377,7 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
                             color: Colors.black.withValues(alpha: 0.7),
                           ),
                         ),
-                        const SizedBox(height: 8),
+                        const SizedBox(height: 6),
                         TextField(
                           controller: _reasonController,
                           minLines: 2,
@@ -409,7 +427,7 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                   child: ElevatedButton(
                     onPressed: (_submitting ||
                             widget.contacts.isEmpty ||
@@ -461,6 +479,7 @@ class ActivityBookingDetailsScreen extends StatefulWidget {
     this.selectedAddress,
     this.initialTabIndex = 0,
     this.showTrackFrontSheet = false,
+    this.showPreviewFrontSheet = true,
     this.caregiverView = false,
   });
 
@@ -471,6 +490,7 @@ class ActivityBookingDetailsScreen extends StatefulWidget {
   final AddressItem? selectedAddress;
   final int initialTabIndex;
   final bool showTrackFrontSheet;
+  final bool showPreviewFrontSheet;
   final bool caregiverView;
 
   @override
@@ -533,6 +553,9 @@ class _ActivityBookingDetailsScreenState
       widget.person != null &&
       widget.selectedAddress != null;
   bool _showTrackButton = false;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _bookingStatusSub;
+  String? _lastLiveBookingStatus;
+  bool _completionPopupShown = false;
   late final AnimationController _panelController;
   final ScrollController _panelScrollController = ScrollController();
   bool _panelSeeded = false;
@@ -732,9 +755,12 @@ class _ActivityBookingDetailsScreenState
 
     return Material(
       color: Colors.white,
-      elevation: 12,
-      shadowColor: Colors.black.withValues(alpha: 0.2),
-      borderRadius: BorderRadius.circular(16),
+      elevation: 8,
+      shadowColor: Colors.black.withValues(alpha: 0.14),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: const BorderSide(color: _cardBorderStrong),
+      ),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
         child: Column(
@@ -747,7 +773,7 @@ class _ActivityBookingDetailsScreenState
                   padding: const EdgeInsets.all(2),
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    border: Border.all(color: _accentGold, width: 2.2),
+                    border: Border.all(color: _avatarOutlineColor, width: 2.2),
                   ),
                   child: DefaultProfileAvatar(
                     radius: 22,
@@ -845,9 +871,12 @@ class _ActivityBookingDetailsScreenState
 
     return Material(
       color: Colors.white,
-      elevation: 12,
-      shadowColor: Colors.black.withValues(alpha: 0.2),
-      borderRadius: BorderRadius.circular(16),
+      elevation: 8,
+      shadowColor: Colors.black.withValues(alpha: 0.14),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: const BorderSide(color: _cardBorderStrong),
+      ),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
         child: Column(
@@ -860,7 +889,7 @@ class _ActivityBookingDetailsScreenState
                   padding: const EdgeInsets.all(2),
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    border: Border.all(color: _accentGold, width: 2.2),
+                    border: Border.all(color: _avatarOutlineColor, width: 2.2),
                   ),
                   child: DefaultProfileAvatar(
                     radius: 22,
@@ -973,11 +1002,143 @@ class _ActivityBookingDetailsScreenState
           ),
         );
     _fetchBooking();
+    _startBookingStatusListener();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _entryController.forward(from: 0);
       _tabEntryController.value = 1;
     });
+  }
+
+  String _normalizeBookingStatusForListener(String raw) {
+    return raw
+        .trim()
+        .toUpperCase()
+        .replaceAll(' ', '_')
+        .replaceAll('-', '_')
+        .replaceAll('__', '_');
+  }
+
+  void _startBookingStatusListener() {
+    if (widget.caregiverView) return;
+    final bookingId = widget.bookingId.trim();
+    if (bookingId.isEmpty) return;
+    _bookingStatusSub?.cancel();
+    _bookingStatusSub = FirebaseFirestore.instance
+        .collection('bookings')
+        .doc(bookingId)
+        .snapshots()
+        .listen((snap) {
+      final data = snap.data();
+      final next = _normalizeBookingStatusForListener(
+        normalizeString(data?['status']) ?? '',
+      );
+      final prev = _lastLiveBookingStatus;
+      _lastLiveBookingStatus = next;
+      if (prev == null || prev == next) return;
+      if (next != 'COMPLETED') return;
+      if (_completionPopupShown) return;
+      _completionPopupShown = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _showCompletionPopupAndRedirect();
+      });
+    });
+  }
+
+  Future<void> _showCompletionPopupAndRedirect() async {
+    if (!mounted) return;
+    var dialogOpen = true;
+    final dialogFuture = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return Dialog(
+          insetPadding: const EdgeInsets.symmetric(horizontal: 22),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 52,
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: _accentGold.withValues(alpha: 0.22),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: _accentGold.withValues(alpha: 0.35)),
+                  ),
+                  child: const Icon(
+                    Icons.check_rounded,
+                    color: Colors.black87,
+                    size: 28,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Booking completed',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w900,
+                    color: _profileDarkText,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Your booking has been completed. Redirecting to your history.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.black.withValues(alpha: 0.72),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  height: 40,
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _accentGold,
+                      foregroundColor: Colors.black,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      textStyle: const TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    child: const Text('View history'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    ).whenComplete(() => dialogOpen = false);
+
+    unawaited(dialogFuture);
+    await Future.delayed(const Duration(milliseconds: 1100));
+    if (mounted && dialogOpen) {
+      Navigator.of(context).pop();
+    }
+    await dialogFuture;
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(
+        builder: (_) => const UserRootScreen(
+          initialIndex: 3,
+          activityInitialCategoryIndex: 2,
+        ),
+      ),
+      (_) => false,
+    );
   }
 
   void _selectTab(int index) {
@@ -1048,6 +1209,7 @@ class _ActivityBookingDetailsScreenState
 
   @override
   void dispose() {
+    _bookingStatusSub?.cancel();
     _entryController.dispose();
     _tabEntryController.dispose();
     _panelController.dispose();
@@ -1175,12 +1337,6 @@ class _ActivityBookingDetailsScreenState
     }
   }
 
-  String _formatTime24(TimeOfDay t) {
-    final h = t.hour.toString().padLeft(2, '0');
-    final m = t.minute.toString().padLeft(2, '0');
-    return '$h:$m';
-  }
-
   TimeOfDay? _parseStoredTime(String raw) {
     final trimmed = raw.trim();
     if (trimmed.isEmpty) return null;
@@ -1196,7 +1352,18 @@ class _ActivityBookingDetailsScreenState
       final t = DateFormat('HH:mm').parseLoose(trimmed);
       return TimeOfDay(hour: t.hour, minute: t.minute);
     } catch (_) {
-      return null;
+      try {
+        var normalized = trimmed.replaceAll(RegExp(r'\s+'), ' ');
+        normalized = normalized.replaceAllMapped(
+          RegExp(r'^(\d{1,2}:\d{2})(am|pm)$', caseSensitive: false),
+          (m) => '${m.group(1)} ${m.group(2)}',
+        );
+        normalized = normalized.toUpperCase();
+        final t = DateFormat('h:mm a').parseLoose(normalized);
+        return TimeOfDay(hour: t.hour, minute: t.minute);
+      } catch (_) {
+        return null;
+      }
     }
   }
 
@@ -1213,23 +1380,66 @@ class _ActivityBookingDetailsScreenState
     required String? excludeBookingId,
   }) async {
     try {
-      final snap = await FirebaseFirestore.instance
+      final db = FirebaseFirestore.instance;
+      final ymd = _ymd(day);
+
+      // Fetch by caregiverId only to avoid composite-index failures, then filter
+      // locally for the selected day + active statuses.
+      final snap = await db
           .collection('bookings')
           .where('caregiverId', isEqualTo: caregiverId)
-          .where('date', isEqualTo: _ymd(day))
-          .where('paymentStatus', isEqualTo: 'PAID')
-          .where('status', whereIn: const ['ASSIGNED', 'SCHEDULED'])
           .get();
+      final docs = snap.docs.toList(growable: false);
+
+      const allowedStatuses = <String>{
+        'ASSIGNED',
+        'SCHEDULED',
+        'PENDING',
+        'READY',
+        'ONGOING',
+        'IN_PROGRESS',
+        'NOTIFY',
+        'HANDLE_CLIENT',
+        'MISSING',
+      };
+
+      bool matchesDay(dynamic value) {
+        if (value == null) return false;
+        if (value is Timestamp) {
+          final dt = value.toDate();
+          return _ymd(dt) == ymd;
+        }
+        final raw = value.toString().trim();
+        if (raw.isEmpty) return false;
+        return raw == ymd;
+      }
+
+      final seen = <String>{};
       final ranges = <_TimeRange>[];
-      for (final doc in snap.docs) {
+      for (final doc in docs) {
+        if (!seen.add(doc.id)) continue;
         if (excludeBookingId != null && doc.id == excludeBookingId) continue;
         final data = doc.data();
-        final start = _parseStoredTime(data['startTime']?.toString() ?? '');
-        final end = _parseStoredTime(data['endTime']?.toString() ?? '');
-        if (start == null || end == null) continue;
+        final statusRaw = data['status']?.toString().trim() ?? '';
+        final status = statusRaw.toUpperCase();
+        if (status.isEmpty) continue;
+        if (status == 'EMERGENCY_ALERT') continue;
+        if (status.startsWith('CANCEL')) continue;
+        if (!allowedStatuses.contains(status)) continue;
+        if (!matchesDay(data['scheduledDate']) && !matchesDay(data['date'])) {
+          continue;
+        }
+        final start =
+            _parseStoredTime(data['startTime']?.toString() ?? '') ??
+            _parseStoredTime(data['time']?.toString() ?? '');
+        if (start == null) continue;
+        var end = _parseStoredTime(data['endTime']?.toString() ?? '');
+        end ??= _endTimeFromStart(start);
         final sMin = start.hour * 60 + start.minute;
         final eMin = end.hour * 60 + end.minute;
-        if (eMin <= sMin) continue;
+        if (eMin <= sMin) {
+          end = _endTimeFromStart(start);
+        }
         ranges.add(_TimeRange(start: start, end: end));
       }
       ranges.sort((a, b) {
@@ -1315,6 +1525,7 @@ class _ActivityBookingDetailsScreenState
       primaryColor: _accentGold,
       excludeBookingId: null,
       allowInitialDayEvenIfUnavailable: false,
+      enableDrag: false,
       barrierColor: Colors.black.withValues(alpha: 0.54),
     );
     if (!mounted || result == null) return;
@@ -1428,7 +1639,7 @@ class _ActivityBookingDetailsScreenState
         padding: const EdgeInsets.all(1.8),
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          border: Border.all(color: _accentGold, width: 2.2),
+          border: Border.all(color: _avatarOutlineColor, width: 2.2),
         ),
         child: ClipOval(
           child: SafeNetworkImage(
@@ -1449,7 +1660,7 @@ class _ActivityBookingDetailsScreenState
       padding: const EdgeInsets.all(1.8),
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        border: Border.all(color: _accentGold, width: 2.2),
+        border: Border.all(color: _avatarOutlineColor, width: 2.2),
       ),
       child: CircleAvatar(
         radius: 16,
@@ -1556,7 +1767,7 @@ class _ActivityBookingDetailsScreenState
     return TextButton(
       onPressed: onTap,
       style: TextButton.styleFrom(
-        foregroundColor: selected ? Colors.white : _profileDarkText,
+        foregroundColor: selected ? Colors.black : _profileDarkText,
         padding: const EdgeInsets.symmetric(horizontal: 8),
         minimumSize: const Size(0, 28),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -1564,11 +1775,11 @@ class _ActivityBookingDetailsScreenState
           borderRadius: BorderRadius.circular(999),
           side: BorderSide(
             color: selected
-                ? _accentBlue.withValues(alpha: 0.9)
+                ? _accentGold.withValues(alpha: 0.9)
                 : Colors.black.withValues(alpha: 0.08),
           ),
         ),
-        backgroundColor: selected ? _accentBlue : Colors.white,
+        backgroundColor: selected ? _accentGold : Colors.white,
         textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
       ),
       child: content,
@@ -1597,7 +1808,7 @@ class _ActivityBookingDetailsScreenState
                 padding: const EdgeInsets.all(1.4),
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  border: Border.all(color: _accentGold, width: 2),
+                  border: Border.all(color: _avatarOutlineColor, width: 2),
                 ),
                 child: DefaultProfileAvatar(
                   radius: 12.6,
@@ -1644,17 +1855,14 @@ class _ActivityBookingDetailsScreenState
         children: [
           ClipRRect(
             borderRadius: BorderRadius.zero,
-            child: Image.network(
+            child: SafeNetworkImage(
               photoUrl,
               fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => Container(color: Colors.grey[200]),
-              loadingBuilder: (context, child, progress) {
-                if (progress == null) return child;
-                return Container(
-                  color: Colors.grey[200],
-                  child: const Center(child: CircularProgressIndicator()),
-                );
-              },
+              placeholder: Container(
+                color: Colors.grey[200],
+                child: const Center(child: CircularProgressIndicator()),
+              ),
+              errorWidget: Container(color: Colors.grey[200]),
             ),
           ),
           DecoratedBox(
@@ -1802,12 +2010,12 @@ class _ActivityBookingDetailsScreenState
             child: Container(
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  border: Border.all(color: _accentGold, width: 3.2),
+                  border: Border.all(color: _avatarOutlineColor, width: 3.0),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.12),
-                      blurRadius: 14,
-                    offset: const Offset(0, 8),
+                      color: Colors.black.withValues(alpha: 0.10),
+                      blurRadius: 12,
+                      offset: const Offset(0, 7),
                   ),
                 ],
               ),
@@ -1999,11 +2207,11 @@ class _ActivityBookingDetailsScreenState
                     vertical: 5,
                   ),
                   decoration: BoxDecoration(
-                    color: selected ? _accentBlue : Colors.white,
+                    color: selected ? _accentGold : Colors.white,
                     borderRadius: BorderRadius.circular(999),
                     border: Border.all(
                       color: selected
-                          ? _accentBlue
+                          ? _accentGold
                           : Colors.black.withValues(alpha: 0.12),
                       width: 1.1,
                     ),
@@ -2024,7 +2232,7 @@ class _ActivityBookingDetailsScreenState
                         fontSize: 11,
                         fontWeight: FontWeight.w800,
                         color: selected
-                            ? Colors.white
+                            ? Colors.black
                             : Colors.black.withValues(alpha: 0.65),
                       ),
                       maxLines: 1,
@@ -2043,51 +2251,48 @@ class _ActivityBookingDetailsScreenState
   Widget _buildUnavailablePlaceholder({
     required String message,
     String explanation = "It'll show up as soon as it becomes available.",
+    bool centerVertically = false,
   }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF9FAFB),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
-        boxShadow: const [
-          BoxShadow(color: _cardShadow, blurRadius: 10, offset: Offset(0, 6)),
-        ],
+    final core = ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.bolt_rounded, size: 32, color: _accentBlue),
+            const SizedBox(height: 10),
+            Text(
+              message,
+              style: const TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 15,
+                color: _profileDarkText,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              explanation,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+          ],
+        ),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              color: _accentBlue.withValues(alpha: 0.12),
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(Icons.bolt_rounded, size: 22, color: _accentBlue),
-          ),
-          const SizedBox(height: 10),
-          Text(
-            message,
-            style: const TextStyle(
-              fontSize: 11,
-              color: _profileDarkText,
-              fontWeight: FontWeight.w800,
-            ),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 4),
-          Text(
-            explanation,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-              color: _mutedText,
-            ),
-          ),
-        ],
-      ),
+    );
+
+    final centered = Center(child: core);
+    if (!centerVertically) return centered;
+
+    return Builder(
+      builder: (context) {
+        final height = (MediaQuery.sizeOf(context).height * 0.35).clamp(
+          260.0,
+          420.0,
+        );
+        return SizedBox(height: height, child: centered);
+      },
     );
   }
 
@@ -2265,7 +2470,8 @@ class _ActivityBookingDetailsScreenState
         normalizeString(booking['address']) ??
         normalizeString(user['defaultAddress']) ??
         '—';
-    final notes = normalizeString(booking['notes']) ?? '';
+    final notes =
+        normalizeString(booking['personNotes'] ?? booking['notes']) ?? '';
 
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
@@ -2324,12 +2530,10 @@ class _ActivityBookingDetailsScreenState
   Widget _buildEmergencyContactsTab() {
     final contacts = _extractEmergencyContacts(_userData);
     if (contacts.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
-        child: _buildUnavailablePlaceholder(
-          message: 'Emergency contacts unavailable',
-          explanation: 'Client has not added any emergency contacts yet.',
-        ),
+      return _buildUnavailablePlaceholder(
+        message: 'Emergency contacts unavailable',
+        explanation: 'Client has not added any emergency contacts yet.',
+        centerVertically: true,
       );
     }
 
@@ -2400,7 +2604,8 @@ class _ActivityBookingDetailsScreenState
             : (normalizeString(user['imageUrl'])?.trim().isNotEmpty == true
                   ? normalizeString(user['imageUrl'])!.trim()
                   : null));
-    final notes = normalizeString(booking['notes']) ?? '';
+    final notes =
+        normalizeString(booking['personNotes'] ?? booking['notes']) ?? '';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2411,12 +2616,12 @@ class _ActivityBookingDetailsScreenState
           child: Container(
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              border: Border.all(color: _accentGold, width: 3.2),
+              border: Border.all(color: _avatarOutlineColor, width: 3.0),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.12),
-                  blurRadius: 14,
-                  offset: const Offset(0, 8),
+                  color: Colors.black.withValues(alpha: 0.10),
+                  blurRadius: 12,
+                  offset: const Offset(0, 7),
                 ),
               ],
             ),
@@ -2463,12 +2668,12 @@ class _ActivityBookingDetailsScreenState
           child: Container(
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              border: Border.all(color: _accentGold, width: 3.2),
+              border: Border.all(color: _avatarOutlineColor, width: 3.0),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.12),
-                  blurRadius: 14,
-                  offset: const Offset(0, 8),
+                  color: Colors.black.withValues(alpha: 0.10),
+                  blurRadius: 12,
+                  offset: const Offset(0, 7),
                 ),
               ],
             ),
@@ -2599,75 +2804,6 @@ class _ActivityBookingDetailsScreenState
               .snapshots()
         : const Stream<DocumentSnapshot<Map<String, dynamic>>>.empty();
 
-    Widget timelineRow({
-      required String timeLabel,
-      required Widget card,
-      required double connectorHeight,
-      required bool hasEvent,
-      bool isLast = false,
-    }) {
-      return Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 58,
-            child: Padding(
-              padding: const EdgeInsets.only(top: 14),
-                child: Text(
-                  timeLabel,
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w800,
-                    color: Colors.black.withValues(alpha: 0.55),
-                  ),
-                ),
-            ),
-          ),
-          SizedBox(
-            width: 24,
-            child: Column(
-              children: [
-                Container(
-                  width: 12,
-                  height: 12,
-                  margin: const EdgeInsets.only(top: 16),
-                  decoration: BoxDecoration(
-                    color: hasEvent ? _accentBlue : Colors.white,
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: _accentBlue.withValues(alpha: 0.7),
-                      width: 2,
-                    ),
-                  ),
-                  child: hasEvent
-                      ? const Center(
-                          child: Icon(
-                            Icons.check,
-                            size: 10,
-                            color: Colors.white,
-                          ),
-                        )
-                      : null,
-                ),
-                if (!isLast)
-                  Container(
-                    width: 2,
-                    height: connectorHeight,
-                    margin: const EdgeInsets.only(top: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.08),
-                      borderRadius: BorderRadius.circular(99),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(child: card),
-        ],
-      );
-    }
-
     Widget eventCard({
       required String title,
       required String subtitle,
@@ -2734,6 +2870,233 @@ class _ActivityBookingDetailsScreenState
     String dayTitle(DateTime d) => DateFormat('EEEE').format(d);
     String daySubtitle(DateTime d) => DateFormat('d MMMM yyyy').format(d);
 
+    Widget bookedTimelineDayView({
+      required TimeOfDay windowStart,
+      required TimeOfDay windowEnd,
+      required List<_TimeRange> taken,
+      TimeOfDay? bookingStart,
+      TimeOfDay? bookingEnd,
+      bool showBooking = false,
+    }) {
+      int toMinutes(TimeOfDay t) => t.hour * 60 + t.minute;
+      int floorToHour(int m) => (m ~/ 60) * 60;
+      int ceilToHour(int m) => ((m + 59) ~/ 60) * 60;
+
+      const palette = <Color>[
+        Color(0xFF4F5BFF),
+        Color(0xFFFFB930),
+        Color(0xFF2ECC71),
+        Color(0xFF7E57C2),
+      ];
+
+      final blocks =
+          <({int start, int end, Color color, String title})>[];
+      for (int i = 0; i < taken.length; i++) {
+        final r = taken[i];
+        final s = toMinutes(r.start);
+        final e = toMinutes(r.end);
+        if (e <= s) continue;
+        blocks.add(
+          (start: s, end: e, color: palette[i % palette.length], title: 'Booked'),
+        );
+      }
+
+      if (showBooking && bookingStart != null && bookingEnd != null) {
+        final s = toMinutes(bookingStart);
+        final e = toMinutes(bookingEnd);
+        if (e > s) {
+          blocks.add(
+            (
+              start: s,
+              end: e,
+              color: const Color(0xFF71CBBE),
+              title: 'Your booking',
+            ),
+          );
+        }
+      }
+
+      final baseStart = toMinutes(windowStart);
+      final baseEnd = toMinutes(windowEnd);
+      final allStarts = <int>[baseStart, ...blocks.map((e) => e.start)];
+      final allEnds = <int>[baseEnd, ...blocks.map((e) => e.end)];
+      var startMin = floorToHour(allStarts.reduce((a, b) => a < b ? a : b));
+      var endMin = ceilToHour(allEnds.reduce((a, b) => a > b ? a : b));
+      if (endMin <= startMin) endMin = startMin + 60;
+
+      final hourCount = ((endMin - startMin) / 60).ceil();
+      const leftGutter = 54.0;
+      const pxPerMin = 1.25; // ~75px per hour
+      final canvasHeight = (endMin - startMin) * pxPerMin;
+
+      blocks.sort((a, b) => a.start.compareTo(b.start));
+      final laneEnds = <int>[];
+      final laidOut =
+          <({int start, int end, int lane, Color color, String title})>[];
+      for (final item in blocks) {
+        int lane = -1;
+        for (int i = 0; i < laneEnds.length; i++) {
+          if (item.start >= laneEnds[i]) {
+            lane = i;
+            break;
+          }
+        }
+        if (lane == -1) {
+          lane = laneEnds.length;
+          laneEnds.add(item.end);
+        } else {
+          laneEnds[lane] = item.end;
+        }
+        laidOut.add(
+          (
+            start: item.start,
+            end: item.end,
+            lane: lane,
+            color: item.color,
+            title: item.title,
+          ),
+        );
+      }
+      final lanes = laneEnds.isEmpty ? 1 : laneEnds.length;
+
+      String labelForMinute(int absoluteMin) {
+        final h = (absoluteMin ~/ 60).toString().padLeft(2, '0');
+        final m = (absoluteMin % 60).toString().padLeft(2, '0');
+        return '$h:$m';
+      }
+
+      return Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x12000000),
+              blurRadius: 16,
+              offset: Offset(0, 8),
+            ),
+          ],
+        ),
+        padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: SingleChildScrollView(
+            physics: const BouncingScrollPhysics(),
+            child: SizedBox(
+              height: canvasHeight,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    width: leftGutter,
+                    child: Column(
+                      children: [
+                        for (int i = 0; i <= hourCount; i++) ...[
+                          SizedBox(
+                            height: i == hourCount ? 0 : 60 * pxPerMin,
+                            child: Align(
+                              alignment: Alignment.topLeft,
+                              child: Padding(
+                                padding: const EdgeInsets.only(top: 2),
+                                child: Text(
+                                  labelForMinute(startMin + (i * 60)),
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w800,
+                                    color: Colors.black.withValues(alpha: 0.55),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: LayoutBuilder(
+                      builder: (context, c) {
+                        final laneGap = 8.0;
+                        final laneWidth =
+                            (c.maxWidth - (laneGap * (lanes - 1))) / lanes;
+                        return Stack(
+                          children: [
+                            for (int i = 0; i <= hourCount; i++)
+                              Positioned(
+                                top: i * 60 * pxPerMin,
+                                left: 0,
+                                right: 0,
+                                child: Container(
+                                  height: 1,
+                                  color: Colors.black.withValues(alpha: 0.06),
+                                ),
+                              ),
+                            for (final e in laidOut)
+                              Positioned(
+                                top: (e.start - startMin) * pxPerMin,
+                                left: e.lane * (laneWidth + laneGap),
+                                width: laneWidth,
+                                height:
+                                    ((e.end - e.start) * pxPerMin).clamp(18.0, 9999.0),
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: e.color,
+                                    borderRadius: BorderRadius.circular(12),
+                                    boxShadow: const [
+                                      BoxShadow(
+                                        color: Color(0x24000000),
+                                        blurRadius: 14,
+                                        offset: Offset(0, 8),
+                                      ),
+                                    ],
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 10,
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        e.title,
+                                        style: const TextStyle(
+                                          fontSize: 12.5,
+                                          fontWeight: FontWeight.w900,
+                                          color: Colors.white,
+                                          height: 1.1,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        '${labelForMinute(e.start)} - ${labelForMinute(e.end)}',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w800,
+                                          color: Colors.white.withValues(alpha: 0.92),
+                                          height: 1.1,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     Widget dateStrip(DateTime selected) {
       final start = selected.subtract(const Duration(days: 3));
       final days = List<DateTime>.generate(
@@ -2772,8 +3135,10 @@ class _ActivityBookingDetailsScreenState
                       d.day == selected.day;
                   final weekday = DateFormat('EEE').format(d);
                   final dayNum = d.day.toString().padLeft(2, '0');
+
                   return InkWell(
-                    onTap: isPast ? null : () => setState(() => _scheduleSelectedDay = d),
+                    onTap:
+                        isPast ? null : () => setState(() => _scheduleSelectedDay = d),
                     borderRadius: BorderRadius.circular(10),
                     child: Container(
                       width: 54,
@@ -2892,15 +3257,19 @@ class _ActivityBookingDetailsScreenState
           return map;
         }
 
+        final blockedRangesValue = blockedRanges();
+        final weeklyValue = weeklyRanges();
+
         final normalizedDay =
             DateTime(selectedDay.year, selectedDay.month, selectedDay.day);
-        final blocked = blockedRanges().any((r) {
+        final blockedByDates = blockedRangesValue.any((r) {
           final start = DateTime(r.start.year, r.start.month, r.start.day);
           final end = DateTime(r.end.year, r.end.month, r.end.day);
           return !normalizedDay.isBefore(start) && !normalizedDay.isAfter(end);
         });
+        final blocked = blockedByDates;
 
-        final weekly = weeklyRanges()[normalizedDay.weekday];
+        final weekly = weeklyValue[normalizedDay.weekday];
         final availableWindow = (weekly == null || !weekly.available)
             ? null
             : (weekly.start, weekly.end);
@@ -2978,150 +3347,37 @@ class _ActivityBookingDetailsScreenState
           );
         } else if (blocked || dayOff || availableWindow == null) {
           timelineItems.add(
-            timelineRow(
-              timeLabel: '—',
-              connectorHeight: 18,
-              hasEvent: false,
-              isLast: true,
-              card: eventCard(
-                title: 'Unavailable',
-                subtitle: blocked ? 'Blocked' : 'Not available',
-                background: Colors.black.withValues(alpha: 0.06),
-                foreground: _profileDarkText,
-                icon: Icons.block_rounded,
-              ),
+            eventCard(
+              title: 'Unavailable',
+              subtitle: blocked ? 'Blocked' : 'Not available',
+              background: Colors.black.withValues(alpha: 0.06),
+              foreground: _profileDarkText,
+              icon: Icons.block_rounded,
             ),
           );
         } else {
-          final events =
-              <({TimeOfDay start, TimeOfDay end, String title, String subtitle, Color bg, Color fg, IconData icon, bool strike})>[];
-
           final isBookingDay = _ymd(selectedDay) == _ymd(bookingDay!);
-          if (isBookingDay && bookingStart != null) {
-            final end = bookingEnd ??
-                TimeOfDay(
-                  hour:
-                      (bookingStart.hour + ((bookingStart.minute + 15) ~/ 60)) %
-                      24,
-                  minute: (bookingStart.minute + 15) % 60,
-                );
-            events.add(
-              (
-                start: bookingStart,
-                end: end,
-                title: 'Your booking',
-                subtitle: timeLabel.isNotEmpty ? timeLabel : '',
-                bg: const Color(0xFF71CBBE),
-                fg: Colors.white,
-                icon: Icons.check_circle_rounded,
-                strike: false,
-              ),
-            );
-          }
+          final bookingEndResolved = (isBookingDay && bookingStart != null)
+              ? (bookingEnd ??
+                    TimeOfDay(
+                      hour:
+                          (bookingStart.hour +
+                                  ((bookingStart.minute + 15) ~/ 60)) %
+                              24,
+                      minute: (bookingStart.minute + 15) % 60,
+                    ))
+              : null;
 
-          const palette = <Color>[
-            Color(0xFFFFB930),
-            Color(0xFF7E57C2),
-            Color(0xFFEC407A),
-          ];
-          for (int i = 0; i < taken.length; i++) {
-            final r = taken[i];
-            final bg = palette[i % palette.length];
-            events.add(
-              (
-                start: r.start,
-                end: r.end,
-                title: 'Booked slot',
-                subtitle: 'Unavailable',
-                bg: bg,
-                fg: Colors.white,
-                icon: Icons.check_circle_rounded,
-                strike: bg == palette.first,
-              ),
-            );
-          }
-
-          int toMinutes(TimeOfDay t) => t.hour * 60 + t.minute;
-          TimeOfDay fromMinutes(int minutes) {
-            final clamped = minutes.clamp(0, 24 * 60 - 1);
-            return TimeOfDay(hour: clamped ~/ 60, minute: clamped % 60);
-          }
-
-          final startMin = toMinutes(availableWindow.$1);
-          final endMin = toMinutes(availableWindow.$2);
-          final tickMins = <int>{startMin, endMin};
-          for (final e in events) {
-            final m = toMinutes(e.start);
-            if (m >= startMin && m <= endMin) tickMins.add(m);
-          }
-          final sortedTicks = tickMins.toList()..sort();
-
-          events.sort((a, b) => toMinutes(a.start).compareTo(toMinutes(b.start)));
-
-          for (int i = 0; i < sortedTicks.length; i++) {
-            final tickMin = sortedTicks[i];
-            final tick = fromMinutes(tickMin);
-            final nextTickMin = i < sortedTicks.length - 1
-                ? sortedTicks[i + 1]
-                : tickMin;
-            final diffMin = (nextTickMin - tickMin).abs();
-            final connectorHeight = i == sortedTicks.length - 1
-                ? 18.0
-                : (diffMin * 0.45).clamp(18.0, 220.0);
-
-            final atTick =
-                events.where((e) => toMinutes(e.start) == tickMin).toList();
-
-            final cardWidget = atTick.isEmpty
-                ? const SizedBox(height: 10)
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      for (int j = 0; j < atTick.length; j++) ...[
-                        eventCard(
-                          title: atTick[j].title,
-                          subtitle: atTick[j].subtitle,
-                          background: atTick[j].bg,
-                          foreground: atTick[j].fg,
-                          icon: atTick[j].icon,
-                          strike: atTick[j].strike,
-                        ),
-                        if (j != atTick.length - 1) const SizedBox(height: 10),
-                      ],
-                    ],
-                  );
-
-            timelineItems.add(
-              timelineRow(
-                timeLabel: _formatTime24(tick),
-                connectorHeight: connectorHeight,
-                hasEvent: atTick.isNotEmpty,
-                isLast: i == sortedTicks.length - 1,
-                card: cardWidget,
-              ),
-            );
-            if (i != sortedTicks.length - 1) {
-              timelineItems.add(const SizedBox(height: 6));
-            }
-          }
-
-          if (timelineItems.isEmpty) {
-            timelineItems.add(
-              Padding(
-                padding: const EdgeInsets.only(top: 18),
-                child: Center(
-                  child: Text(
-                    'No schedule for this day.',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.black.withValues(alpha: 0.55),
-                    ),
-                  ),
-                ),
-              ),
-            );
-          }
+          timelineItems.add(
+            bookedTimelineDayView(
+              windowStart: availableWindow.$1,
+              windowEnd: availableWindow.$2,
+              taken: taken,
+              bookingStart: bookingStart,
+              bookingEnd: bookingEndResolved,
+              showBooking: isBookingDay && bookingStart != null,
+            ),
+          );
         }
 
         return Padding(
@@ -3178,17 +3434,10 @@ class _ActivityBookingDetailsScreenState
               : null);
 
     if (caregiverId.isEmpty) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
-            child: _buildUnavailablePlaceholder(
-              message: 'Reviews unavailable',
-              explanation: 'No caregiver assigned yet.',
-            ),
-          ),
-        ],
+      return _buildUnavailablePlaceholder(
+        message: 'Reviews unavailable',
+        explanation: 'No caregiver assigned yet.',
+        centerVertically: true,
       );
     }
 
@@ -3201,31 +3450,17 @@ class _ActivityBookingDetailsScreenState
       stream: stream,
       builder: (context, snapshot) {
         if (snapshot.hasError) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
-                child: _buildUnavailablePlaceholder(
-                  message: 'Reviews unavailable',
-                  explanation: 'Unable to load reviews right now.',
-                ),
-              ),
-            ],
+          return _buildUnavailablePlaceholder(
+            message: 'Reviews unavailable',
+            explanation: 'Unable to load reviews right now.',
+            centerVertically: true,
           );
         }
         if (!snapshot.hasData) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
-                child: _buildUnavailablePlaceholder(
-                  message: 'Reviews unavailable',
-                  explanation: 'Loading reviews...',
-                ),
-              ),
-            ],
+          return _buildUnavailablePlaceholder(
+            message: 'Reviews unavailable',
+            explanation: 'Loading reviews...',
+            centerVertically: true,
           );
         }
 
@@ -3572,12 +3807,12 @@ class _ActivityBookingDetailsScreenState
       child: Container(
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          border: Border.all(color: _accentGold, width: 3.2),
+          border: Border.all(color: _avatarOutlineColor, width: 3.0),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.12),
-              blurRadius: 14,
-              offset: const Offset(0, 8),
+              color: Colors.black.withValues(alpha: 0.10),
+              blurRadius: 12,
+              offset: const Offset(0, 7),
             ),
           ],
         ),
@@ -3592,25 +3827,43 @@ class _ActivityBookingDetailsScreenState
 
   Widget _buildTabContent(List<Widget> children) {
     return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(_cardRadius),
-        border: Border.all(color: _cardBorderStrong),
-        boxShadow: const [
-          BoxShadow(color: _cardShadow, blurRadius: 12, offset: Offset(0, 6)),
-        ],
-      ),
+      decoration: _premiumCardDecoration(),
       margin: const EdgeInsets.only(top: 6),
       child: Column(children: children),
     );
   }
 
   Widget _buildSectionHeader({required String title, String? hint}) {
+    final trimmedHint = (hint ?? '').trim();
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 6, 4, 8),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(child: Text(title, style: _sectionHeaderTextStyle)),
+          Row(
+            children: [
+              Expanded(child: Text(title, style: _sectionHeaderTextStyle)),
+              if (trimmedHint.isNotEmpty) ...[
+                const SizedBox(width: 6),
+                Icon(
+                  Icons.info_outline,
+                  size: 16,
+                  color: Colors.black.withValues(alpha: 0.45),
+                ),
+              ],
+            ],
+          ),
+          if (trimmedHint.isNotEmpty) ...[
+            const SizedBox(height: 3),
+            Text(
+              trimmedHint,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Colors.black.withValues(alpha: 0.50),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -3627,7 +3880,8 @@ class _ActivityBookingDetailsScreenState
     final date = normalizeString(booking['date']);
     final time = normalizeString(booking['time']);
     final payment = normalizeString(booking['paymentMethod']) ?? 'Unknown';
-    final notes = normalizeString(booking['notes']) ?? '';
+    final notes =
+        normalizeString(booking['personNotes'] ?? booking['notes']) ?? '';
     final personDisplay = _resolvePersonDisplay(booking);
     final services = extractServicePreferencesList(
       booking['servicePreferences'] ??
@@ -3919,6 +4173,7 @@ class _ActivityBookingDetailsScreenState
     );
   }
 
+  // ignore: unused_element
   Future<void> _openEmergencyAlertSheet() async {
     final contacts = _extractEmergencyContacts(_userData);
     if (!mounted) return;
@@ -4139,9 +4394,12 @@ class _ActivityBookingDetailsScreenState
   }) {
     return Material(
       color: Colors.white,
-      elevation: 12,
-      shadowColor: Colors.black.withValues(alpha: 0.2),
-      borderRadius: BorderRadius.circular(16),
+      elevation: 8,
+      shadowColor: Colors.black.withValues(alpha: 0.14),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: const BorderSide(color: _cardBorderStrong),
+      ),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
         child: Column(
@@ -4153,7 +4411,7 @@ class _ActivityBookingDetailsScreenState
                   padding: const EdgeInsets.all(2),
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    border: Border.all(color: _accentGold, width: 2.2),
+                    border: Border.all(color: _avatarOutlineColor, width: 2.2),
                   ),
                   child: DefaultProfileAvatar(
                     radius: 20,
@@ -4213,33 +4471,6 @@ class _ActivityBookingDetailsScreenState
             const SizedBox(height: 10),
             Row(
               children: [
-                Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    onTap: _openEmergencyAlertSheet,
-                    borderRadius: BorderRadius.circular(999),
-                    child: Ink(
-                      width: 46,
-                      height: 46,
-                      decoration: const BoxDecoration(
-                        color: Colors.red,
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Center(
-                        child: Text(
-                          'SOS',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w900,
-                            color: Colors.white,
-                            letterSpacing: 0.3,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
                 Expanded(
                   child: ElevatedButton(
                     onPressed: _startSessionFromCaregiverView,
@@ -4635,7 +4866,7 @@ class _ActivityBookingDetailsScreenState
             .clamp(0.0, 1.0);
     final effectiveSheetExtent =
         sheetMinExtent + (previewDenom * effectivePanelT);
-    final showPreviewCta = _canBookFromSchedule;
+    final showPreviewCta = _canBookFromSchedule && widget.showPreviewFrontSheet;
     final previewT = previewDenom <= 0
         ? 0.0
         : ((effectiveSheetExtent - sheetMinExtent) / previewDenom)

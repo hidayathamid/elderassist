@@ -59,7 +59,7 @@ class BookingModel {
       servicePrice: (data['servicePrice'] as num?)?.toDouble() ?? 0.0,
       paymentMethod: data['paymentMethod'] as String? ?? '',
       status: data['status'] as String? ?? '',
-      notes: data['notes'] as String? ?? '',
+      notes: (data['personNotes'] as String?) ?? (data['notes'] as String?) ?? '',
       createdAt: data['createdAt'] as Timestamp? ?? Timestamp.now(),
     );
   }
@@ -80,7 +80,7 @@ class BookingModel {
       "servicePrice": servicePrice,
       "paymentMethod": paymentMethod,
       "status": status,
-      "notes": notes,
+      "personNotes": notes,
       "createdAt": createdAt,
     };
   }

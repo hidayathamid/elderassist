@@ -81,7 +81,8 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
       }
 
       final data = doc.data()!;
-      _notesController.text = (data['notes'] as String?) ?? '';
+      _notesController.text =
+          (data['personNotes'] as String?) ?? (data['notes'] as String?) ?? '';
       setState(() {
         _job = data;
         _isLoading = false;
@@ -165,16 +166,21 @@ class _CaregiverJobDetailsScreenState extends State<CaregiverJobDetailsScreen> {
         .doc(caregiverId)
         .collection('assignedBookings')
         .doc(widget.bookingId);
+    final caregiverDocRef =
+        FirebaseFirestore.instance.collection('caregivers').doc(caregiverId);
 
     final normalizedStatus = status.toUpperCase();
     final updates = {'status': normalizedStatus};
     if (includeNotes) {
-      updates['notes'] = _notesController.text;
+      updates['personNotes'] = _notesController.text;
     }
 
     batch.update(bookingRef, updates);
     batch.update(userRef, updates);
     batch.update(caregiverRef, updates);
+    if (normalizedStatus == 'COMPLETED' || normalizedStatus == 'CANCELLED') {
+      batch.set(caregiverDocRef, {'availability': true}, SetOptions(merge: true));
+    }
 
     try {
       await batch.commit();

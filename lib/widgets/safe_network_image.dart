@@ -1,40 +1,6 @@
-import 'dart:io';
-
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-
-class _HostReachability {
-  static const Duration _timeout = Duration(seconds: 2);
-  static const Duration _ttl = Duration(minutes: 5);
-
-  static final Map<String, ({bool reachable, DateTime checkedAt})> _cache = {};
-  static final Map<String, Future<bool>> _inFlight = {};
-
-  static Future<bool> canResolve(String host) {
-    final trimmedHost = host.trim();
-    if (trimmedHost.isEmpty) return Future.value(false);
-
-    final cached = _cache[trimmedHost];
-    if (cached != null && DateTime.now().difference(cached.checkedAt) < _ttl) {
-      return Future.value(cached.reachable);
-    }
-
-    final existing = _inFlight[trimmedHost];
-    if (existing != null) return existing;
-
-    final future = InternetAddress.lookup(trimmedHost)
-        .timeout(_timeout)
-        .then((result) => result.isNotEmpty)
-        .catchError((_) => false)
-        .then((reachable) {
-      _cache[trimmedHost] = (reachable: reachable, checkedAt: DateTime.now());
-      _inFlight.remove(trimmedHost);
-      return reachable;
-    });
-
-    _inFlight[trimmedHost] = future;
-    return future;
-  }
-}
 
 class SafeNetworkImage extends StatelessWidget {
   const SafeNetworkImage(
@@ -49,6 +15,10 @@ class SafeNetworkImage extends StatelessWidget {
     this.gaplessPlayback = true,
   });
 
+  static const int _firebaseStorageMaxBytes = 5 * 1024 * 1024;
+  static final Map<String, Future<Uint8List?>> _firebaseStorageInFlight = {};
+  static final Map<String, Uint8List> _firebaseStorageCache = {};
+
   final String url;
   final double? width;
   final double? height;
@@ -58,37 +28,92 @@ class SafeNetworkImage extends StatelessWidget {
   final Widget? errorWidget;
   final bool gaplessPlayback;
 
+  bool _isFirebaseStorageUrl(Uri uri) =>
+      uri.host.toLowerCase().contains('firebasestorage.googleapis.com');
+
+  bool _isGsUrl(Uri uri) => uri.scheme.toLowerCase() == 'gs';
+
+  Future<Uint8List?> _loadFirebaseStorageBytes(String trimmedUrl) {
+    final cached = _firebaseStorageCache[trimmedUrl];
+    if (cached != null) return Future.value(cached);
+
+    final existing = _firebaseStorageInFlight[trimmedUrl];
+    if (existing != null) return existing;
+
+    final future = () async {
+      try {
+        final ref = FirebaseStorage.instance.refFromURL(trimmedUrl);
+        final bytes = await ref.getData(_firebaseStorageMaxBytes);
+        if (bytes != null) _firebaseStorageCache[trimmedUrl] = bytes;
+        return bytes;
+      } catch (_) {
+        return null;
+      } finally {
+        _firebaseStorageInFlight.remove(trimmedUrl);
+      }
+    }();
+
+    _firebaseStorageInFlight[trimmedUrl] = future;
+    return future;
+  }
+
   @override
   Widget build(BuildContext context) {
     final trimmedUrl = url.trim();
     final uri = Uri.tryParse(trimmedUrl);
-    final host = uri?.host ?? '';
 
-    if (trimmedUrl.isEmpty || uri == null || host.isEmpty) {
+    if (trimmedUrl.isEmpty || uri == null) {
       return errorWidget ?? placeholder ?? const SizedBox.shrink();
     }
 
-    return FutureBuilder<bool>(
-      future: _HostReachability.canResolve(host),
-      builder: (context, snapshot) {
-        final canResolve = snapshot.data == true;
-        if (!canResolve) {
-          return placeholder ?? errorWidget ?? const SizedBox.shrink();
-        }
+    // Prefer plain HTTPS loading for download URLs (firebasestorage.googleapis.com).
+    // Using FirebaseStorage.refFromURL() may fail in debug/test environments due to
+    // App Check / auth preconditions, even though the download URL is valid.
+    if (_isFirebaseStorageUrl(uri) || uri.scheme.toLowerCase().startsWith('http')) {
+      return Image.network(
+        trimmedUrl,
+        width: width,
+        height: height,
+        fit: fit,
+        alignment: alignment,
+        gaplessPlayback: gaplessPlayback,
+        errorBuilder: (context, error, stackTrace) {
+          if (kDebugMode) {
+            debugPrint('SafeNetworkImage failed: $trimmedUrl');
+            debugPrint('SafeNetworkImage error: $error');
+          }
+          return errorWidget ?? placeholder ?? const SizedBox.shrink();
+        },
+      );
+    }
 
-        return Image.network(
-          trimmedUrl,
-          width: width,
-          height: height,
-          fit: fit,
-          alignment: alignment,
-          gaplessPlayback: gaplessPlayback,
-          errorBuilder: (context, error, stackTrace) {
+    // Support gs:// URLs by fetching bytes via Firebase Storage SDK.
+    if (_isGsUrl(uri)) {
+      return FutureBuilder<Uint8List?>(
+        future: _loadFirebaseStorageBytes(trimmedUrl),
+        builder: (context, bytesSnapshot) {
+          final bytes = bytesSnapshot.data;
+          if (bytes == null || bytes.isEmpty) {
+            if (bytesSnapshot.connectionState == ConnectionState.waiting) {
+              return placeholder ?? const SizedBox.shrink();
+            }
             return errorWidget ?? placeholder ?? const SizedBox.shrink();
-          },
-        );
-      },
-    );
+          }
+          return Image.memory(
+            bytes,
+            width: width,
+            height: height,
+            fit: fit,
+            alignment: alignment,
+            gaplessPlayback: gaplessPlayback,
+            errorBuilder: (context, error, stackTrace) {
+              return errorWidget ?? placeholder ?? const SizedBox.shrink();
+            },
+          );
+        },
+      );
+    }
+
+    return errorWidget ?? placeholder ?? const SizedBox.shrink();
   }
 }
-

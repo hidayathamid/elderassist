@@ -42,6 +42,15 @@
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="elderassist" android:host="payment-success"/>
+                <data android:scheme="elderassist" android:host="payment-return"/>
+                <data android:scheme="elderassist"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="elderassist-53a60.web.app" android:pathPrefix="/payment-return"/>
+                <data android:scheme="https" android:host="elderassist-53a60.firebaseapp.com" android:pathPrefix="/payment-return"/>
             </intent-filter>
         </activity>
 

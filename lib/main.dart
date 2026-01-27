@@ -139,7 +139,7 @@ class _ElderAssistAppState extends State<ElderAssistApp> {
 
   @override
   Widget build(BuildContext context) {
-    final amber400 = Colors.amber[400]!;
+    final amber400 = const Color.fromARGB(255, 0, 0, 0)!;
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,

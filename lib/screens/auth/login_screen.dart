@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:emergencies_disability_assistance_app/models/caregiver_model.dart';
-import 'package:emergencies_disability_assistance_app/screens/caregiver/caregiver_root_screen.dart';
-import 'package:emergencies_disability_assistance_app/screens/user/user_root_screen.dart';
 import 'package:emergencies_disability_assistance_app/services/auth_service.dart';
+import 'package:emergencies_disability_assistance_app/widgets/auth_wrapper.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 import 'register_screen.dart';
 
@@ -22,6 +21,11 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
   final AuthService _authService = AuthService();
+
+  static const Color _accentGold = Color(0xFFF4B63D);
+  static const Color _dialogBackground = Color(0xFFF7F8FA);
+  static const TextStyle _dialogTitleStyle = TextStyle(fontWeight: FontWeight.w700);
+  static const TextStyle _dialogContentStyle = TextStyle(color: Colors.black87);
 
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
@@ -70,6 +74,92 @@ class _LoginScreenState extends State<LoginScreen> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  Future<void> _showProfileStyleMessageDialog({
+    required String title,
+    required String message,
+  }) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => AlertDialog(
+        backgroundColor: _dialogBackground,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: Text(
+          title,
+          textAlign: TextAlign.center,
+          style: _dialogTitleStyle,
+        ),
+        content: Text(
+          message,
+          textAlign: TextAlign.center,
+          style: _dialogContentStyle,
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actionsPadding: const EdgeInsets.only(bottom: 12),
+        actions: [
+          SizedBox(
+            width: 120,
+            child: ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _accentGold,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                textStyle: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              child: const Text('OK'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _sendPasswordReset() async {
+    final email = _emailController.text.trim();
+    if (email.isEmpty) {
+      setState(() => _emailErrorText = 'Enter your email first.');
+      return;
+    }
+    if (!_emailRegex.hasMatch(email)) {
+      setState(() => _emailErrorText = 'Invalid email.');
+      return;
+    }
+    try {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      if (!mounted) return;
+      await _showProfileStyleMessageDialog(
+        title: 'Password reset',
+        message:
+            'If this email is registered, a password reset link has been sent to $email.',
+      );
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      if (e.code == 'user-not-found') {
+        await _showProfileStyleMessageDialog(
+          title: 'Password reset',
+          message:
+              'If this email is registered, a password reset link has been sent to $email.',
+        );
+        return;
+      }
+      await _showProfileStyleMessageDialog(
+        title: 'Password reset failed',
+        message: e.message ?? 'Unable to send reset email. Please try again.',
+      );
+    } catch (_) {
+      if (!mounted) return;
+      await _showProfileStyleMessageDialog(
+        title: 'Password reset failed',
+        message: 'Unable to send reset email. Please try again.',
+      );
+    }
+  }
+
   Future<void> _loginUser() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -111,15 +201,10 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
-    final profile = result.profile;
-    final Widget destination = profile is CaregiverModel
-        ? const CaregiverRootScreen()
-        : const UserRootScreen();
-
     if (!mounted) return;
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => destination),
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const AuthWrapper()),
+      (_) => false,
     );
   }
 
@@ -253,6 +338,22 @@ class _LoginScreenState extends State<LoginScreen> {
                                     _obscurePassword = !_obscurePassword;
                                   });
                                 },
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: GestureDetector(
+                                onTap: _sendPasswordReset,
+                                child: Text(
+                                  'Forgot Password?',
+                                  style: TextStyle(
+                                    color: signUpColor,
+                                    decoration: TextDecoration.underline,
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 14,
+                                  ),
+                                ),
                               ),
                             ),
                           ],

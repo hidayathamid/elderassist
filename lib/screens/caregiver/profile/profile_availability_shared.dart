@@ -211,13 +211,13 @@ class TimePickerChip extends StatelessWidget {
 }
 
 const List<DaySchedule> defaultWeeklySchedule = [
-  DaySchedule(day: 'Monday', available: true, start: '08:00', end: '18:00'),
-  DaySchedule(day: 'Tuesday', available: true, start: '08:00', end: '18:00'),
-  DaySchedule(day: 'Wednesday', available: true, start: '08:00', end: '18:00'),
-  DaySchedule(day: 'Thursday', available: true, start: '08:00', end: '18:00'),
+  DaySchedule(day: 'Monday', available: true, start: '08:00', end: '16:00'),
+  DaySchedule(day: 'Tuesday', available: true, start: '08:00', end: '16:00'),
+  DaySchedule(day: 'Wednesday', available: true, start: '08:00', end: '16:00'),
+  DaySchedule(day: 'Thursday', available: true, start: '08:00', end: '16:00'),
   DaySchedule(day: 'Friday', available: true, start: '08:00', end: '16:00'),
-  DaySchedule(day: 'Saturday', available: true, start: '09:00', end: '14:00'),
-  DaySchedule(day: 'Sunday', available: false, start: '', end: ''),
+  DaySchedule(day: 'Saturday', available: true, start: '08:00', end: '16:00'),
+  DaySchedule(day: 'Sunday', available: true, start: '08:00', end: '16:00'),
 ];
 
 final Map<String, DaySchedule> defaultScheduleLookup = Map.fromEntries(

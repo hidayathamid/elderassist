@@ -13,12 +13,12 @@ import '../../../widgets/default_profile_avatar.dart';
 import '../../user/profile/profile_edit_screen.dart';
 import '../../user/profile/profile_services_screen.dart';
 import '../../user/profile/profile_payments_screen.dart';
+import '../../../services/payment_badge_service.dart';
 import 'profile_availability_schedule_screen.dart';
 import 'profile_documents_screen.dart';
 import 'profile_review_screen.dart';
 
 const Color _accentGold = Color(0xFFF4B63D);
-const Color _accentBlue = Color(0xFF00A8A7);
 const Color _tealAccent = Color(0xFF00A8A7);
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _serviceChipBorder = Color(0xFFCCCCCC);
@@ -177,7 +177,7 @@ class _CaregiverProfileScreenState extends State<CaregiverProfileScreen>
         final email = (data['email'] as String?) ?? user.email ?? '';
         final phone = (data['phone'] as String?) ?? '';
         final photoUrl = (data['photoUrl'] as String?) ?? '';
-        final rating = (data['rating'] as num?)?.toDouble() ?? 0.0;
+        final rating = _toDouble(data['rating']) ?? 0.0;
         final available = (data['availability'] as bool?) ?? true;
         final services = _stringListFromField(
           data['servicePreferences'] ?? data['services'],
@@ -376,7 +376,7 @@ class _CaregiverProfileScreenState extends State<CaregiverProfileScreen>
                                 Icon(
                                   Icons.star,
                                   size: 12,
-                                  color: _accentBlue,
+                                  color: _accentGold,
                                 ),
                                 const SizedBox(width: 4),
                                 Text(
@@ -386,7 +386,7 @@ class _CaregiverProfileScreenState extends State<CaregiverProfileScreen>
                                   style: const TextStyle(
                                     fontWeight: FontWeight.w600,
                                     fontSize: 11,
-                                    color: _accentBlue,
+                                    color: _profileDarkText,
                                   ),
                                 ),
                               ],
@@ -581,7 +581,10 @@ class _CaregiverProfileScreenState extends State<CaregiverProfileScreen>
                         context,
                         MaterialPageRoute(
                           builder: (_) =>
-                              const ProfileEditScreen(useCaregiverData: true),
+                              const ProfileEditScreen(
+                                useCaregiverData: true,
+                                showPasswordResetField: true,
+                              ),
                         ),
                       );
                     },
@@ -632,17 +635,25 @@ class _CaregiverProfileScreenState extends State<CaregiverProfileScreen>
                     },
                   ),
                   const _ZUSDivider(),
-                  _ZUSRow(
-                    icon: Icons.payment,
-                    label: 'Payment Methods',
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => const ProfilePaymentsScreen(
-                            target: PaymentDocumentTarget.caregiver,
-                          ),
-                        ),
+                  StreamBuilder<int>(
+                    stream: PaymentBadgeService.caregiverNewPaymentsCount(),
+                    builder: (context, snap) {
+                      final count = snap.data ?? 0;
+                      return _ZUSRow(
+                        icon: Icons.payment,
+                        label: 'Payment Methods',
+                        count: count > 0 ? count : null,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const ProfilePaymentsScreen(
+                                target: PaymentDocumentTarget.caregiver,
+                                initialTabIndex: 1,
+                              ),
+                            ),
+                          );
+                        },
                       );
                     },
                   ),
@@ -673,9 +684,6 @@ class _CaregiverProfileScreenState extends State<CaregiverProfileScreen>
                   final shouldLogout = await _confirmLogout(context);
                   if (!shouldLogout) return;
                   await AuthService().signOut();
-                  await caregiverRef.set({
-                    'availability': false,
-                  }, SetOptions(merge: true));
                   if (!context.mounted) return;
                   Navigator.pushAndRemoveUntil(
                     context,
@@ -789,6 +797,16 @@ class _CaregiverProfileScreenState extends State<CaregiverProfileScreen>
   }
 }
 
+double? _toDouble(dynamic value) {
+  if (value is num) return value.toDouble();
+  if (value is String) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    return double.tryParse(trimmed.replaceAll(',', ''));
+  }
+  return null;
+}
+
 class _SummaryItem extends StatelessWidget {
   const _SummaryItem({
     required this.title,
@@ -809,10 +827,10 @@ class _SummaryItem extends StatelessWidget {
         const SizedBox(height: 4),
         Text(
           value.toString(),
-          style: TextStyle(
+          style: const TextStyle(
             fontSize: 14,
             fontWeight: FontWeight.bold,
-            color: itemColor,
+            color: Colors.black,
           ),
         ),
         Text(
@@ -835,10 +853,10 @@ class _OverviewServiceChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final background = selected ? _tealAccent : Colors.white;
-    final foreground = selected ? Colors.white : _profileDarkText;
+    final background = selected ? _accentGold : Colors.white;
+    final foreground = selected ? Colors.black : _profileDarkText;
     final borderColor = selected
-        ? _tealAccent.withValues(alpha: 0.45)
+        ? _accentGold.withValues(alpha: 0.45)
         : _serviceChipBorder;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -901,7 +919,7 @@ class _ZUSRow extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
-                  color: _tealAccent,
+                  color: _accentGold,
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Text(
@@ -909,7 +927,7 @@ class _ZUSRow extends StatelessWidget {
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w600,
-                    color: Colors.white,
+                    color: Colors.black,
                   ),
                 ),
               ),

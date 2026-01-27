@@ -12,6 +12,7 @@ import 'package:emergencies_disability_assistance_app/screens/caregiver/jobs/car
 import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_booking_details_screen.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/activity/track_caregiver_screen.dart';
 import 'package:emergencies_disability_assistance_app/models/caregiver_job.dart';
+import 'package:emergencies_disability_assistance_app/utils/booking_due_status.dart';
 import 'package:emergencies_disability_assistance_app/widgets/caregiver_job_card.dart';
 import 'package:emergencies_disability_assistance_app/widgets/safe_network_image.dart';
 
@@ -38,6 +39,9 @@ const double _sectionSpacing = 18.0;
 const double _cardRadius = 18.0;
 const double _sectionCardHeight = 90.0;
 const double _headerTopPadding = 16.0;
+
+enum _StartDayMode { startDay, endDay, busy }
+
 const double _headerHeightEstimate = 96.0;
 const double _sheetHeaderGap = 12.0;
 const double _sheetHeaderInset =
@@ -72,6 +76,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
   double _sheetTopInset = _sheetHeaderInset;
   bool _sheetMeasurementScheduled = false;
   bool _todayJobsSectionHidden = false;
+  bool _scheduledJobsSectionHidden = false;
   bool _scheduleSectionHidden = false;
   AnimationController? _entryController;
   late final Animation<double> _entryFade;
@@ -80,6 +85,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
   // Hide "Schedule" category for now (keep existing logic without deleting it).
   // ignore: prefer_final_fields
   bool _hideScheduledCategory = true;
+  final Set<String> _autoPromotedBookingIds = <String>{};
 
   @override
   void initState() {
@@ -215,7 +221,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
         final caregiverData = caregiverSnapshot.data!.data() ?? {};
         final name = caregiverData['name'] as String? ?? 'Caregiver Team';
         final photoUrl = caregiverData['photoUrl'] as String?;
-        final ratingValue = (caregiverData['rating'] as num?)?.toDouble() ?? 0;
+        final ratingValue = _toDouble(caregiverData['rating']) ?? 0;
         final greeting = _greetingForTime(DateTime.now());
 
         return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
@@ -228,6 +234,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
             }
 
             final docs = bookingsSnapshot.data!.docs;
+            _autoPromoteDueScheduledBookings(docs);
             final jobs = docs
                 .map(CaregiverJob.fromDoc)
                 .whereType<CaregiverJob>()
@@ -238,16 +245,28 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
             final completedJobs = jobs
                 .where((job) => job.normalizedStatus == 'COMPLETED')
                 .length;
-            final hasAssignedBooking = jobs.any(
-              (job) => job.normalizedStatus == 'ASSIGNED',
-            );
+            final hasBusyBooking = jobs.any((job) {
+              final status = deriveDueAwareStatus(
+                status: job.status,
+                date: job.scheduledDate,
+                time: job.startTime.trim().isNotEmpty
+                    ? job.startTime
+                    : job.time,
+              );
+              return status == 'ASSIGNED' ||
+                  status == 'EMERGENCY_ALERT' ||
+                  status == 'ONGOING' ||
+                  status == 'IN_PROGRESS' ||
+                  status == 'NOTIFY' ||
+                  status == 'HANDLE_CLIENT';
+            });
             final sheetInitialSize = math
                 .max(_sheetInitialExtent, _sheetMinExtent)
                 .clamp(_sheetMinExtent, _sheetMaxExtent);
             final showAppBar = _showFloatingAppBar;
             final isAvailable =
                 (caregiverData['availability'] as bool?) ?? false;
-            if (hasAssignedBooking && isAvailable) {
+            if (hasBusyBooking && isAvailable) {
               WidgetsBinding.instance.addPostFrameCallback((_) {
                 caregiverRef.set({
                   'availability': false,
@@ -334,7 +353,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                                     context,
                                     caregiverData: caregiverData,
                                     caregiverRef: caregiverRef,
-                                    hasAssignedBooking: hasAssignedBooking,
+                                    hasBusyBooking: hasBusyBooking,
                                     isAvailable: isAvailable,
                                   ),
                                   _buildSectionDivider(),
@@ -356,10 +375,24 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                                       _todayJobsSectionHidden))
                                     _buildTodayJobSection(context, todayJobs),
                                   _buildSectionDivider(),
-                                  _buildScheduledJobsSection(
-                                    context,
-                                    scheduledJobs,
+                                  _buildSectionTitle(
+                                    title: 'Scheduled Jobs',
+                                    hint:
+                                        'Upcoming assignments sorted by date.',
+                                    trailing: _sectionToggleButton(
+                                      hidden: _scheduledJobsSectionHidden,
+                                      canHide: true,
+                                      onHide: _collapseScheduledJobsSection,
+                                      onShow: _unhideScheduledJobsSection,
+                                    ),
                                   ),
+                                  if (!_scheduledJobsSectionHidden) ...[
+                                    const SizedBox(height: 12),
+                                    _buildScheduledJobsSection(
+                                      context,
+                                      scheduledJobs,
+                                    ),
+                                  ],
                                   if (!_hideScheduledCategory) ...[
                                     _buildSectionDivider(),
                                     _buildSectionTitle(
@@ -384,8 +417,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                                       ),
                                     _buildSectionDivider(),
                                   ],
-                                  if (_hideScheduledCategory &&
-                                      scheduledJobs.isNotEmpty)
+                                  if (_hideScheduledCategory)
                                     _buildSectionDivider(),
                                   _buildSectionTitle(
                                     title: 'Earnings & Stats',
@@ -393,15 +425,13 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                                         'Summary of jobs completed and lifetime earnings.',
                                   ),
                                   const SizedBox(height: 12),
-                                  _buildEarningsStatsRow(
-                                    context,
-                                    caregiverData: caregiverData,
-                                    jobsCompleted: completedJobs,
-                                    thisWeekValue:
-                                        earningsSummary.thisWeekEarnings,
-                                    totalValue: earningsSummary.totalEarnings,
-                                    rating: ratingValue,
-                                  ),
+                                _buildEarningsStatsRow(
+                                  context,
+                                  caregiverData: caregiverData,
+                                  jobsCompleted: completedJobs,
+                                  earningsSummary: earningsSummary,
+                                  rating: ratingValue,
+                                ),
                                   const SizedBox(height: 22),
                                 ],
                               ),
@@ -579,7 +609,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     BuildContext context, {
     required Map<String, dynamic> caregiverData,
     required DocumentReference<Map<String, dynamic>> caregiverRef,
-    required bool hasAssignedBooking,
+    required bool hasBusyBooking,
     required bool isAvailable,
   }) {
     final actions = [
@@ -622,11 +652,20 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
       ),
     ];
 
-    final startDayEnabled = !hasAssignedBooking;
-    final startDayLabel = isAvailable ? 'End Day' : 'Start Day';
-    final startDayIcon = isAvailable
-        ? Icons.pause_circle_filled
-        : Icons.play_circle_fill;
+    final startDayMode = hasBusyBooking
+        ? _StartDayMode.busy
+        : (isAvailable ? _StartDayMode.endDay : _StartDayMode.startDay);
+    final startDayEnabled = startDayMode != _StartDayMode.busy;
+    final startDayLabel = switch (startDayMode) {
+      _StartDayMode.startDay => 'Start Day',
+      _StartDayMode.endDay => 'End Day',
+      _StartDayMode.busy => 'Busy',
+    };
+    final startDayIcon = switch (startDayMode) {
+      _StartDayMode.startDay => Icons.play_circle_fill,
+      _StartDayMode.endDay => Icons.pause_circle_filled,
+      _StartDayMode.busy => Icons.work_rounded,
+    };
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -657,21 +696,23 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                       ? () => _onStartDayTap(
                           context,
                           caregiverRef,
-                          hasAssignedBooking,
+                          hasBusyBooking,
                           isAvailable,
                         )
                       : null,
                   icon: Icon(startDayIcon, size: 18),
                   label: Text(startDayLabel),
                   style: ButtonStyle(
-                    backgroundColor: WidgetStateProperty.resolveWith<Color?>(
-                      (states) =>
-                          startDayEnabled ? _primaryBlue : Colors.grey.shade300,
-                    ),
-                    foregroundColor: WidgetStateProperty.resolveWith<Color?>(
-                      (states) =>
-                          startDayEnabled ? Colors.white : Colors.grey.shade600,
-                    ),
+                    backgroundColor: WidgetStateProperty.resolveWith<Color?>((
+                      states,
+                    ) {
+                      return _accentGold;
+                    }),
+                    foregroundColor: WidgetStateProperty.resolveWith<Color?>((
+                      states,
+                    ) {
+                      return Colors.black;
+                    }),
                     elevation: WidgetStateProperty.all(
                       startDayEnabled ? 1.0 : 0.0,
                     ),
@@ -695,7 +736,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
               if (!startDayEnabled) ...[
                 const SizedBox(height: 6),
                 Text(
-                  'Start day disabled while you have an assigned booking.',
+                  'Busy while you have an assigned/ongoing booking.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 12,
@@ -717,8 +758,8 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     if (todayJobs.isEmpty) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 24),
-        child: SizedBox(
-          height: _sectionCardHeight,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: _sectionCardHeight),
           child: _buildEmptyStateMessage(
             title: 'No jobs scheduled today',
             explanation: 'Your bookings will appear once they are scheduled.',
@@ -740,7 +781,6 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
                   job: job,
                   onView: () => _openBookingDetails(context, job.bookingId),
                   onTrack: () => _openTrackJob(context, job),
-                  matchHomeStyle: true,
                 ),
               ),
             ),
@@ -754,42 +794,40 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     List<CaregiverJob> scheduledJobs,
   ) {
     if (scheduledJobs.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    final cardWidth = _homeJobCardWidth(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildSectionTitle(
-          title: 'Scheduled Jobs',
-          hint: 'Upcoming assignments sorted by date.',
-        ),
-        const SizedBox(height: 12),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          physics: const BouncingScrollPhysics(),
-          padding: EdgeInsets.zero,
-          child: Row(
-            children: [
-              for (var i = 0; i < scheduledJobs.length; i++) ...[
-                if (i != 0) const SizedBox(width: 12),
-                SizedBox(
-                  width: cardWidth,
-                  child: CaregiverJobCard(
-                    job: scheduledJobs[i],
-                    onView: () => _openBookingDetails(
-                      context,
-                      scheduledJobs[i].bookingId,
-                    ),
-                    onTrack: () => _openTrackJob(context, scheduledJobs[i]),
-                    matchHomeStyle: true,
-                  ),
-                ),
-              ],
-            ],
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: _sectionCardHeight),
+          child: _buildEmptyStateMessage(
+            title: 'No scheduled bookings yet',
+            explanation:
+                'Scheduled bookings will appear here once they are booked.',
           ),
         ),
-      ],
+      );
+    }
+    final cardWidth = _homeJobCardWidth(context);
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      physics: const BouncingScrollPhysics(),
+      padding: EdgeInsets.zero,
+      child: Row(
+        children: [
+          for (var i = 0; i < scheduledJobs.length; i++) ...[
+            if (i != 0) const SizedBox(width: 12),
+            SizedBox(
+              width: cardWidth,
+              child: CaregiverJobCard(
+                job: scheduledJobs[i],
+                highlightScheduledStatusChip: true,
+                onView: () =>
+                    _openBookingDetails(context, scheduledJobs[i].bookingId),
+                onTrack: () => _openTrackJob(context, scheduledJobs[i]),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
@@ -797,48 +835,108 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     BuildContext context, {
     required Map<String, dynamic> caregiverData,
     required int jobsCompleted,
-    required double thisWeekValue,
-    required double totalValue,
+    required _EarningsSummary earningsSummary,
     required double rating,
   }) {
-    final stats = [
-      _StatQuickActionData(
-        icon: Icons.event_available_outlined,
-        value: jobsCompleted.toString(),
-        label: 'Jobs done',
-      ),
-      _StatQuickActionData(
-        icon: Icons.monetization_on,
-        value: 'RM ${thisWeekValue.toStringAsFixed(2)}',
-        label: 'This week',
-      ),
-      _StatQuickActionData(
-        icon: Icons.star_border,
-        value: rating.toStringAsFixed(1),
-        label: 'Rating',
-      ),
-      _StatQuickActionData(
-        icon: Icons.account_balance_wallet,
-        value: 'RM ${totalValue.toStringAsFixed(2)}',
-        label: 'Lifetime',
-      ),
-    ];
-    return Container(
-      decoration: _premiumCardDecoration(radius: 20),
-      padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildStatQuickActionRow(stats),
-          const SizedBox(height: 12),
-          _buildWithdrawButtonWithPendingCheck(
-            context,
-            caregiverData: caregiverData,
-            enabled: totalValue > 0,
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return const SizedBox.shrink();
+    final withdrawStream = FirebaseFirestore.instance
+        .collection('withdrawRequests')
+        .where('caregiverId', isEqualTo: userId)
+        .snapshots();
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: withdrawStream,
+      builder: (context, snapshot) {
+        final docs = snapshot.data?.docs ?? const [];
+
+        // Sum approved withdrawals for the current week (use stored weekKey if
+        // available; fallback to requestedAt).
+        double approvedWithdrawnThisWeek = 0;
+        QueryDocumentSnapshot<Map<String, dynamic>>? latestPending;
+        Timestamp? latestPendingAt;
+        for (final doc in docs) {
+          final data = doc.data();
+          final status = (data['status'] as String?)?.trim().toLowerCase() ?? '';
+          final requestedAt = data['requestedAt'] as Timestamp?;
+          if (status == 'pending') {
+            if (latestPendingAt == null ||
+                (requestedAt != null && requestedAt.compareTo(latestPendingAt) > 0)) {
+              latestPendingAt = requestedAt;
+              latestPending = doc;
+            }
+          }
+          if (status != 'approved') continue;
+          final storedWeekKey = (data['weekKey'] as String?)?.trim();
+          bool sameWeek = storedWeekKey == earningsSummary.weekKey;
+          if (!sameWeek && requestedAt != null) {
+            final dt = requestedAt.toDate();
+            final start = DateTime(dt.year, dt.month, dt.day)
+                .subtract(Duration(days: dt.weekday - 1));
+            final key = DateFormat('yyyy-MM-dd').format(start);
+            sameWeek = key == earningsSummary.weekKey;
+          }
+          if (!sameWeek) continue;
+          final amount = _toDouble(data['thisWeekAmount']) ??
+              _toDouble(data['payoutAmount']) ??
+              _toDouble(data['grossAmount']) ??
+              0.0;
+          approvedWithdrawnThisWeek += amount;
+        }
+
+        final availableThisWeek = (earningsSummary.thisWeekEarningsNet -
+                approvedWithdrawnThisWeek)
+            .clamp(0.0, double.infinity);
+
+        final hasActivePending = _isWithdrawDisabled(latestPending);
+        final helperText = hasActivePending && latestPending != null
+            ? _withdrawHelperText(latestPending)
+            : null;
+
+        final stats = [
+          _StatQuickActionData(
+            icon: Icons.event_available_outlined,
+            value: jobsCompleted.toString(),
+            label: 'Jobs done',
           ),
-        ],
-      ),
+          _StatQuickActionData(
+            icon: Icons.monetization_on,
+            value: 'RM ${availableThisWeek.toStringAsFixed(2)}',
+            label: 'This week',
+          ),
+          _StatQuickActionData(
+            icon: Icons.star_border,
+            value: rating.toStringAsFixed(1),
+            label: 'Rating',
+          ),
+          _StatQuickActionData(
+            icon: Icons.account_balance_wallet,
+            value: 'RM ${earningsSummary.totalEarningsNet.toStringAsFixed(2)}',
+            label: 'Lifetime',
+          ),
+        ];
+
+        return Container(
+          decoration: _premiumCardDecoration(radius: 20),
+          padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildStatQuickActionRow(stats),
+              const SizedBox(height: 12),
+              _buildWithdrawButton(
+                context,
+                caregiverData: caregiverData,
+                totalEarnings: availableThisWeek,
+                weekKey: earningsSummary.weekKey,
+                enabled: availableThisWeek > 0 && !hasActivePending,
+                helperText: helperText,
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -914,7 +1012,7 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
               color: _profileDarkText.withValues(alpha: 0.55),
             ),
             const SizedBox(width: 6),
-            Text(label),
+            Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
           ],
         ),
       );
@@ -1044,6 +1142,14 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     setState(() => _scheduleSectionHidden = false);
   }
 
+  void _collapseScheduledJobsSection() {
+    setState(() => _scheduledJobsSectionHidden = true);
+  }
+
+  void _unhideScheduledJobsSection() {
+    setState(() => _scheduledJobsSectionHidden = false);
+  }
+
   void _scheduleSheetExtentUpdate() {
     if (_sheetMeasurementScheduled) return;
     _sheetMeasurementScheduled = true;
@@ -1083,33 +1189,43 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     required String title,
     required String explanation,
   }) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        const Icon(Icons.flash_on, size: 32, color: _primaryBlue),
-        const SizedBox(height: 8),
-        Text(
-          title,
-          style: const TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w700,
-            color: Color(0xFF1B1D29),
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 360),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.flash_on, size: 32, color: _primaryBlue),
+              const SizedBox(height: 10),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: Color(0xFF1B1D29),
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                explanation,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+            ],
           ),
-          textAlign: TextAlign.center,
         ),
-        const SizedBox(height: 4),
-        Text(
-          explanation,
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 12, color: Colors.black54),
-        ),
-      ],
+      ),
     );
   }
 
   Widget _buildWithdrawButton(
     BuildContext context, {
     required Map<String, dynamic> caregiverData,
+    required double totalEarnings,
+    required String weekKey,
     required bool enabled,
     String? helperText,
   }) {
@@ -1120,7 +1236,12 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
           width: double.infinity,
           child: ElevatedButton(
             onPressed: enabled
-                ? () => _onWithdrawTap(context, caregiverData: caregiverData)
+                ? () => _onWithdrawTap(
+                      context,
+                      caregiverData: caregiverData,
+                      totalEarnings: totalEarnings,
+                      weekKey: weekKey,
+                    )
                 : null,
             style: ButtonStyle(
               backgroundColor: WidgetStateProperty.resolveWith<Color?>(
@@ -1151,47 +1272,6 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
           ),
         ],
       ],
-    );
-  }
-
-  Widget _buildWithdrawButtonWithPendingCheck(
-    BuildContext context, {
-    required Map<String, dynamic> caregiverData,
-    required bool enabled,
-  }) {
-    final caregiverId =
-        (caregiverData['caregiverId'] as String?) ??
-        FirebaseAuth.instance.currentUser?.uid;
-    if (caregiverId == null) {
-      return _buildWithdrawButton(
-        context,
-        caregiverData: caregiverData,
-        enabled: enabled,
-      );
-    }
-    final withdrawStream = FirebaseFirestore.instance
-        .collection('withdrawRequests')
-        .where('caregiverId', isEqualTo: caregiverId)
-        .orderBy('requestedAt', descending: true)
-        .limit(1)
-        .snapshots();
-    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: withdrawStream,
-      builder: (context, snapshot) {
-        final latestDoc = snapshot.data?.docs.isNotEmpty == true
-            ? snapshot.data!.docs.first
-            : null;
-        final hasActivePending = _isWithdrawDisabled(latestDoc);
-        final helperText = hasActivePending && latestDoc != null
-            ? _withdrawHelperText(latestDoc)
-            : null;
-        return _buildWithdrawButton(
-          context,
-          caregiverData: caregiverData,
-          enabled: enabled && !hasActivePending,
-          helperText: helperText,
-        );
-      },
     );
   }
 
@@ -1273,10 +1353,10 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
   Future<void> _onStartDayTap(
     BuildContext context,
     DocumentReference<Map<String, dynamic>> caregiverRef,
-    bool hasAssignedBooking,
+    bool hasBusyBooking,
     bool isAvailable,
   ) async {
-    if (hasAssignedBooking) return;
+    if (hasBusyBooking) return;
     final targetAvailability = !isAvailable;
     try {
       await caregiverRef.set({
@@ -1290,6 +1370,8 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
   Future<void> _onWithdrawTap(
     BuildContext context, {
     required Map<String, dynamic> caregiverData,
+    required double totalEarnings,
+    required String weekKey,
   }) async {
     bool hasPaymentDetails(Map<String, dynamic>? details) {
       if (details == null) return false;
@@ -1420,7 +1502,11 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
       var requestCreated = false;
       if (caregiverId != null) {
         try {
-          await _createWithdrawRequest(caregiverId);
+          await _createWithdrawRequest(
+            caregiverId,
+            weekKey: weekKey,
+            thisWeekAmount: totalEarnings,
+          );
           requestCreated = true;
         } catch (error, stack) {
           debugPrint('withdraw request failed: $error\n$stack');
@@ -1450,13 +1536,59 @@ class _CaregiverHomeScreenState extends State<CaregiverHomeScreen>
     }
   }
 
-  Future<void> _createWithdrawRequest(String caregiverId) async {
+  void _autoPromoteDueScheduledBookings(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  ) {
+    for (final doc in docs) {
+      if (_autoPromotedBookingIds.contains(doc.id)) continue;
+      final data = doc.data();
+      final status = (data['status'] as String?) ?? '';
+      final normalized = normalizeBookingStatus(status);
+      final isUpcoming =
+          normalized == 'SCHEDULED' ||
+          normalized == 'PENDING' ||
+          normalized == 'READY';
+      if (!isUpcoming) continue;
+
+      final date =
+          (data['scheduledDate'] as String?) ?? (data['date'] as String?) ?? '';
+      final time =
+          (data['startTime'] as String?) ?? (data['time'] as String?) ?? '';
+      final dueAware = deriveDueAwareStatus(
+        status: status,
+        date: date,
+        time: time,
+      );
+      if (dueAware != 'ASSIGNED') continue;
+
+      _autoPromotedBookingIds.add(doc.id);
+      doc.reference
+          .update({
+            'status': 'ASSIGNED',
+            'assignedAt': FieldValue.serverTimestamp(),
+          })
+          .catchError((_) => _autoPromotedBookingIds.remove(doc.id));
+    }
+  }
+
+  Future<void> _createWithdrawRequest(
+    String caregiverId, {
+    required String weekKey,
+    required double thisWeekAmount,
+  }) async {
+    double round2(double v) => (v * 100).roundToDouble() / 100;
     final ref = FirebaseFirestore.instance.collection('withdrawRequests').doc();
     await ref.set({
       'caregiverId': caregiverId,
       'status': 'pending',
       'requestedAt': FieldValue.serverTimestamp(),
       'requestedBy': caregiverId,
+      // This screen shows earnings already net of service + platform charges.
+      // Store the weekly amount requested so it can be deducted once approved.
+      'weekKey': weekKey,
+      'thisWeekAmount': round2(thisWeekAmount),
+      'payoutAmount': round2(thisWeekAmount),
+      'currency': 'MYR',
     });
   }
 }
@@ -1466,13 +1598,12 @@ class _QuickActionButtonData {
     required this.icon,
     required this.label,
     required this.onTap,
-    this.disabled = false,
   });
 
   final IconData icon;
   final String label;
   final VoidCallback onTap;
-  final bool disabled;
+  final bool disabled = false;
 }
 
 class _QuickActionButton extends StatelessWidget {
@@ -1529,6 +1660,8 @@ class _QuickActionButton extends StatelessWidget {
         Text(
           action.label,
           textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
           style: TextStyle(
             fontSize: 12,
             fontWeight: FontWeight.w700,
@@ -1645,15 +1778,19 @@ class _StatQuickAction extends StatelessWidget {
             Icon(data.icon, size: 18, color: _primaryBlue),
             Text(
               data.value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: const TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w700,
-                color: _primaryBlue,
+                color: _profileDarkText,
               ),
             ),
             Text(
               data.label,
               textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontSize: 11,
                 color: _profileDarkText.withValues(alpha: 0.6),
@@ -1678,7 +1815,12 @@ List<CaregiverJob> _extractTodayJobs(List<CaregiverJob> jobs) {
 
 List<CaregiverJob> _extractScheduledJobs(List<CaregiverJob> jobs) {
   final filtered = jobs
-      .where((job) => job.normalizedStatus == 'SCHEDULED')
+      .where(
+        (job) =>
+            job.normalizedStatus == 'SCHEDULED' &&
+            job.userId.trim().isNotEmpty &&
+            job.scheduledDate.trim().isNotEmpty,
+      )
       .toList();
   filtered.sort((a, b) {
     final aDate = a.scheduledDateTime ?? DateTime(0);
@@ -1690,13 +1832,15 @@ List<CaregiverJob> _extractScheduledJobs(List<CaregiverJob> jobs) {
 
 class _EarningsSummary {
   const _EarningsSummary({
-    required this.thisWeekEarnings,
-    required this.totalEarnings,
+    required this.weekKey,
+    required this.thisWeekEarningsNet,
+    required this.totalEarningsNet,
     required this.completedHours,
   });
 
-  final double thisWeekEarnings;
-  final double totalEarnings;
+  final String weekKey;
+  final double thisWeekEarningsNet;
+  final double totalEarningsNet;
   final double completedHours;
 }
 
@@ -1712,26 +1856,40 @@ _EarningsSummary _calculateEarnings(
   final endOfWeek = startOfWeek.add(
     const Duration(days: 6, hours: 23, minutes: 59),
   );
-  double thisWeek = 0;
-  double total = 0;
+  final weekKey = DateFormat('yyyy-MM-dd').format(startOfWeek);
+  double thisWeekNet = 0;
+  double totalNet = 0;
   double minutes = 0;
   for (final doc in docs) {
     final data = doc.data();
     final status = (data['status'] as String?)?.toUpperCase() ?? '';
     if (status != 'COMPLETED') continue;
-    final price =
-        (data['price'] as num?)?.toDouble() ??
-        (data['servicePrice'] as num?)?.toDouble() ??
-        0.0;
+    final paymentStatus = (data['paymentStatus'] as String?)?.toUpperCase() ?? '';
+    final hasBillCode =
+        (data['toyyibBillCode'] as String?)?.trim().isNotEmpty == true;
+    final bool isPaid = paymentStatus == 'PAID' || hasBillCode;
+    if (!isPaid) continue;
+    final servicePrice = _toDouble(data['servicePrice']);
+    final distanceCharge = _toDouble(data['distanceCharge']);
+    final fallbackPrice = _toDouble(data['price']) ?? 0.0;
+    final gross = (servicePrice != null || distanceCharge != null)
+        ? (servicePrice ?? 0.0) + (distanceCharge ?? 0.0)
+        : fallbackPrice;
+    const serviceFee = 1.0;
+    const platformRate = 0.07;
+    final afterServiceFee = (gross - serviceFee).clamp(0.0, double.infinity);
+    final platformFee =
+        (afterServiceFee * platformRate).clamp(0.0, double.infinity);
+    final net = (afterServiceFee - platformFee).clamp(0.0, double.infinity);
 
-    total += price;
+    totalNet += net;
     final scheduled = DateTime.tryParse(
-      (data['scheduledDate'] as String?) ?? '',
+      (data['date'] as String?) ?? (data['scheduledDate'] as String?) ?? '',
     );
     if (scheduled != null &&
         !scheduled.isBefore(startOfWeek) &&
         !scheduled.isAfter(endOfWeek)) {
-      thisWeek += price;
+      thisWeekNet += net;
     }
     final duration = _durationBetweenTimes(
       data['startTime'] as String?,
@@ -1742,8 +1900,9 @@ _EarningsSummary _calculateEarnings(
     }
   }
   return _EarningsSummary(
-    thisWeekEarnings: thisWeek,
-    totalEarnings: total,
+    weekKey: weekKey,
+    thisWeekEarningsNet: thisWeekNet,
+    totalEarningsNet: totalNet,
     completedHours: minutes / 60.0,
   );
 }
@@ -1755,6 +1914,16 @@ Duration? _durationBetweenTimes(String? start, String? end) {
   var diff = endTime.difference(startTime);
   if (diff.isNegative) diff = diff + const Duration(days: 1);
   return diff;
+}
+
+double? _toDouble(dynamic value) {
+  if (value is num) return value.toDouble();
+  if (value is String) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    return double.tryParse(trimmed.replaceAll(',', ''));
+  }
+  return null;
 }
 
 DateTime? _parseTime(String? input) {

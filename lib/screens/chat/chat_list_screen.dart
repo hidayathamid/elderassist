@@ -12,15 +12,22 @@ const double _chatCardRadius = 18;
 const double _chatCardRevealExtent = 118;
 const Color _chatMutedText = Color(0xFF1B1D29);
 const Color _chatPageBackground = Color(0xFFF7F8FA);
-const Color _chatCardBorder = Color(0xFFD7DCE3);
+const Color _chatCardBorder = Color(0xFFE1E4EA);
 
 final BoxShadow _chatCardShadow = BoxShadow(
-  color: Colors.black.withValues(alpha: 0.10),
-  blurRadius: 20,
-  offset: const Offset(0, 10),
+  color: Colors.black.withValues(alpha: 0.08),
+  blurRadius: 18,
+  offset: const Offset(0, 9),
 );
 
 final DateFormat _timeFormatter = DateFormat.jm();
+
+const TextStyle _sectionHeaderTextStyle = TextStyle(
+  fontWeight: FontWeight.w800,
+  fontSize: 14,
+  color: _chatMutedText,
+  letterSpacing: -0.15,
+);
 
 class ChatListScreen extends StatefulWidget {
   const ChatListScreen({
@@ -195,53 +202,6 @@ class _ChatListScreenState extends State<ChatListScreen> {
     return ChatService.unreadFromDocument(data, userId);
   }
 
-  Widget _buildUnreadBanner(int totalUnread) {
-    if (totalUnread == 0) return const SizedBox.shrink();
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Container(
-        decoration: BoxDecoration(
-        color: activityAccentBlue.withValues(alpha: 0.1),
-          borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: activityAccentBlue.withValues(alpha: 0.3)),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        child: Row(
-          children: [
-            Icon(Icons.mark_email_unread, size: 18, color: activityAccentBlue),
-            const SizedBox(width: 8),
-            Expanded(
-               child: Text(
-                'You have $totalUnread unread ${totalUnread == 1 ? 'message' : 'messages'}.',
-                 style: TextStyle(
-                   fontWeight: FontWeight.w600,
-                   color: activityPrimaryTextColor,
-                   fontSize: 13,
-                 ),
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: activityAccentBlue,
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: Text(
-                totalUnread.toString(),
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 11,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _buildDeleteBackground(VoidCallback onDelete) {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 1),
@@ -281,12 +241,10 @@ class _ChatListScreenState extends State<ChatListScreen> {
         stream: widget.stream,
         builder: (context, snapshot) {
           if (snapshot.hasError) {
-            return Center(
-              child: Text(
-                'Unable to load chats: ${snapshot.error}',
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 16, color: _chatMutedText),
-              ),
+            return _buildEmptyGuidance(
+              icon: Icons.chat,
+              headline: 'Unable to load chats',
+              explanation: snapshot.error?.toString() ?? 'Please try again.',
             );
           }
 
@@ -302,6 +260,21 @@ class _ChatListScreenState extends State<ChatListScreen> {
             if (_isChatDocHidden(doc) || _hiddenChatIds.contains(doc.id)) {
               return false;
             }
+            final data = doc.data();
+            final participants =
+                (data['participants'] as List?)?.whereType<String>().toList() ??
+                    <String>[];
+            if (participants.length != 2) {
+              return false;
+            }
+            if (!participants.contains(widget.userId)) {
+              return false;
+            }
+            final hasMessages = data['hasMessages'] == true;
+            final lastMessage = (data['lastMessage'] as String?)?.trim() ?? '';
+            if (!hasMessages && lastMessage.isEmpty) {
+              return false;
+            }
             final filter = widget.includeChat;
             if (filter != null && !filter(doc)) return false;
             return true;
@@ -314,23 +287,20 @@ class _ChatListScreenState extends State<ChatListScreen> {
             );
           }
 
-          return Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                StreamBuilder<int>(
-                  stream: _chatService.streamUnreadCountForParticipant(
-                    widget.userId,
-                  ),
-                  builder: (context, unreadSnapshot) =>
-                      _buildUnreadBanner(unreadSnapshot.data ?? 0),
-                ),
-                Expanded(
-                  child: ListView.separated(
-                    padding: const EdgeInsets.symmetric(
-                      vertical: 0,
-                      horizontal: 12,
+           return Padding(
+             padding: const EdgeInsets.only(top: 12),
+             child: Column(
+               crossAxisAlignment: CrossAxisAlignment.stretch,
+               children: [
+                 const Padding(
+                   padding: EdgeInsets.fromLTRB(16, 0, 16, 6),
+                   child: Text('Conversations', style: _sectionHeaderTextStyle),
+                 ),
+                 Expanded(
+                   child: ListView.separated(
+                     padding: const EdgeInsets.symmetric(
+                       vertical: 0,
+                       horizontal: 12,
                     ),
                     physics: const BouncingScrollPhysics(),
                     itemCount: visibleChats.length,
@@ -422,30 +392,33 @@ Widget _buildEmptyGuidance({
   required String headline,
   required String explanation,
 }) {
-  return Align(
-    alignment: Alignment.topCenter,
-    child: Padding(
-      padding: const EdgeInsets.only(top: 20),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 32, color: activityAccentBlue),
-          const SizedBox(height: 10),
-          Text(
-            headline,
-            style: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w700,
-              color: activityPrimaryTextColor,
+  return Center(
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 32, color: activityAccentBlue),
+            const SizedBox(height: 10),
+            Text(
+              headline,
+              style: const TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 15,
+                color: activityPrimaryTextColor,
+              ),
+              textAlign: TextAlign.center,
             ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            explanation,
-            style: const TextStyle(fontSize: 12, color: Colors.black54),
-            textAlign: TextAlign.center,
-          ),
-        ],
+            const SizedBox(height: 4),
+            Text(
+              explanation,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+          ],
+        ),
       ),
     ),
   );
@@ -486,7 +459,7 @@ class _ChatTile extends StatelessWidget {
         style: const TextStyle(
           fontSize: 11,
           color: Colors.white,
-          fontWeight: FontWeight.w600,
+          fontWeight: FontWeight.w800,
         ),
       ),
     );
@@ -523,7 +496,7 @@ class _ChatTile extends StatelessWidget {
             child: Row(
               children: [
                 DefaultProfileAvatar(
-                  radius: 24,
+                  radius: 22,
                   photoUrl: photoUrl.trim().isEmpty ? null : photoUrl,
                   label: displayName,
                 ),
@@ -538,7 +511,7 @@ class _ChatTile extends StatelessWidget {
                             child: Text(
                               displayName,
                               style: const TextStyle(
-                                fontWeight: FontWeight.w700,
+                                fontWeight: FontWeight.w800,
                                 fontSize: 13,
                                 color: activityPrimaryTextColor,
                               ),
@@ -552,9 +525,10 @@ class _ChatTile extends StatelessWidget {
                         lastMessage.isNotEmpty
                             ? lastMessage
                             : 'No messages yet',
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 12,
-                          color: Colors.black54,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.black.withValues(alpha: 0.58),
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -568,9 +542,10 @@ class _ChatTile extends StatelessWidget {
                   children: [
                     Text(
                       timeText,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 10,
-                        color: Colors.black54,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.black.withValues(alpha: 0.5),
                       ),
                     ),
                     const SizedBox(height: 6),

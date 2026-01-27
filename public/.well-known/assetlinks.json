@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.example.emergencies_disability_assistance_app",
+      "sha256_cert_fingerprints": [
+        "92:00:BF:B6:EC:FC:1C:1F:8E:F6:F3:F6:0E:0F:FF:03:8F:DF:75:09:9D:D2:E8:13:8F:8B:70:DE:5F:85:37:62"
+      ]
+    }
+  }
+]

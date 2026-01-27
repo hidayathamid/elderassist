@@ -30,8 +30,23 @@ final TextStyle _inputFieldHintStyle = TextStyle(
 
 class ProfileEditScreen extends StatefulWidget {
   final bool useCaregiverData;
+  final bool useAdminData;
+  final bool hidePhoneField;
+  final bool hideAddressField;
+  final bool hideBioField;
+  final bool showBudgetField;
+  final bool showPasswordResetField;
 
-  const ProfileEditScreen({super.key, this.useCaregiverData = false});
+  const ProfileEditScreen({
+    super.key,
+    this.useCaregiverData = false,
+    this.useAdminData = false,
+    this.hidePhoneField = false,
+    this.hideAddressField = false,
+    this.hideBioField = false,
+    this.showBudgetField = false,
+    this.showPasswordResetField = false,
+  });
 
   @override
   State<ProfileEditScreen> createState() => _ProfileEditScreenState();
@@ -41,11 +56,14 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   final _firstNameController = TextEditingController();
   final _emailController = TextEditingController();
   final _phoneController = TextEditingController();
+  final _budgetController = TextEditingController();
   final _addressController = TextEditingController();
   final _picker = ImagePicker();
   final _bioController = TextEditingController();
+  final _passwordMaskController = TextEditingController(text: '••••••••');
   String _bioInitial = '';
     String _addressInitial = '';
+  String _initialBudgetText = '';
   bool _isCaregiver = false;
 
   static final List<Country> _dialCodeCountries = [...countries]
@@ -63,6 +81,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   String? _emailError;
   String? _phoneError;
   String? _nameError;
+  String? _budgetError;
   String _selectedDialCode = '+60';
   String _currentCountryCode = 'MY';
   String _fullPhoneNumber = "";
@@ -74,15 +93,25 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   MapType _mapType = MapType.normal;
   bool _locating = false;
   static const LatLng _defaultMapPosition = LatLng(3.1390, 101.6869);
+  DocumentReference<Map<String, dynamic>>? _adminDocRef;
+
+  bool get _isAdmin => widget.useAdminData;
+  bool get _hidePhone => widget.hidePhoneField || widget.useAdminData;
+  bool get _hideAddress => widget.hideAddressField || widget.useAdminData;
+  bool get _hideBio => widget.hideBioField || widget.useAdminData;
+  bool get _showBudget => widget.showBudgetField && !_isAdmin && !_isCaregiver;
+  bool get _showPasswordReset =>
+      widget.showPasswordResetField && !_isAdmin && !_hidePhone;
   bool get _canSave =>
       _hasChanges &&
       !_saving &&
       _firstNameController.text.trim().isNotEmpty &&
       _emailController.text.trim().isNotEmpty &&
-      _phoneController.text.trim().isNotEmpty &&
+      (_hidePhone || _phoneController.text.trim().isNotEmpty) &&
       _nameError == null &&
       _emailError == null &&
-      _phoneError == null;
+      _phoneError == null &&
+      _budgetError == null;
 
   @override
   void initState() {
@@ -90,9 +119,19 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     _firstNameController.addListener(_onFieldChanged);
     _emailController.addListener(_onFieldChanged);
     _phoneController.addListener(_onFieldChanged);
+    _budgetController.addListener(_onFieldChanged);
     _bioController.addListener(_onFieldChanged);
     _addressController.addListener(_onFieldChanged);
     _loadProfile();
+  }
+
+  String? _validateBudget(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    final parsed = double.tryParse(trimmed);
+    if (parsed == null) return 'Enter a valid budget amount.';
+    if (parsed < 10 || parsed > 150) return 'Budget must be between 10 and 150.';
+    return null;
   }
 
   void _onFieldChanged() {
@@ -100,17 +139,23 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     final email = _emailController.text.trim();
     final phone = _phoneController.text.trim();
     final dialSegment = _normalizeDialCode(_selectedDialCode);
-    final national = phone.isNotEmpty ? _stripDialCode(phone, dialSegment) : '';
-    final candidate = national.isNotEmpty ? '$dialSegment$national' : '';
-    _fullPhoneNumber = _collapseRepeatedDialPrefix(candidate, dialSegment);
+    if (_hidePhone) {
+      _fullPhoneNumber = '';
+    } else {
+      final national = phone.isNotEmpty ? _stripDialCode(phone, dialSegment) : '';
+      final candidate = national.isNotEmpty ? '$dialSegment$national' : '';
+      _fullPhoneNumber = _collapseRepeatedDialPrefix(candidate, dialSegment);
+    }
     final bioValue = _bioController.text.trim();
     final addressValue = _addressController.text.trim();
+    final budgetValue = _budgetController.text.trim();
     final dirty =
         name != _initialName ||
         email != _initialEmail ||
-        _fullPhoneNumber != _initialPhoneFull ||
-        (_isCaregiver && bioValue != _bioInitial) ||
-        addressValue != _addressInitial;
+        (!_hidePhone && _fullPhoneNumber != _initialPhoneFull) ||
+        (_showBudget && budgetValue != _initialBudgetText) ||
+        (!_hideBio && _isCaregiver && bioValue != _bioInitial) ||
+        (!_hideAddress && addressValue != _addressInitial);
     final emailLower = email.toLowerCase();
     final emailError = email.isEmpty
         ? "Email is required"
@@ -119,17 +164,20 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
               ? "Email must end with @gmail.com"
               : null);
     final nameError = name.isEmpty ? "Name is required" : null;
-    final phoneError = phone.isEmpty ? "Phone is required" : null;
-    final dialError = _validatePhoneMatch();
+    final phoneError = _hidePhone ? null : (phone.isEmpty ? "Phone is required" : null);
+    final dialError = _hidePhone ? null : _validatePhoneMatch();
+    final budgetError = _showBudget ? _validateBudget(budgetValue) : null;
     if (dirty != _hasChanges ||
         emailError != _emailError ||
         nameError != _nameError ||
-        dialError != _phoneError) {
+        dialError != _phoneError ||
+        budgetError != _budgetError) {
       setState(() {
         _hasChanges = dirty;
         _emailError = emailError;
         _nameError = nameError;
         _phoneError = dialError ?? phoneError;
+        _budgetError = budgetError;
       });
     }
   }
@@ -235,7 +283,71 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   }
 
   Future<void> _loadProfile() async {
-    final uid = FirebaseAuth.instance.currentUser!.uid;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+    final uid = user.uid.trim();
+    if (uid.isEmpty) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+
+    if (_isAdmin) {
+      final fallbackName = (user.displayName ?? '').trim();
+      final fallbackEmail = (user.email ?? '').trim();
+
+      var adminRef = FirebaseFirestore.instance.collection('admin').doc(uid);
+      var adminSnap = await adminRef.get();
+      if (!adminSnap.exists && fallbackEmail.isNotEmpty) {
+        final query = await FirebaseFirestore.instance
+            .collection('admin')
+            .where('email', isEqualTo: fallbackEmail)
+            .limit(1)
+            .get();
+        if (query.docs.isNotEmpty) {
+          adminRef = query.docs.first.reference;
+          adminSnap = query.docs.first;
+        }
+      }
+
+      _adminDocRef = adminRef;
+      final data = adminSnap.data() ?? const <String, dynamic>{};
+
+      final name = ((data['name'] as String?) ?? fallbackName).trim();
+      final email = ((data['email'] as String?) ?? fallbackEmail).trim();
+      final photoUrl = ((data['photoUrl'] as String?) ?? '').trim();
+
+      _firstNameController.text = name;
+      _emailController.text = email;
+      _phoneController.text = '';
+      _fullPhoneNumber = '';
+      _budgetController.text = '';
+      _addressController.text = '';
+      _bioController.text = '';
+      _photoUrl = photoUrl;
+
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _initialName = _firstNameController.text.trim();
+          _initialEmail = _emailController.text.trim();
+          _initialPhoneFull = '';
+          _initialBudgetText = '';
+          _isCaregiver = false;
+          _bioInitial = '';
+          _addressInitial = '';
+          _hasChanges = false;
+          _emailError = null;
+          _nameError = null;
+          _phoneError = null;
+          _budgetError = null;
+        });
+      }
+      return;
+    }
+
     final snap = await FirebaseFirestore.instance
         .collection("users")
         .doc(uid)
@@ -282,8 +394,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         : dataMap;
 
     final name = (sourceData["name"] as String?) ?? '';
-    final fragments = name.split(" ");
-    _firstNameController.text = fragments.isNotEmpty ? fragments.first : "";
+    _firstNameController.text = name.trim();
     _emailController.text =
         (sourceData["email"] as String?) ??
         caregiverData?["email"] as String? ??
@@ -343,17 +454,29 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     _bioController.text = bioValue;
     _bioInitial = bioValue;
 
+    final budgetRaw = dataMap['budget'];
+    final double? budget = switch (budgetRaw) {
+      num v => v.toDouble(),
+      String v => double.tryParse(v.trim()),
+      _ => null,
+    };
+    _budgetController.text = budget == null
+        ? ''
+        : (budget % 1 == 0 ? budget.toStringAsFixed(0) : budget.toString());
+
     if (mounted) {
       setState(() {
         _loading = false;
         _initialName = _firstNameController.text.trim();
         _initialEmail = _emailController.text.trim();
         _initialPhoneFull = _fullPhoneNumber;
+        _initialBudgetText = _budgetController.text.trim();
         _isCaregiver = showCaregiverFields;
         _hasChanges = false;
         _emailError = null;
         _nameError = null;
         _phoneError = null;
+        _budgetError = null;
       });
     }
   }
@@ -492,15 +615,24 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     try {
       final bytes = await picked.readAsBytes();
       final ref = FirebaseStorage.instance.ref().child(
-        "users/$uid/profile_photo.jpg",
+        _isAdmin ? "admin/$uid/profile_photo.jpg" : "users/$uid/profile_photo.jpg",
       );
       await ref.putData(bytes, SettableMetadata(contentType: "image/jpeg"));
       final downloadUrl = await ref.getDownloadURL();
-      final targetCollection = _isCaregiver ? "caregivers" : "users";
-      await FirebaseFirestore.instance
-          .collection(targetCollection)
-          .doc(uid)
-          .set({"photoUrl": downloadUrl}, SetOptions(merge: true));
+      if (_isAdmin) {
+        final adminRef =
+            _adminDocRef ?? FirebaseFirestore.instance.collection('admin').doc(uid);
+        await adminRef.set(
+          {"photoUrl": downloadUrl},
+          SetOptions(merge: true),
+        );
+      } else {
+        final targetCollection = _isCaregiver ? "caregivers" : "users";
+        await FirebaseFirestore.instance
+            .collection(targetCollection)
+            .doc(uid)
+            .set({"photoUrl": downloadUrl}, SetOptions(merge: true));
+      }
       setState(() {
         _photoUrl = downloadUrl;
         _hasChanges = true;
@@ -525,15 +657,50 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
 
   Future<void> _saveProfile() async {
     final uid = FirebaseAuth.instance.currentUser!.uid;
-    final firstName = _firstNameController.text.trim();
+    final fullName = _firstNameController.text.trim();
     final email = _emailController.text.trim();
     final phone = _phoneController.text.trim();
     final bioValue = _bioController.text.trim();
 
-    if (firstName.isEmpty ||
-        email.isEmpty ||
-        phone.isEmpty ||
-        _emailError != null) {
+    if (fullName.isEmpty || email.isEmpty || _emailError != null) {
+      return;
+    }
+
+    if (_isAdmin) {
+      setState(() => _saving = true);
+      try {
+        final ref =
+            _adminDocRef ?? FirebaseFirestore.instance.collection('admin').doc(uid);
+        await ref.set(
+          {
+            'name': fullName,
+            'email': email,
+            'role': 'admin',
+            'updatedAt': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
+
+        if (!mounted) return;
+        setState(() {
+          _initialName = fullName;
+          _initialEmail = email;
+          _hasChanges = false;
+        });
+
+        await Future.delayed(const Duration(milliseconds: 350));
+        if (!mounted) return;
+        _returnToOverview();
+      } catch (e) {
+        if (!mounted) return;
+        debugPrint('Failed to save admin profile: $e');
+      } finally {
+        if (mounted) setState(() => _saving = false);
+      }
+      return;
+    }
+
+    if (!_hidePhone && phone.isEmpty) {
       return;
     }
 
@@ -560,7 +727,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         final coords = await _resolveAddressCoordinates(trimmedAddress);
         if (_isCaregiver) {
           final caregiverUpdate = <String, dynamic>{
-            "name": firstName,
+            "name": fullName,
             "email": email,
             "phone": phoneToSave,
             "bio": bioValue,
@@ -578,9 +745,20 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
               .set(caregiverUpdate, SetOptions(merge: true));
         } else {
           final userUpdate = <String, dynamic>{
-            "name": firstName,
+            "name": fullName,
             "email": email,
             "phone": phoneToSave,
+            if (_showBudget) ...() {
+              final trimmed = _budgetController.text.trim();
+              if (trimmed.isEmpty) {
+                return _initialBudgetText.isNotEmpty
+                    ? <String, dynamic>{"budget": FieldValue.delete()}
+                    : const <String, dynamic>{};
+              }
+              final parsed = double.tryParse(trimmed);
+              if (parsed == null) return const <String, dynamic>{};
+              return <String, dynamic>{"budget": parsed};
+            }(),
             if (defaultAddressLabel != null)
               "defaultAddress": defaultAddressLabel,
             if (coords != null) ...{
@@ -597,9 +775,10 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
       if (!mounted) return;
 
       setState(() {
-        _initialName = firstName;
+        _initialName = fullName;
         _initialEmail = email;
         _initialPhoneFull = _fullPhoneNumber;
+        _initialBudgetText = _budgetController.text.trim();
         _bioInitial = bioValue;
           if (_isCaregiver) {
             _initialAddress = trimmedAddress;
@@ -623,10 +802,102 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     _firstNameController.dispose();
     _emailController.dispose();
     _phoneController.dispose();
+    _budgetController.dispose();
     _addressController.dispose();
     _bioController.dispose();
+    _passwordMaskController.dispose();
     _mapController?.dispose();
     super.dispose();
+  }
+
+  static const Color _dialogBackground = Color(0xFFF7F8FA);
+  static const TextStyle _dialogTitleStyle = TextStyle(fontWeight: FontWeight.w700);
+  static const TextStyle _dialogContentStyle = TextStyle(color: Colors.black87);
+
+  Future<void> _showProfileStyleMessageDialog({
+    required String title,
+    required String message,
+  }) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => AlertDialog(
+        backgroundColor: _dialogBackground,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: Text(
+          title,
+          textAlign: TextAlign.center,
+          style: _dialogTitleStyle,
+        ),
+        content: Text(
+          message,
+          textAlign: TextAlign.center,
+          style: _dialogContentStyle,
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actionsPadding: const EdgeInsets.only(bottom: 12),
+        actions: [
+          SizedBox(
+            width: 120,
+            child: ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _accentGold,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                textStyle: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              child: const Text('OK'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _sendPasswordResetFromProfile() async {
+    final email = _emailController.text.trim();
+    if (email.isEmpty) {
+      await _showProfileStyleMessageDialog(
+        title: 'Password reset',
+        message: 'Please make sure your email is filled in first.',
+      );
+      return;
+    }
+
+    try {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      if (!mounted) return;
+      await _showProfileStyleMessageDialog(
+        title: 'Password reset',
+        message:
+            'If this email is registered, a password reset link has been sent to $email.',
+      );
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      if (e.code == 'user-not-found') {
+        await _showProfileStyleMessageDialog(
+          title: 'Password reset',
+          message:
+              'If this email is registered, a password reset link has been sent to $email.',
+        );
+        return;
+      }
+      await _showProfileStyleMessageDialog(
+        title: 'Password reset failed',
+        message: e.message ?? 'Unable to send reset email. Please try again.',
+      );
+    } catch (_) {
+      if (!mounted) return;
+      await _showProfileStyleMessageDialog(
+        title: 'Password reset failed',
+        message: 'Unable to send reset email. Please try again.',
+      );
+    }
   }
 
   void _returnToOverview() {
@@ -834,6 +1105,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
                               controller: _firstNameController,
                               hint: "Full Name",
                               helperText: _nameError,
+                              enabled: !_isAdmin,
                             ),
                             const SizedBox(height: 10),
                             _inputWithLabel(
@@ -842,83 +1114,102 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
                               hint: "Email",
                               keyboardType: TextInputType.emailAddress,
                               helperText: _emailError,
+                              enabled: !_isAdmin,
                             ),
                             const SizedBox(height: 10),
-                            _phoneField(),
-                            if (_isCaregiver) ...[
+                            if (!_hidePhone) _phoneField(),
+                            if (_showPasswordReset) ...[
+                              const SizedBox(height: 10),
+                              _passwordResetField(),
+                            ],
+                            if (_showBudget) ...[
+                              const SizedBox(height: 10),
+                              _inputWithLabel(
+                                label: "Budget",
+                                controller: _budgetController,
+                                hint: "10 - 150",
+                                keyboardType: TextInputType.number,
+                                helperText: _budgetError,
+                              ),
+                            ],
+                            if (!_hideBio && _isCaregiver) ...[
                               const SizedBox(height: 10),
                               _bioField(),
                             ],
-                            const SizedBox(height: 10),
-                            _addressField(),
+                            if (!_hideAddress) ...[
+                              const SizedBox(height: 10),
+                              _addressField(),
+                            ],
                             const SizedBox(height: 24),
                           ],
                         ),
                       ),
                     ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton(
-                          onPressed: _canSave ? _saveProfile : null,
-                          style: ButtonStyle(
-                            backgroundColor: WidgetStateProperty.resolveWith((
-                              states,
-                            ) {
-                              if (states.contains(WidgetState.disabled)) {
-                                return _hasChanges
-                                    ? _accentGold.withOpacity(0.8)
-                                    : Colors.grey.shade300;
-                              }
-                              return _accentGold;
-                            }),
-                            foregroundColor: WidgetStateProperty.resolveWith((
-                              states,
-                            ) {
-                              if (states.contains(WidgetState.disabled)) {
-                                return _hasChanges
-                                    ? Colors.black87
-                                    : Colors.grey.shade600;
-                              }
-                              return Colors.black;
-                            }),
-                            elevation: WidgetStateProperty.resolveWith<double>((
-                              states,
-                            ) {
-                              if (states.contains(WidgetState.disabled)) {
-                                return 0;
-                              }
-                              return 2;
-                            }),
-                            padding: WidgetStateProperty.all(
-                              const EdgeInsets.symmetric(vertical: 14),
-                            ),
-                            shape: WidgetStateProperty.all(
-                              RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(18),
+                    if (!_isAdmin)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            onPressed: _canSave ? _saveProfile : null,
+                            style: ButtonStyle(
+                              backgroundColor: WidgetStateProperty.resolveWith((
+                                states,
+                              ) {
+                                if (states.contains(WidgetState.disabled)) {
+                                  return _hasChanges
+                                      ? _accentGold.withOpacity(0.8)
+                                      : Colors.grey.shade300;
+                                }
+                                return _accentGold;
+                              }),
+                              foregroundColor: WidgetStateProperty.resolveWith((
+                                states,
+                              ) {
+                                if (states.contains(WidgetState.disabled)) {
+                                  return _hasChanges
+                                      ? Colors.black87
+                                      : Colors.grey.shade600;
+                                }
+                                return Colors.black;
+                              }),
+                              elevation:
+                                  WidgetStateProperty.resolveWith<double>((
+                                states,
+                              ) {
+                                if (states.contains(WidgetState.disabled)) {
+                                  return 0;
+                                }
+                                return 2;
+                              }),
+                              padding: WidgetStateProperty.all(
+                                const EdgeInsets.symmetric(vertical: 14),
+                              ),
+                              shape: WidgetStateProperty.all(
+                                RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(18),
+                                ),
                               ),
                             ),
+                            child: _saving
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.black,
+                                    ),
+                                  )
+                                : const Text(
+                                    "Save",
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
                           ),
-                          child: _saving
-                              ? const SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.black,
-                                  ),
-                                )
-                              : const Text(
-                                  "Save",
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
                         ),
                       ),
-                    ),
                   ],
                 ),
               ),
@@ -930,10 +1221,12 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     required TextEditingController controller,
     required String hint,
     TextInputType keyboardType = TextInputType.text,
+    bool enabled = true,
   }) {
     return TextField(
       controller: controller,
       keyboardType: keyboardType,
+      enabled: enabled,
       style: _inputFieldTextStyle,
       decoration: InputDecoration(
         hintText: hint,
@@ -966,6 +1259,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     required String hint,
     TextInputType keyboardType = TextInputType.text,
     String? helperText,
+    bool enabled = true,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -983,6 +1277,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           controller: controller,
           hint: hint,
           keyboardType: keyboardType,
+          enabled: enabled,
         ),
         if (helperText != null)
           Padding(
@@ -1110,6 +1405,54 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
             }
             _onFieldChanged();
           },
+        ),
+      ],
+    );
+  }
+
+  Widget _passwordResetField() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Password",
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: _profileDarkText,
+          ),
+        ),
+        const SizedBox(height: 6),
+        TextField(
+          controller: _passwordMaskController,
+          readOnly: true,
+          enableInteractiveSelection: false,
+          style: _inputFieldTextStyle,
+          decoration: InputDecoration(
+            filled: true,
+            fillColor: Colors.white,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 10,
+            ),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: BorderSide(color: Colors.grey[300]!),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: BorderSide(color: Colors.grey[300]!),
+            ),
+            focusedBorder: const OutlineInputBorder(
+              borderRadius: BorderRadius.all(Radius.circular(16)),
+              borderSide: BorderSide(color: _profileDarkText, width: 1.1),
+            ),
+            suffixIcon: TextButton(
+              onPressed: _sendPasswordResetFromProfile,
+              style: TextButton.styleFrom(foregroundColor: _profileDarkText),
+              child: const Icon(Icons.edit_rounded, size: 18),
+            ),
+          ),
         ),
       ],
     );

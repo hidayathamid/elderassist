@@ -1,24 +1,32 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:emergencies_disability_assistance_app/models/caregiver_model.dart';
-import 'package:emergencies_disability_assistance_app/models/user_model.dart';
-import 'package:emergencies_disability_assistance_app/screens/caregiver/caregiver_root_screen.dart';
-import 'package:emergencies_disability_assistance_app/screens/user/user_root_screen.dart';
 import 'package:emergencies_disability_assistance_app/services/auth_service.dart';
+import 'package:emergencies_disability_assistance_app/widgets/auth_wrapper.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
-import 'package:emergencies_disability_assistance_app/constants/service_options.dart';
 import 'package:emergencies_disability_assistance_app/widgets/service_chip.dart';
 import 'package:emergencies_disability_assistance_app/services/geocoding_service.dart';
-import 'touchdown_screen.dart';
-
 import 'login_screen.dart';
+
+enum _RegisterFlowStep {
+  role,
+  account,
+  services,
+  location,
+  caregiverIdentity,
+  clientBudget,
+  phone,
+  otp,
+}
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -28,8 +36,6 @@ class RegisterScreen extends StatefulWidget {
 }
 
 class _RegisterScreenState extends State<RegisterScreen> {
-  static const _totalSteps = 6;
-
   final AuthService _authService = AuthService();
   final _formKey = GlobalKey<FormState>();
 
@@ -41,6 +47,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final TextEditingController _phoneCtrl = TextEditingController();
   final TextEditingController _addressCtrl = TextEditingController();
   final TextEditingController _otpCtrl = TextEditingController();
+  final TextEditingController _budgetCtrl = TextEditingController();
+  final TextEditingController _idFrontCtrl = TextEditingController();
+  final TextEditingController _idBackCtrl = TextEditingController();
+  final TextEditingController _idSelfieCtrl = TextEditingController();
   final GlobalKey _addressFieldKey = GlobalKey();
   final FocusNode _addressFocus = FocusNode();
   final ScrollController _scrollController = ScrollController();
@@ -58,15 +68,18 @@ class _RegisterScreenState extends State<RegisterScreen> {
   LatLng? _pickedLatLng;
   Marker? _marker;
   GoogleMapController? _mapCtrl;
-  final Completer<GoogleMapController> _mapControllerCompleter = Completer();
+  Completer<GoogleMapController> _mapControllerCompleter = Completer();
   MapType _mapType = MapType.normal;
   bool _locating = false;
+  int _mapGeneration = 0;
+  int _locationRequestSerial = 0;
 
   bool _isRegistering = false;
   bool _isSendingCode = false;
   bool _isCheckingEmail = false;
   bool _otpSent = false;
   String? _verificationId;
+  bool _otpSessionExpired = false;
   bool _phoneHasError = false;
   String? _phoneMessage;
   Color _phoneMessageColor = Colors.black54;
@@ -75,6 +88,150 @@ class _RegisterScreenState extends State<RegisterScreen> {
   String? _otpError;
   Timer? _otpCooldownTimer;
   int _otpCooldownSeconds = 0;
+
+  Uint8List? _idFrontBytes;
+  String? _idFrontFileName;
+  Uint8List? _idBackBytes;
+  String? _idBackFileName;
+  Uint8List? _idSelfieBytes;
+  String? _idSelfieFileName;
+
+  Future<void> _pickIdentityPhoto({
+    required void Function(Uint8List bytes, String fileName) onPicked,
+  }) async {
+    final group = const XTypeGroup(
+      label: 'image',
+      extensions: ['jpg', 'jpeg', 'png'],
+    );
+    final XFile? picked = await openFile(
+      acceptedTypeGroups: [group],
+      confirmButtonText: 'Select',
+    );
+    if (picked == null) return;
+    final bytes = await picked.readAsBytes();
+    if (bytes.isEmpty) return;
+    onPicked(bytes, picked.name);
+  }
+
+  Future<void> _pickIdFront() async {
+    await _pickIdentityPhoto(
+      onPicked: (bytes, name) {
+        setState(() {
+          _idFrontBytes = bytes;
+          _idFrontFileName = name;
+          _idFrontCtrl.text = name;
+        });
+      },
+    );
+  }
+
+  Future<void> _pickIdBack() async {
+    await _pickIdentityPhoto(
+      onPicked: (bytes, name) {
+        setState(() {
+          _idBackBytes = bytes;
+          _idBackFileName = name;
+          _idBackCtrl.text = name;
+        });
+      },
+    );
+  }
+
+  Future<void> _pickIdSelfie() async {
+    await _pickIdentityPhoto(
+      onPicked: (bytes, name) {
+        setState(() {
+          _idSelfieBytes = bytes;
+          _idSelfieFileName = name;
+          _idSelfieCtrl.text = name;
+        });
+      },
+    );
+  }
+
+  String _inferImageExtension(String? fileName) {
+    final name = (fileName ?? '').trim().toLowerCase();
+    if (name.endsWith('.png')) return 'png';
+    if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'jpg';
+    return 'jpg';
+  }
+
+  String _inferContentType(String extension) {
+    return extension == 'png' ? 'image/png' : 'image/jpeg';
+  }
+
+  Future<Map<String, String>?> _uploadIdentityDocument({
+    required String caregiverId,
+    required Uint8List bytes,
+    required String? originalFileName,
+    required String documentName,
+  }) async {
+    final extension = _inferImageExtension(originalFileName);
+    final contentType = _inferContentType(extension);
+    final docRef = FirebaseFirestore.instance.collection('documents').doc();
+    final storagePath = 'documents/$caregiverId/${docRef.id}.$extension';
+    final ref = FirebaseStorage.instance.ref(storagePath);
+    await ref.putData(bytes, SettableMetadata(contentType: contentType));
+    final fileUrl = await ref.getDownloadURL();
+    final fileNameValue = (originalFileName ?? '').trim().isNotEmpty
+        ? originalFileName!.trim()
+        : '${docRef.id}.$extension';
+    await docRef.set({
+      'caregiverId': caregiverId,
+      'name': documentName,
+      'fileName': fileNameValue,
+      'status': false,
+      'fileUrl': fileUrl,
+      'storagePath': storagePath,
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    return {'id': docRef.id, 'name': documentName};
+  }
+
+  Future<void> _appendCaregiverDocuments(
+    String caregiverId,
+    List<Map<String, String>> docs,
+  ) async {
+    // No-op: caregiver applications are stored in `waitinglist` until verified.
+    // Document metadata lives in the `documents` collection for admin review.
+    return;
+  }
+
+  Future<void> _uploadCaregiverIdentityDocuments(String caregiverId) async {
+    if (_idFrontBytes == null ||
+        _idBackBytes == null ||
+        _idSelfieBytes == null) {
+      return;
+    }
+    final created = <Map<String, String>>[];
+    try {
+      final front = await _uploadIdentityDocument(
+        caregiverId: caregiverId,
+        bytes: _idFrontBytes!,
+        originalFileName: _idFrontFileName,
+        documentName: 'Identification card (Front)',
+      );
+      if (front != null) created.add(front);
+      final back = await _uploadIdentityDocument(
+        caregiverId: caregiverId,
+        bytes: _idBackBytes!,
+        originalFileName: _idBackFileName,
+        documentName: 'Identification card (Back)',
+      );
+      if (back != null) created.add(back);
+      final selfie = await _uploadIdentityDocument(
+        caregiverId: caregiverId,
+        bytes: _idSelfieBytes!,
+        originalFileName: _idSelfieFileName,
+        documentName: 'Selfie with identification card',
+      );
+      if (selfie != null) created.add(selfie);
+    } catch (_) {
+      // ignore upload failure (registration can still proceed)
+    }
+    await _appendCaregiverDocuments(caregiverId, created);
+  }
 
   @override
   void initState() {
@@ -103,6 +260,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
     _phoneCtrl,
     _addressCtrl,
     _otpCtrl,
+    _budgetCtrl,
+    _idFrontCtrl,
+    _idBackCtrl,
+    _idSelfieCtrl,
   ];
 
   void _onFieldChanged() => setState(() {});
@@ -121,6 +282,33 @@ class _RegisterScreenState extends State<RegisterScreen> {
     super.dispose();
   }
 
+  List<_RegisterFlowStep> get _flowSteps {
+    final steps = <_RegisterFlowStep>[
+      _RegisterFlowStep.role,
+      _RegisterFlowStep.account,
+      _RegisterFlowStep.services,
+      _RegisterFlowStep.location,
+    ];
+    final role = (_selectedRole ?? '').trim().toLowerCase();
+    if (role == 'caregiver') {
+      steps.add(_RegisterFlowStep.caregiverIdentity);
+    } else if (role.isNotEmpty) {
+      steps.add(_RegisterFlowStep.clientBudget);
+    }
+    steps.addAll(const [_RegisterFlowStep.phone, _RegisterFlowStep.otp]);
+    return steps;
+  }
+
+  int get _totalSteps => _flowSteps.length;
+
+  _RegisterFlowStep get _currentFlowStep => _flowSteps[_currentStep];
+
+  void _goToFlowStep(_RegisterFlowStep step) {
+    final idx = _flowSteps.indexOf(step);
+    if (idx == -1) return;
+    setState(() => _currentStep = idx);
+  }
+
   bool _isValidName(String value) {
     final trimmed = value.trim();
     if (trimmed.length < 2) return false;
@@ -134,7 +322,20 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }
 
   String? _passwordStrength(String value) {
-    if (value.length < 8) return 'Password must be at least 8 characters.';
+    final trimmed = value.trim();
+    if (trimmed.length < 16) {
+      return 'Password must be at least 16 characters.';
+    }
+    if (!RegExp(r'[A-Z]').hasMatch(trimmed)) {
+      return 'Password must include at least 1 uppercase letter.';
+    }
+    if (!RegExp(r'\d').hasMatch(trimmed)) {
+      return 'Password must include at least 1 number.';
+    }
+    // Any non-alphanumeric character counts as a symbol.
+    if (!RegExp(r'[^A-Za-z0-9]').hasMatch(trimmed)) {
+      return 'Password must include at least 1 symbol.';
+    }
     return null;
   }
 
@@ -143,7 +344,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
   double get _progress => (_currentStep + 1) / _totalSteps;
 
   Future<void> _autoDetectLocation() async {
+    final expectedSerial = _locationRequestSerial;
     try {
+      if (!mounted || _currentFlowStep != _RegisterFlowStep.location) return;
       setState(() => _locating = true);
       final enabled = await Geolocator.isLocationServiceEnabled();
       if (!enabled) {
@@ -162,15 +365,55 @@ class _RegisterScreenState extends State<RegisterScreen> {
       final pos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.best,
       );
+      if (!mounted ||
+          _currentFlowStep != _RegisterFlowStep.location ||
+          expectedSerial != _locationRequestSerial) {
+        return;
+      }
       final latLng = LatLng(pos.latitude, pos.longitude);
       await _placeMarker(latLng);
+      if (!mounted ||
+          _currentFlowStep != _RegisterFlowStep.location ||
+          expectedSerial != _locationRequestSerial) {
+        return;
+      }
       final controller = await _mapControllerCompleter.future;
-      controller.animateCamera(CameraUpdate.newLatLngZoom(latLng, 15));
+      try {
+        await controller.animateCamera(CameraUpdate.newLatLngZoom(latLng, 15));
+      } catch (_) {
+        // ignore map controller errors (can happen when navigating between steps)
+      }
     } catch (e) {
       _showSnack('Failed to detect location: $e');
     } finally {
-      setState(() => _locating = false);
+      if (mounted) setState(() => _locating = false);
     }
+  }
+
+  void _resetMapControllerState() {
+    _locationRequestSerial++;
+    _mapGeneration++;
+    _mapCtrl = null;
+    _mapControllerCompleter = Completer<GoogleMapController>();
+    _locating = false;
+  }
+
+  void _handleRoleSelected(String role) {
+    final normalized = role.trim().toLowerCase();
+    if (normalized.isEmpty) return;
+    final previous = (_selectedRole ?? '').trim().toLowerCase();
+    setState(() {
+      _selectedRole = normalized;
+      _roleError = null;
+      if (previous.isNotEmpty && previous != normalized) {
+        _selectedServices.clear();
+        _servicesError = null;
+        _pickedLatLng = null;
+        _marker = null;
+        _addressCtrl.clear();
+        _resetMapControllerState();
+      }
+    });
   }
 
   Future<void> _placeMarker(LatLng pos) async {
@@ -242,19 +485,29 @@ class _RegisterScreenState extends State<RegisterScreen> {
       Navigator.of(context).maybePop();
       return;
     }
+    final leavingLocation = _currentFlowStep == _RegisterFlowStep.location;
     setState(() => _currentStep--);
+    if (leavingLocation) {
+      _resetMapControllerState();
+    }
   }
 
   Future<void> _handleContinue() async {
     FocusScope.of(context).unfocus();
+
+    if (_currentFlowStep == _RegisterFlowStep.otp && _otpSessionExpired) {
+      await _sendOtp();
+      return;
+    }
+
     if (!_validateCurrentStep()) return;
 
-    if (_currentStep == 1) {
+    if (_currentFlowStep == _RegisterFlowStep.account) {
       final available = await _ensureEmailAvailable();
       if (!available) return;
     }
 
-    if (_currentStep == 4) {
+    if (_currentFlowStep == _RegisterFlowStep.phone) {
       final phoneOk = await _ensurePhoneAvailable();
       if (!phoneOk) return;
       await _sendOtp();
@@ -267,8 +520,15 @@ class _RegisterScreenState extends State<RegisterScreen> {
     }
 
     setState(() => _currentStep++);
-    if (_currentStep == 3) {
+    if (_currentFlowStep == _RegisterFlowStep.location) {
+      _resetMapControllerState();
+      final serial = _locationRequestSerial;
       await Future<void>.delayed(const Duration(milliseconds: 250));
+      if (!mounted ||
+          _currentFlowStep != _RegisterFlowStep.location ||
+          serial != _locationRequestSerial) {
+        return;
+      }
       _autoDetectLocation();
     }
   }
@@ -280,16 +540,16 @@ class _RegisterScreenState extends State<RegisterScreen> {
       _otpError = null;
     });
 
-    switch (_currentStep) {
-      case 0:
+    switch (_currentFlowStep) {
+      case _RegisterFlowStep.role:
         if (_selectedRole == null) {
           setState(() => _roleError = 'Please choose a role to continue.');
           return false;
         }
         return true;
-      case 1:
+      case _RegisterFlowStep.account:
         return _formKey.currentState?.validate() ?? false;
-      case 2:
+      case _RegisterFlowStep.services:
         if (_selectedServices.isEmpty) {
           setState(
             () => _servicesError = 'Select at least one service preference.',
@@ -297,7 +557,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
           return false;
         }
         return true;
-      case 3:
+      case _RegisterFlowStep.location:
         final valid = _formKey.currentState?.validate() ?? false;
         if (!valid) return false;
         if (_pickedLatLng == null) {
@@ -305,7 +565,23 @@ class _RegisterScreenState extends State<RegisterScreen> {
           return false;
         }
         return true;
-      case 4:
+      case _RegisterFlowStep.caregiverIdentity:
+        if (_idFrontBytes == null ||
+            _idBackBytes == null ||
+            _idSelfieBytes == null) {
+          _showSnack('Please upload all identification photos.');
+          return false;
+        }
+        return true;
+      case _RegisterFlowStep.clientBudget:
+        final value = _budgetCtrl.text.trim();
+        final parsed = double.tryParse(value);
+        if (parsed == null || parsed <= 0) {
+          _showSnack('Please enter a valid budget amount.');
+          return false;
+        }
+        return true;
+      case _RegisterFlowStep.phone:
         if (_fullPhoneNumber.trim().isEmpty) {
           setState(() {
             _phoneHasError = true;
@@ -315,55 +591,61 @@ class _RegisterScreenState extends State<RegisterScreen> {
           return false;
         }
         return true;
-      case 5:
+      case _RegisterFlowStep.otp:
         final hasVerification = _otpSent || _verificationId != null;
         if (!hasVerification) {
           setState(() => _otpError = 'Request a verification code first.');
           return false;
         }
-        if (_otpCtrl.text.trim().length != 6) {
+        if (!_otpSessionExpired && _otpCtrl.text.trim().length != 6) {
           setState(() => _otpError = 'Enter the 6-digit code.');
           return false;
         }
         return _formKey.currentState?.validate() ?? true;
-      default:
-        return true;
     }
   }
 
   bool _isCurrentStepReady() {
-    switch (_currentStep) {
-      case 0:
+    switch (_currentFlowStep) {
+      case _RegisterFlowStep.role:
         return _selectedRole != null;
-      case 1:
+      case _RegisterFlowStep.account:
         return _firstNameCtrl.text.trim().isNotEmpty &&
             _lastNameCtrl.text.trim().isNotEmpty &&
             _emailCtrl.text.trim().isNotEmpty &&
             _passwordCtrl.text.isNotEmpty &&
             _confirmPasswordCtrl.text.isNotEmpty;
-      case 2:
+      case _RegisterFlowStep.services:
         return _selectedServices.isNotEmpty;
-      case 3:
+      case _RegisterFlowStep.location:
         return _pickedLatLng != null && _addressCtrl.text.trim().isNotEmpty;
-      case 4:
+      case _RegisterFlowStep.caregiverIdentity:
+        return _idFrontBytes != null &&
+            _idBackBytes != null &&
+            _idSelfieBytes != null;
+      case _RegisterFlowStep.clientBudget:
+        return double.tryParse(_budgetCtrl.text.trim()) != null &&
+            (double.tryParse(_budgetCtrl.text.trim()) ?? 0) > 0;
+      case _RegisterFlowStep.phone:
         return _fullPhoneNumber.trim().isNotEmpty;
-      case 5:
+      case _RegisterFlowStep.otp:
+        if (_otpSessionExpired) return true;
         final hasVerification = _otpSent || _verificationId != null;
         return hasVerification && _otpCtrl.text.trim().length == 6;
-      default:
-        return false;
     }
   }
 
   Future<void> _sendOtp() async {
     if (_otpCooldownSeconds > 0) {
       _showSnack(
-          'Please try again in $_otpCooldownSeconds seconds before requesting another code.');
+        'Please try again in $_otpCooldownSeconds seconds before requesting another code.',
+      );
       return;
     }
     setState(() {
       _isSendingCode = true;
       _otpSent = false;
+      _otpSessionExpired = false;
       _verificationId = null;
     });
 
@@ -374,13 +656,15 @@ class _RegisterScreenState extends State<RegisterScreen> {
           debugPrint('verifyPhoneNumber: verificationCompleted');
         },
         verificationFailed: (e) {
-          debugPrint('verifyPhoneNumber: verificationFailed ${e.message}');
+          debugPrint(
+            'verifyPhoneNumber: verificationFailed code=${e.code} message=${e.message}',
+          );
           final msg = (e.message ?? '').contains('BILLING_NOT_ENABLED')
               ? 'We could not send the code. Please try again.'
               : 'We could not send the verification code. Please try again.';
           setState(() {
             _phoneHasError = true;
-            _phoneMessage = msg;
+            _phoneMessage = '$msg (${e.code})';
             _phoneMessageColor = Colors.red;
             _otpSent = false;
             _verificationId = null;
@@ -398,22 +682,22 @@ class _RegisterScreenState extends State<RegisterScreen> {
         codeSent: (verificationId, _) {
           debugPrint('verifyPhoneNumber: codeSent id=$verificationId');
           setState(() {
-      _verificationId = verificationId;
-      _otpSent = true;
-      _otpCtrl.clear();
-      _otpError = null;
-      _phoneHasError = false;
-      _phoneMessage = 'Verification code sent to $_fullPhoneNumber.';
+            _verificationId = verificationId;
+            _otpSent = true;
+            _otpCtrl.clear();
+            _otpError = null;
+            _phoneHasError = false;
+            _phoneMessage = 'Verification code sent to $_fullPhoneNumber.';
             _phoneMessageColor = Colors.green;
           });
-      Future.delayed(const Duration(milliseconds: 800), () {
+          Future.delayed(const Duration(milliseconds: 800), () {
             if (mounted) {
               setState(() {
                 _phoneMessage = null;
                 _phoneHasError = false;
                 _phoneMessageColor = Colors.black54;
-                _currentStep = 5;
               });
+              _goToFlowStep(_RegisterFlowStep.otp);
             }
           });
         },
@@ -474,12 +758,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
     required String title,
     required String message,
     String buttonText = 'Continue',
-    VoidCallback? onContinue,
+    FutureOr<void> Function()? onContinue,
   }) async {
     if (!mounted) return;
     const Color primaryColor = Color(0xFFF4B63D);
     await showDialog(
       context: context,
+      barrierDismissible: false,
       builder: (_) => AlertDialog(
         backgroundColor: Colors.white,
         title: Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
@@ -491,7 +776,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
             child: ElevatedButton(
               onPressed: () {
                 Navigator.of(context).pop();
-                onContinue?.call();
+                final result = onContinue?.call();
+                if (result is Future) {
+                  unawaited(result);
+                }
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: primaryColor,
@@ -602,23 +890,21 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
       if (_selectedRole == null) {
         _showSnack('Select a role first.');
-        setState(() => _currentStep = 0);
+        _goToFlowStep(_RegisterFlowStep.role);
         return;
       }
 
       final pwdMsg = _passwordStrength(pwd);
       if (pwdMsg != null) {
         _showSnack(pwdMsg);
-        setState(() => _currentStep = 1);
+        _goToFlowStep(_RegisterFlowStep.account);
         return;
       }
 
       if (_verificationId == null) {
         _showSnack('Please request and enter the verification code first.');
-        setState(() {
-          _currentStep = 5;
-          _otpError = 'Enter the code sent to your phone.';
-        });
+        setState(() => _otpError = 'Enter the code sent to your phone.');
+        _goToFlowStep(_RegisterFlowStep.otp);
         return;
       }
 
@@ -630,25 +916,37 @@ class _RegisterScreenState extends State<RegisterScreen> {
         await FirebaseAuth.instance.signInWithCredential(credential);
         await FirebaseAuth.instance.signOut();
       } on FirebaseAuthException catch (e) {
+        final message = (e.message ?? '').toLowerCase();
+        final code = e.code.toLowerCase();
+        final isExpired =
+            code.contains('session-expired') ||
+            message.contains('code has expired') ||
+            message.contains('session expired') ||
+            message.contains('expired');
         setState(() {
-          _otpError = e.message ?? 'Invalid code. Please try again.';
+          _otpSessionExpired = isExpired;
+          _otpError = isExpired
+              ? 'The verification code has expired. Tap "Resend code" to get a new one.'
+              : (e.message ?? 'Invalid code. Please try again.');
           _otpSent = true;
         });
         return;
       }
 
-          final trimmedAddress = _addressCtrl.text.trim();
-          final coords = await _resolveAddressCoordinates(trimmedAddress);
-          final res = await _authService.registerUser(
-            name: fullName,
-            email: email,
-            password: pwd,
-            role: _selectedRole ?? 'client',
-            phone: _fullPhoneNumber,
-            defaultAddress: trimmedAddress.isNotEmpty ? trimmedAddress : null,
-            lat: coords?.latitude,
-            lng: coords?.longitude,
-          );
+      final trimmedAddress = _addressCtrl.text.trim();
+      final coords = await _resolveAddressCoordinates(trimmedAddress);
+      final res = await _authService.registerUser(
+        name: fullName,
+        email: email,
+        password: pwd,
+        // Caregiver applicants are registered as normal users first. Their
+        // caregiver application stays in `waitinglist` until verified.
+        role: 'user',
+        phone: _fullPhoneNumber,
+        defaultAddress: trimmedAddress.isNotEmpty ? trimmedAddress : null,
+        lat: coords?.latitude,
+        lng: coords?.longitude,
+      );
 
       if (res == null) {
         _showSnack('Failed to register');
@@ -657,8 +955,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
       final uid = FirebaseAuth.instance.currentUser!.uid;
       final userRef = FirebaseFirestore.instance.collection('users').doc(uid);
-      final caregiverRef =
-          FirebaseFirestore.instance.collection('caregivers').doc(uid);
+      final waitingRef =
+          FirebaseFirestore.instance.collection('waitinglist').doc(uid);
       final extras = <String, dynamic>{
         'servicePreferences': _selectedServices,
         'phoneVerified': true,
@@ -666,29 +964,43 @@ class _RegisterScreenState extends State<RegisterScreen> {
       };
 
       if (_selectedRole == 'caregiver') {
-        extras['rating'] = 0.0;
-        await caregiverRef.update(extras);
+        await userRef.update(extras);
+        await waitingRef.set(
+          {
+            'userId': uid,
+            'name': fullName,
+            'email': email,
+            'phone': _fullPhoneNumber,
+            'defaultAddress': trimmedAddress.isNotEmpty ? trimmedAddress : null,
+            if (coords?.latitude != null) 'lat': coords!.latitude,
+            if (coords?.longitude != null) 'lng': coords!.longitude,
+            'servicePreferences': _selectedServices,
+            'verified': false,
+            'createdAt': FieldValue.serverTimestamp(),
+            'updatedAt': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
+        await _uploadCaregiverIdentityDocuments(uid);
       } else {
+        final budget = double.tryParse(_budgetCtrl.text.trim());
+        if (budget != null && budget > 0) {
+          extras['budget'] = budget;
+        }
         await userRef.update(extras);
       }
 
       if (!mounted) return;
-      final Widget destination;
-      if (res is CaregiverModel) {
-        destination = const CaregiverRootScreen();
-      } else if (res is UserModel) {
-        destination = const UserRootScreen();
-      } else {
-        destination = const TouchdownScreen();
-      }
+      await FirebaseAuth.instance.signOut();
+      if (!mounted) return;
       await _showDialogMessage(
         title: 'Registration Successful',
         message: 'Your ElderAssist account is ready.',
         buttonText: 'Login',
-        onContinue: () {
+        onContinue: () async {
           Navigator.pushAndRemoveUntil(
             context,
-            MaterialPageRoute(builder: (_) => destination),
+            MaterialPageRoute(builder: (_) => LoginScreen.prefilled(email)),
             (route) => false,
           );
         },
@@ -707,7 +1019,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         onContinue: () {
           Navigator.pushAndRemoveUntil(
             context,
-            MaterialPageRoute(builder: (_) => const TouchdownScreen()),
+            MaterialPageRoute(builder: (_) => const AuthWrapper()),
             (route) => false,
           );
         },
@@ -725,21 +1037,23 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }
 
   Widget _buildStepContent() {
-    switch (_currentStep) {
-      case 0:
+    switch (_currentFlowStep) {
+      case _RegisterFlowStep.role:
         return _buildRoleStep();
-      case 1:
+      case _RegisterFlowStep.account:
         return _buildAccountStep();
-      case 2:
+      case _RegisterFlowStep.services:
         return _buildServiceStep();
-      case 3:
+      case _RegisterFlowStep.location:
         return _buildLocationStep();
-      case 4:
+      case _RegisterFlowStep.caregiverIdentity:
+        return _buildCaregiverIdentityStep();
+      case _RegisterFlowStep.clientBudget:
+        return _buildClientBudgetStep();
+      case _RegisterFlowStep.phone:
         return _buildPhoneStep();
-      case 5:
+      case _RegisterFlowStep.otp:
         return _buildOtpStep();
-      default:
-        return const SizedBox.shrink();
     }
   }
 
@@ -756,14 +1070,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
               subtitle: 'Request care and assistance',
               icon: Icons.favorite_outline,
               isSelected: _selectedRole == 'user',
-              onTap: () => setState(() => _selectedRole = 'user'),
+              onTap: () => _handleRoleSelected('user'),
             ),
             _roleOption(
               title: 'Caregiver',
               subtitle: 'Provide professional support',
               icon: Icons.medical_services_outlined,
               isSelected: _selectedRole == 'caregiver',
-              onTap: () => setState(() => _selectedRole = 'caregiver'),
+              onTap: () => _handleRoleSelected('caregiver'),
             ),
           ],
         ),
@@ -817,6 +1131,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }
 
   Widget _buildAccountStep() {
+    final passwordValue = _passwordCtrl.text;
+    final passwordHelp = passwordValue.isEmpty
+        ? null
+        : _passwordStrength(passwordValue);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -914,10 +1232,16 @@ class _RegisterScreenState extends State<RegisterScreen> {
           },
         ),
         const SizedBox(height: 4),
-        const Text(
-          'Password must be at least 8 characters.',
-          style: TextStyle(color: Colors.black45),
-        ),
+        if (passwordValue.isEmpty)
+          const Text(
+            'Atleast contains 1 uppercase/number/symbol.',
+            style: TextStyle(color: Colors.black45),
+          )
+        else if (passwordHelp == null)
+          const Text(
+            'Password looks good.',
+            style: TextStyle(color: Colors.black45),
+          ),
         const SizedBox(height: 12),
         _labeledField(
           label: 'Confirm password',
@@ -962,35 +1286,72 @@ class _RegisterScreenState extends State<RegisterScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const SizedBox(height: 12),
-        const Text(
-          'Service preferences',
-          style: TextStyle(fontWeight: FontWeight.w600),
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          'Select at least one service preference.',
-          style: TextStyle(color: Colors.black54),
-        ),
-        const SizedBox(height: 16),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: kServiceOptions.map((service) {
-            final isSelected = _selectedServices.contains(service);
-            return ServiceChip(
-              label: service,
-              selected: isSelected,
-              onTap: () {
-                setState(() {
-                  if (isSelected) {
-                    _selectedServices.remove(service);
-                  } else {
-                    _selectedServices.add(service);
-                  }
-                });
-              },
+        const SizedBox(height: 4),
+        StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: FirebaseFirestore.instance
+              .collection('services')
+              .orderBy('name')
+              .snapshots(),
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
+              return Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Unable to load services. Please try again.',
+                  style: TextStyle(color: Colors.red.shade400),
+                ),
+              );
+            }
+            if (!snapshot.hasData) {
+              return const Align(
+                alignment: Alignment.centerLeft,
+                child: SizedBox(
+                  height: 22,
+                  width: 22,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              );
+            }
+            final names =
+                snapshot.data!.docs
+                    .map((d) => ((d.data()['name'] as String?) ?? '').trim())
+                    .where((n) => n.isNotEmpty)
+                    .toSet()
+                    .toList()
+                  ..sort();
+            if (names.isEmpty) {
+              return const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'No services available yet.',
+                  style: TextStyle(color: Colors.black54),
+                ),
+              );
+            }
+            return Wrap(
+              alignment: WrapAlignment.start,
+              runAlignment: WrapAlignment.start,
+              crossAxisAlignment: WrapCrossAlignment.start,
+              spacing: 8,
+              runSpacing: 8,
+              children: names.map((service) {
+                final isSelected = _selectedServices.contains(service);
+                return ServiceChip(
+                  label: service,
+                  selected: isSelected,
+                  onTap: () {
+                    setState(() {
+                      if (isSelected) {
+                        _selectedServices.remove(service);
+                      } else {
+                        _selectedServices.add(service);
+                      }
+                    });
+                  },
+                );
+              }).toList(),
             );
-          }).toList(),
+          },
         ),
         if (_servicesError != null) ...[
           const SizedBox(height: 12),
@@ -999,6 +1360,143 @@ class _RegisterScreenState extends State<RegisterScreen> {
             style: const TextStyle(color: Colors.red, fontSize: 13),
           ),
         ],
+      ],
+    );
+  }
+
+  InputDecoration _documentFieldDecoration({required String hintText}) {
+    return InputDecoration(
+      hintText: hintText,
+      hintStyle: const TextStyle(color: Colors.black38),
+      filled: true,
+      fillColor: Colors.white,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: BorderSide(color: Colors.grey[300]!),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: BorderSide(color: Colors.grey[300]!),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: const BorderSide(color: Colors.black87, width: 1.2),
+      ),
+      errorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: const BorderSide(color: Colors.red, width: 1.2),
+      ),
+      focusedErrorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: const BorderSide(color: Colors.red, width: 1.3),
+      ),
+    );
+  }
+
+  Widget _documentPickerField({
+    required String label,
+    required TextEditingController controller,
+    required VoidCallback onPick,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+        ),
+        const SizedBox(height: 6),
+        TextFormField(
+          controller: controller,
+          readOnly: true,
+          onTap: onPick,
+          decoration: _documentFieldDecoration(hintText: 'Select a file')
+              .copyWith(
+                suffixIcon: Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: IconButton(
+                    icon: const Icon(Icons.upload_file, size: 18),
+                    color: Colors.black87,
+                    onPressed: onPick,
+                  ),
+                ),
+              ),
+          validator: (value) {
+            if (value == null || value.trim().isEmpty) {
+              return 'Select a file.';
+            }
+            return null;
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCaregiverIdentityStep() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 6),
+        const Text(
+          'Upload your identification photos.',
+          style: TextStyle(color: Colors.black54),
+        ),
+        const SizedBox(height: 14),
+        _documentPickerField(
+          label: 'Front identification card',
+          controller: _idFrontCtrl,
+          onPick: _pickIdFront,
+        ),
+        const SizedBox(height: 12),
+        _documentPickerField(
+          label: 'Back identification card',
+          controller: _idBackCtrl,
+          onPick: _pickIdBack,
+        ),
+        const SizedBox(height: 12),
+        _documentPickerField(
+          label: 'Selfie holding identification card',
+          controller: _idSelfieCtrl,
+          onPick: _pickIdSelfie,
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          'Clear photos help us verify your caregiver account faster.',
+          style: TextStyle(color: Colors.black45),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildClientBudgetStep() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 6),
+        const Text(
+          'Set your budget so we can match the right caregivers.',
+          style: TextStyle(color: Colors.black54),
+        ),
+        const SizedBox(height: 14),
+        _labeledField(
+          label: 'Budget (RM)',
+          controller: _budgetCtrl,
+          hintText: 'e.g. 50',
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 14,
+            vertical: 14,
+          ),
+          validator: (value) {
+            final raw = (value ?? '').trim();
+            final parsed = double.tryParse(raw);
+            if (parsed == null || parsed <= 0) {
+              return 'Enter a valid budget amount.';
+            }
+            return null;
+          },
+        ),
       ],
     );
   }
@@ -1020,6 +1518,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
               ClipRRect(
                 borderRadius: BorderRadius.circular(24),
                 child: GoogleMap(
+                  key: ValueKey<int>(_mapGeneration),
                   initialCameraPosition: CameraPosition(
                     target: initialTarget,
                     zoom: _pickedLatLng == null ? 12 : 15,
@@ -1030,9 +1529,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   zoomControlsEnabled: false,
                   onMapCreated: (controller) {
                     _mapCtrl = controller;
-                    if (!_mapControllerCompleter.isCompleted) {
-                      _mapControllerCompleter.complete(controller);
-                    }
+                    _mapControllerCompleter = Completer<GoogleMapController>();
+                    _mapControllerCompleter.complete(controller);
                   },
                   markers: _marker != null ? {_marker!} : <Marker>{},
                   onTap: (pos) => _placeMarker(pos),
@@ -1264,9 +1762,19 @@ class _RegisterScreenState extends State<RegisterScreen> {
               ),
             ),
             onChanged: (phone) {
-              final number = phone.number.trim();
+              final rawNumber = phone.number.trim();
+              final dialCode = phone.countryCode.trim(); // e.g. +60
+              var national = rawNumber.replaceAll(RegExp(r'[^0-9]'), '');
+              if (phone.countryISOCode.toUpperCase() == 'MY') {
+                // Avoid +60012... when users enter Malaysian numbers with a leading 0.
+                national = national.replaceFirst(RegExp(r'^0+'), '');
+              }
+              final normalized = national.isEmpty
+                  ? ''
+                  : '${dialCode.startsWith('+') ? dialCode : '+$dialCode'}$national';
+
               setState(() {
-                _fullPhoneNumber = number.isEmpty ? '' : phone.completeNumber;
+                _fullPhoneNumber = normalized;
                 _phoneHasError = false;
                 _phoneMessage = null;
               });
@@ -1302,7 +1810,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
           keyboardType: TextInputType.number,
           maxLength: 6,
           validator: (value) {
-            if (_currentStep != 5) return null;
+            if (_currentFlowStep != _RegisterFlowStep.otp) return null;
             if (value == null || value.trim().length != 6) {
               return 'Enter the 6-digit code.';
             }
@@ -1386,19 +1894,31 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   String get _actionLabel {
     if (_isSendingCode) return 'Sending code...';
-    if (_currentStep == 4) return 'Send verification code';
+    if (_currentFlowStep == _RegisterFlowStep.phone) {
+      return 'Send verification code';
+    }
+    if (_currentFlowStep == _RegisterFlowStep.otp && _otpSessionExpired) {
+      return 'Resend code';
+    }
     if (_isLastStep) return 'Create account';
     return 'Continue';
   }
 
   @override
   Widget build(BuildContext context) {
+    final isExpiredResend =
+        _currentFlowStep == _RegisterFlowStep.otp && _otpSessionExpired;
+    final isOtpCooldownLocked =
+        (_currentFlowStep == _RegisterFlowStep.phone || isExpiredResend) &&
+        _otpCooldownSeconds > 0;
     final canSubmit =
-        _isCurrentStepReady() &&
+        (isExpiredResend
+            ? _fullPhoneNumber.trim().isNotEmpty
+            : _isCurrentStepReady()) &&
         !_isRegistering &&
         !_isSendingCode &&
         !_isCheckingEmail &&
-        !(_currentStep == 4 && _otpCooldownSeconds > 0);
+        !isOtpCooldownLocked;
     const Color primaryColor = Color(0xFFF4B63D);
     const Color disabledColor = Color(0xFFE5E5E5);
     final bool showLoader =
@@ -1468,9 +1988,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   child: LayoutBuilder(
                     builder: (context, constraints) {
                       final scrollPhysics =
-                          (_currentStep == 3 ||
-                              _currentStep == 4 ||
-                              _currentStep == 5)
+                          (_currentFlowStep == _RegisterFlowStep.location ||
+                              _currentFlowStep == _RegisterFlowStep.phone ||
+                              _currentFlowStep == _RegisterFlowStep.otp)
                           ? const NeverScrollableScrollPhysics()
                           : const BouncingScrollPhysics();
                       final bottomInset = MediaQuery.of(
@@ -1580,40 +2100,44 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }
 
   String get _stepTitle {
-    switch (_currentStep) {
-      case 0:
+    switch (_currentFlowStep) {
+      case _RegisterFlowStep.role:
         return 'Choose your role';
-      case 1:
+      case _RegisterFlowStep.account:
         return 'Let\'s create your account';
-      case 2:
+      case _RegisterFlowStep.services:
         return 'Service preferences';
-      case 3:
+      case _RegisterFlowStep.location:
         return 'Confirm your location';
-      case 4:
+      case _RegisterFlowStep.caregiverIdentity:
+        return 'Verify your identity';
+      case _RegisterFlowStep.clientBudget:
+        return 'Set your budget';
+      case _RegisterFlowStep.phone:
         return 'Verify your phone number';
-      case 5:
+      case _RegisterFlowStep.otp:
         return 'Enter the verification code';
-      default:
-        return '';
     }
   }
 
   String get _stepSubtitle {
-    switch (_currentStep) {
-      case 0:
+    switch (_currentFlowStep) {
+      case _RegisterFlowStep.role:
         return 'Tell us whether you are requesting care or providing it.';
-      case 1:
+      case _RegisterFlowStep.account:
         return 'Share your details so we can secure your account.';
-      case 2:
+      case _RegisterFlowStep.services:
         return 'Select the services that best describe your needs.';
-      case 3:
+      case _RegisterFlowStep.location:
         return 'We use your location to match nearby caregivers.';
-      case 4:
+      case _RegisterFlowStep.caregiverIdentity:
+        return 'Upload your identification photos for verification.';
+      case _RegisterFlowStep.clientBudget:
+        return 'Set a budget range for your bookings.';
+      case _RegisterFlowStep.phone:
         return 'We\'ll contact you for ElderAssist services.';
-      case 5:
+      case _RegisterFlowStep.otp:
         return 'Check your SMS inbox for the 6-digit code.';
-      default:
-        return '';
     }
   }
 }

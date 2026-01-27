@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../services/auth_notice.dart';
 import 'login_screen.dart';
 import 'register_screen.dart';
 
@@ -40,6 +41,19 @@ class _TouchdownScreenState extends State<TouchdownScreen> {
       backgroundColor: Color(0xFFF2EEFF),
     ),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final msg = AuthNotice.take();
+      if (msg == null || msg.isEmpty) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(msg)),
+      );
+    });
+  }
 
   @override
   void dispose() {

@@ -130,10 +130,12 @@ class CaregiverJobsScreen extends StatefulWidget {
     super.key,
     this.tabIndexListenable,
     this.tabIndex = 0,
+    this.initialCategoryIndex = 0,
   });
 
   final ValueListenable<int>? tabIndexListenable;
   final int tabIndex;
+  final int initialCategoryIndex;
 
   @override
   State<CaregiverJobsScreen> createState() => CaregiverJobsScreenState();
@@ -147,12 +149,18 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
   late final Animation<Offset> _entrySlide;
   bool _wasActive = false;
   final Set<String> _hiddenHistoryJobs = <String>{};
+  final Set<String> _autoPromotedBookingIds = <String>{};
   String? _resetSwipeFor;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: _tabs.length, vsync: this);
+    final clampedIndex = widget.initialCategoryIndex.clamp(0, _tabs.length - 1);
+    _tabController = TabController(
+      length: _tabs.length,
+      vsync: this,
+      initialIndex: clampedIndex,
+    );
     _entryController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 220),
@@ -163,14 +171,12 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
     );
     _entrySlide = Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero)
         .animate(
-          CurvedAnimation(
-            parent: _entryController,
-            curve: Curves.easeOutCubic,
-          ),
+          CurvedAnimation(parent: _entryController, curve: Curves.easeOutCubic),
         );
 
     _wasActive =
-        (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+        (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+        widget.tabIndex;
     widget.tabIndexListenable?.addListener(_handleTabChange);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -203,7 +209,16 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
       oldWidget.tabIndexListenable?.removeListener(_handleTabChange);
       widget.tabIndexListenable?.addListener(_handleTabChange);
       _wasActive =
-          (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+          (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+          widget.tabIndex;
+    }
+    if (oldWidget.initialCategoryIndex != widget.initialCategoryIndex) {
+      final nextIndex = widget.initialCategoryIndex
+          .clamp(0, _tabs.length - 1)
+          .toInt();
+      if (_tabController.index != nextIndex) {
+        _tabController.animateTo(nextIndex);
+      }
     }
   }
 
@@ -244,8 +259,9 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
         builder: (_) => TrackCaregiverScreen(
           bookingId: bookingId,
           caregiverName: caregiverName,
-          caregiverId:
-              job.caregiverId.trim().isNotEmpty ? job.caregiverId.trim() : caregiverId,
+          caregiverId: job.caregiverId.trim().isNotEmpty
+              ? job.caregiverId.trim()
+              : caregiverId,
           personId: job.personId.trim().isNotEmpty ? job.personId.trim() : null,
           showStatusUpdateButton: true,
           showActionFrontSheet: true,
@@ -257,7 +273,8 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
+    final uid = user?.uid.trim() ?? '';
+    if (uid.isEmpty) {
       return Scaffold(
         appBar: buildProfileStyleAppBar(title: 'Jobs'),
         backgroundColor: activityBackgroundColor,
@@ -274,7 +291,7 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
         StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
           stream: FirebaseFirestore.instance
               .collection('bookings')
-              .where('caregiverId', isEqualTo: user.uid)
+              .where('caregiverId', isEqualTo: uid)
               .orderBy('createdAt', descending: true)
               .snapshots(),
           builder: (context, snapshot) {
@@ -284,6 +301,7 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
 
             if (snapshot.connectionState == ConnectionState.waiting) {
               return _buildJobsContent(
+                uid,
                 _previewActiveJobs,
                 _previewUpcomingJobs,
                 _previewHistoryJobs,
@@ -292,12 +310,14 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
 
             if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
               return _buildJobsContent(
+                uid,
                 const <CaregiverJob>[],
                 const <CaregiverJob>[],
                 const <CaregiverJob>[],
               );
             }
 
+            _autoPromoteDueScheduledBookings(snapshot.data!.docs);
             final jobs = snapshot.data!.docs
                 .map((doc) => CaregiverJob.fromDoc(doc))
                 .whereType<CaregiverJob>()
@@ -306,31 +326,78 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
               final status = deriveDueAwareStatus(
                 status: job.status,
                 date: job.scheduledDate,
-                time: job.startTime.trim().isNotEmpty ? job.startTime : job.time,
+                time: job.startTime.trim().isNotEmpty
+                    ? job.startTime
+                    : job.time,
               );
-              return status == 'ASSIGNED';
+              return status == 'ASSIGNED' ||
+                  status == 'ONGOING' ||
+                  status == 'IN_PROGRESS' ||
+                  status == 'EMERGENCY_ALERT' ||
+                  status == 'NOTIFY' ||
+                  status == 'HANDLE_CLIENT';
             }).toList();
             final upcoming = jobs.where((job) {
               final status = deriveDueAwareStatus(
                 status: job.status,
                 date: job.scheduledDate,
-                time: job.startTime.trim().isNotEmpty ? job.startTime : job.time,
+                time: job.startTime.trim().isNotEmpty
+                    ? job.startTime
+                    : job.time,
               );
-              return status == 'SCHEDULED';
+              return status == 'SCHEDULED' ||
+                  status == 'PENDING' ||
+                  status == 'READY';
             }).toList();
             final history = jobs.where((job) {
               final status = normalizeBookingStatus(job.status);
               return _isHistoryStatus(status);
             }).toList();
 
-            return _buildJobsContent(active, upcoming, history);
+            return _buildJobsContent(uid, active, upcoming, history);
           },
         ),
       ),
     );
   }
 
+  void _autoPromoteDueScheduledBookings(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  ) {
+    for (final doc in docs) {
+      if (_autoPromotedBookingIds.contains(doc.id)) continue;
+      final data = doc.data();
+      final status = (data['status'] as String?) ?? '';
+      final normalized = normalizeBookingStatus(status);
+      final isUpcoming =
+          normalized == 'SCHEDULED' ||
+          normalized == 'PENDING' ||
+          normalized == 'READY';
+      if (!isUpcoming) continue;
+
+      final date =
+          (data['scheduledDate'] as String?) ?? (data['date'] as String?) ?? '';
+      final time =
+          (data['startTime'] as String?) ?? (data['time'] as String?) ?? '';
+      final dueAware = deriveDueAwareStatus(
+        status: status,
+        date: date,
+        time: time,
+      );
+      if (dueAware != 'ASSIGNED') continue;
+
+      _autoPromotedBookingIds.add(doc.id);
+      doc.reference
+          .update({
+            'status': 'ASSIGNED',
+            'assignedAt': FieldValue.serverTimestamp(),
+          })
+          .catchError((_) => _autoPromotedBookingIds.remove(doc.id));
+    }
+  }
+
   Widget _buildJobsContent(
+    String caregiverId,
     List<CaregiverJob> active,
     List<CaregiverJob> upcoming,
     List<CaregiverJob> history,
@@ -398,7 +465,7 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
                   jobs: active,
                   icon: Icons.bolt_rounded,
                   title: 'No active jobs yet',
-                  subtitle: 'Bookings you are assigned to will show up here.',
+                  subtitle: 'Ongoing bookings will show up here.',
                   onTrack: (job) => _openTrackJob(context, job),
                 ),
                 _JobTabContent(
@@ -406,7 +473,7 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
                   icon: Icons.calendar_month_outlined,
                   title: 'No upcoming assignments yet',
                   subtitle:
-                      'Once you receive a booking it will appear in this list.',
+                      'Assigned and scheduled bookings will appear in this list.',
                   onTrack: (job) => _openTrackJob(context, job),
                 ),
                 _buildHistoryTab(
@@ -448,11 +515,10 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
             Navigator.push(
               context,
               MaterialPageRoute(
-                builder: (_) =>
-                    ActivityBookingDetailsScreen(
-                      bookingId: job.bookingId,
-                      caregiverView: true,
-                    ),
+                builder: (_) => ActivityBookingDetailsScreen(
+                  bookingId: job.bookingId,
+                  caregiverView: true,
+                ),
               ),
             );
           },
@@ -519,12 +585,12 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
         backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         title: const Text(
-          'Remove from history',
+          'Delete this booking?',
           textAlign: TextAlign.center,
           style: _historyDialogTitleStyle,
         ),
         content: const Text(
-          'This only hides the booking from your history list.',
+          'This will remove the booking from your history.',
           textAlign: TextAlign.center,
           style: _historyDialogContentStyle,
         ),
@@ -563,7 +629,7 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
                 textStyle: const TextStyle(fontWeight: FontWeight.w700),
               ),
               child: const Text(
-                'Remove',
+                'Delete',
                 style: TextStyle(fontWeight: FontWeight.w700),
               ),
             ),
@@ -585,22 +651,22 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
     final bookingRef = FirebaseFirestore.instance
         .collection('bookings')
         .doc(job.bookingId);
-    batch.set(bookingRef, {'hidden': true}, SetOptions(merge: true));
-    if (job.userId.isNotEmpty) {
-      final userRef = FirebaseFirestore.instance
-          .collection('users')
-          .doc(job.userId)
-          .collection('bookings')
-          .doc(job.bookingId);
-      batch.set(userRef, {'hidden': true}, SetOptions(merge: true));
-    }
+    batch.set(
+      bookingRef,
+      {'hiddenForCaregiver': true},
+      SetOptions(merge: true),
+    );
     if (job.caregiverId.isNotEmpty) {
       final caregiverRef = FirebaseFirestore.instance
           .collection('caregivers')
           .doc(job.caregiverId)
           .collection('assignedBookings')
           .doc(job.bookingId);
-      batch.set(caregiverRef, {'hidden': true}, SetOptions(merge: true));
+      batch.set(
+        caregiverRef,
+        {'hiddenForCaregiver': true},
+        SetOptions(merge: true),
+      );
     }
     await batch.commit();
   }
@@ -639,11 +705,10 @@ class _JobTabContent extends StatelessWidget {
             Navigator.push(
               context,
               MaterialPageRoute(
-                builder: (_) =>
-                    ActivityBookingDetailsScreen(
-                      bookingId: job.bookingId,
-                      caregiverView: true,
-                    ),
+                builder: (_) => ActivityBookingDetailsScreen(
+                  bookingId: job.bookingId,
+                  caregiverView: true,
+                ),
               ),
             );
           },
@@ -668,37 +733,32 @@ class _EmptyState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Container(
-        margin: const EdgeInsets.only(top: 10),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 360),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: _jobsCardBorderColor),
-          boxShadow: const [_jobsCardShadow],
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 28, color: activityAccentBlue),
-            const SizedBox(height: 8),
-            Text(
-              title,
-              style: const TextStyle(
-                fontWeight: FontWeight.w800,
-                fontSize: 14,
-                color: activityPrimaryTextColor,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 32, color: activityAccentBlue),
+              const SizedBox(height: 10),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: activityPrimaryTextColor,
+                ),
+                textAlign: TextAlign.center,
               ),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 4),
-            Text(
-              subtitle,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 12, color: Colors.black54),
-            ),
-          ],
+              const SizedBox(height: 4),
+              Text(
+                subtitle,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+            ],
+          ),
         ),
       ),
     );

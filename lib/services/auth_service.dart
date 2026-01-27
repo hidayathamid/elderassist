@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import '../models/user_model.dart';
 import '../models/caregiver_model.dart';
+import '../models/admin_model.dart';
 
 class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
@@ -103,7 +104,53 @@ class AuthService {
       debugPrint('loginUser: signed in uid=$uid');
 
       try {
-        // Check CAREGIVER
+        // Check ADMIN
+        final adminDoc = await _firestore.collection("admin").doc(uid).get();
+        debugPrint('loginUser: adminDoc.exists=${adminDoc.exists} uid=$uid');
+        if (adminDoc.exists) {
+          return LoginResult.success(
+            AdminModel.safeFromMap(uid, adminDoc.data()),
+          );
+        }
+
+        final effectiveEmail = (cred.user?.email ?? email).trim();
+        if (effectiveEmail.isNotEmpty) {
+          final candidates = <String>{
+            effectiveEmail,
+            effectiveEmail.toLowerCase(),
+          }.where((e) => e.trim().isNotEmpty).toList();
+
+          for (final candidate in candidates) {
+            final adminQuery = await _firestore
+                .collection("admin")
+                .where("email", isEqualTo: candidate)
+                .limit(1)
+                .get();
+            if (adminQuery.docs.isEmpty) continue;
+
+            final doc = adminQuery.docs.first;
+            final data = doc.data();
+            // Try to "link" to uid for future lookups (safe no-op if rules deny).
+            try {
+              await _firestore.collection("admin").doc(uid).set(
+                {
+                  ...data,
+                  "email": candidate,
+                  "role": (data["role"] as String?) ?? "admin",
+                  "linkedFrom": doc.id,
+                },
+                SetOptions(merge: true),
+              );
+            } catch (e) {
+              debugPrint('loginUser: admin link-to-uid failed: $e');
+            }
+
+            return LoginResult.success(AdminModel.safeFromMap(uid, data));
+          }
+        }
+
+        // Check CAREGIVER (must come before user, since caregiver applicants are
+        // also stored in `users` and can otherwise be routed to the wrong role).
         final cgDoc = await _firestore.collection("caregivers").doc(uid).get();
         debugPrint('loginUser: caregiverDoc.exists=${cgDoc.exists} uid=$uid');
         if (cgDoc.exists) {
@@ -125,7 +172,7 @@ class AuthService {
         );
       }
 
-      debugPrint('loginUser: no user or caregiver doc for uid=$uid');
+      debugPrint('loginUser: no admin/user/caregiver doc for uid=$uid');
       return const LoginResult.signedInButRoleUnknown(errorCode: 'no-role');
     } on FirebaseAuthException catch (e, st) {
       debugPrint('loginUser: FirebaseAuthException code=${e.code} message=${e.message}');

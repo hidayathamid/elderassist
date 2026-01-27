@@ -31,11 +31,10 @@ const Color activityPrimaryTextColor = Color(0xFF1B1D29);
 const Color activityAccentBlue = Color(0xFF00A8A7);
 const Color activityButtonYellow = Color(0xFFF4B63D);
 const Color activitySegmentTrackColor = Colors.white;
-const Color activityIndicatorColor = Color(0xFFF4F5F7);
+const Color activityIndicatorColor = activityButtonYellow;
 const Color activityCancelButtonColor = Color(0xFFF4B63D);
 const double activitySegmentRadius = 26.0;
 const double _pillButtonHeight = 34.0;
-const Color _avatarFallbackBackground = Color(0xFFB5D4D4);
 const TextStyle _activityDialogTitleStyle = TextStyle(
   fontWeight: FontWeight.w700,
 );
@@ -66,11 +65,40 @@ const BorderRadius _activityCardBorderRadius = BorderRadius.all(
   Radius.circular(18),
 );
 
+double? _toDouble(dynamic value) {
+  if (value == null) return null;
+  if (value is num) return value.toDouble();
+  if (value is String) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    return double.tryParse(trimmed.replaceAll(',', ''));
+  }
+  return null;
+}
+
+int? _toInt(dynamic value) {
+  if (value == null) return null;
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    return int.tryParse(trimmed) ?? double.tryParse(trimmed)?.toInt();
+  }
+  return null;
+}
+
 class ActivityScreen extends StatefulWidget {
-  const ActivityScreen({super.key, this.tabIndexListenable, this.tabIndex = 3});
+  const ActivityScreen({
+    super.key,
+    this.tabIndexListenable,
+    this.tabIndex = 3,
+    this.initialCategoryIndex = 0,
+  });
 
   final ValueListenable<int>? tabIndexListenable;
   final int tabIndex;
+  final int initialCategoryIndex;
 
   @override
   State<ActivityScreen> createState() => _ActivityScreenState();
@@ -82,6 +110,7 @@ class _ActivityScreenState extends State<ActivityScreen>
   Animation<double>? _entryFade;
   Animation<Offset>? _entrySlide;
   bool _wasActive = false;
+  final Set<String> _autoPromotedBookingIds = <String>{};
 
   String? _resetSwipeFor;
   ActivityBooking? _pendingCancellationBooking;
@@ -108,6 +137,7 @@ class _ActivityScreenState extends State<ActivityScreen>
       case 'ASSIGNED':
       case 'NOTIFY':
       case 'HANDLE_CLIENT':
+      case 'EMERGENCY_ALERT':
         return BookingStatus.ongoing;
       case 'COMPLETED':
       case 'EMERGENCY':
@@ -206,7 +236,7 @@ class _ActivityScreenState extends State<ActivityScreen>
     final startTime = (data['startTime'] as String?) ?? '';
     final endTime = (data['endTime'] as String?) ?? '';
     final paymentMethod = (data['paymentMethod'] as String?) ?? 'Unknown';
-    final servicePrice = (data['servicePrice'] as num?)?.toDouble() ?? 0.0;
+    final servicePrice = _toDouble(data['servicePrice']) ?? 0.0;
     final rawStatus = ((data['status'] as String?) ?? 'PENDING')
         .toString()
         .toUpperCase();
@@ -229,7 +259,7 @@ class _ActivityScreenState extends State<ActivityScreen>
       paymentMethod: paymentMethod,
       servicePrice: servicePrice,
       status: _statusFromString(rawStatus),
-      notes: (data['notes'] as String?),
+      notes: (data['personNotes'] as String?) ?? (data['notes'] as String?),
       rawStatus: rawStatus,
       cancellationReason: cancellationReason,
     );
@@ -242,8 +272,9 @@ class _ActivityScreenState extends State<ActivityScreen>
   }) async {
     final futures = docs.map((doc) async {
       final data = doc.data();
-      final hidden = (data['hidden'] as bool?) ?? false;
-      if (hidden) return null;
+      final hiddenLegacy = (data['hidden'] as bool?) ?? false;
+      final hiddenForClient = (data['hiddenForClient'] as bool?) ?? false;
+      if (hiddenLegacy || hiddenForClient) return null;
       final rawStatus = (data['status'] as String?)?.trim().toUpperCase();
       final paymentStatus = (data['paymentStatus'] as String?)
           ?.trim()
@@ -290,7 +321,8 @@ class _ActivityScreenState extends State<ActivityScreen>
         _entrySlide ?? const AlwaysStoppedAnimation<Offset>(Offset.zero);
 
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
+    final uid = user?.uid.trim() ?? '';
+    if (uid.isEmpty) {
       return FadeTransition(
         opacity: entryFade,
         child: SlideTransition(
@@ -309,21 +341,31 @@ class _ActivityScreenState extends State<ActivityScreen>
         child: Scaffold(
           backgroundColor: activityBackgroundColor,
           appBar: buildProfileStyleAppBar(title: 'Activity'),
-          body: StreamBuilder<List<_EnrichedBooking>>(
-            stream: _enrichedBookingsStream(user.uid),
-            builder: (context, enrichedSnapshot) {
-              if (enrichedSnapshot.hasError) {
-                return Center(child: Text('Error: ${enrichedSnapshot.error}'));
-              }
-              final enriched = enrichedSnapshot.data;
-              if (enriched == null) {
-                if (_cachedEnriched != null) {
-                  return _buildActivityContent(_cachedEnriched!);
-                }
-                return const SizedBox.shrink();
-              }
-              _cachedEnriched = enriched;
-              return _buildActivityContent(enriched);
+          body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+            stream: FirebaseFirestore.instance
+                .collection('users')
+                .doc(uid)
+                .snapshots(),
+            builder: (context, userSnapshot) {
+              return StreamBuilder<List<_EnrichedBooking>>(
+                stream: _enrichedBookingsStream(uid),
+                builder: (context, enrichedSnapshot) {
+                  if (enrichedSnapshot.hasError) {
+                    return Center(
+                      child: Text('Error: ${enrichedSnapshot.error}'),
+                    );
+                  }
+                  final enriched = enrichedSnapshot.data;
+                  if (enriched == null) {
+                    if (_cachedEnriched != null) {
+                      return _buildActivityContent(_cachedEnriched!);
+                    }
+                    return const SizedBox.shrink();
+                  }
+                  _cachedEnriched = enriched;
+                  return _buildActivityContent(enriched);
+                },
+              );
             },
           ),
         ),
@@ -339,8 +381,11 @@ class _ActivityScreenState extends State<ActivityScreen>
       return const Center(child: Text('No items'));
     }
 
+    final bottomInset = MediaQuery.of(context).padding.bottom;
     return ListView.separated(
-      padding: const EdgeInsets.only(top: 0, bottom: 16),
+      // UserRootScreen uses `extendBody: true` with a floating bottom nav,
+      // so add extra bottom padding to keep the last card scrollable/visible.
+      padding: EdgeInsets.only(top: 0, bottom: bottomInset + 104),
       itemCount: list.length,
       separatorBuilder: (_, __) => const SizedBox(height: 12),
       itemBuilder: (_, index) {
@@ -442,12 +487,12 @@ class _ActivityScreenState extends State<ActivityScreen>
         backgroundColor: activityBackgroundColor,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         title: const Text(
-          'Remove from history',
+          'Delete this booking?',
           textAlign: TextAlign.center,
           style: _activityDialogTitleStyle,
         ),
         content: const Text(
-          'This only hides the booking from your history list.',
+          'This will remove the booking from your history.',
           textAlign: TextAlign.center,
           style: _activityDialogContentStyle,
         ),
@@ -486,7 +531,7 @@ class _ActivityScreenState extends State<ActivityScreen>
                 textStyle: const TextStyle(fontWeight: FontWeight.w700),
               ),
               child: const Text(
-                'Remove',
+                'Delete',
                 style: TextStyle(fontWeight: FontWeight.w700),
               ),
             ),
@@ -507,22 +552,22 @@ class _ActivityScreenState extends State<ActivityScreen>
     final bookingRef = FirebaseFirestore.instance
         .collection('bookings')
         .doc(entry.booking.id);
-    batch.set(bookingRef, {'hidden': true}, SetOptions(merge: true));
+    batch.set(
+      bookingRef,
+      {'hiddenForClient': true},
+      SetOptions(merge: true),
+    );
     if (entry.userId.isNotEmpty) {
       final userRef = FirebaseFirestore.instance
           .collection('users')
           .doc(entry.userId)
           .collection('bookings')
           .doc(entry.booking.id);
-      batch.set(userRef, {'hidden': true}, SetOptions(merge: true));
-    }
-    if (entry.caregiverId.isNotEmpty) {
-      final caregiverRef = FirebaseFirestore.instance
-          .collection('caregivers')
-          .doc(entry.caregiverId)
-          .collection('assignedBookings')
-          .doc(entry.booking.id);
-      batch.set(caregiverRef, {'hidden': true}, SetOptions(merge: true));
+      batch.set(
+        userRef,
+        {'hiddenForClient': true},
+        SetOptions(merge: true),
+      );
     }
     await batch.commit();
   }
@@ -531,8 +576,9 @@ class _ActivityScreenState extends State<ActivityScreen>
     if (list.isEmpty) {
       return const SizedBox.shrink();
     }
+    final bottomInset = MediaQuery.of(context).padding.bottom;
     return ListView.separated(
-      padding: const EdgeInsets.only(top: 0, bottom: 16),
+      padding: EdgeInsets.only(top: 0, bottom: bottomInset + 104),
       itemCount: list.length,
       separatorBuilder: (_, __) => const SizedBox(height: 12),
       itemBuilder: (_, index) {
@@ -558,8 +604,21 @@ class _ActivityScreenState extends State<ActivityScreen>
   }
 
   bool _isCancellable(ActivityBooking booking) {
-    final normalized = booking.rawStatus.toLowerCase();
-    return normalized != 'completed' && normalized != 'cancelled';
+    final normalized = booking.rawStatus
+        .trim()
+        .toUpperCase()
+        .replaceAll(' ', '_')
+        .replaceAll('-', '_')
+        .replaceAll('__', '_');
+    if (normalized == 'COMPLETED') return false;
+    if (normalized == 'CANCELLED' || normalized == 'CANCELED') return false;
+    if (normalized == 'ONGOING' ||
+        normalized == 'IN_PROGRESS' ||
+        normalized == 'NOTIFY' ||
+        normalized == 'HANDLE_CLIENT') {
+      return false;
+    }
+    return true;
   }
 
   Future<bool> _cancelBooking(ActivityBooking booking, String reason) async {
@@ -567,6 +626,23 @@ class _ActivityScreenState extends State<ActivityScreen>
     try {
       final callable = _functions.httpsCallable('cancelBooking');
       await callable.call({'bookingId': booking.id, 'reason': reason});
+      try {
+        final userId = FirebaseAuth.instance.currentUser?.uid ?? '';
+        if (userId.trim().isNotEmpty) {
+          final paymentSnap = await FirebaseFirestore.instance
+              .collection('payments')
+              .where('bookingId', isEqualTo: booking.id)
+              .where('userId', isEqualTo: userId)
+              .get();
+          if (paymentSnap.docs.isNotEmpty) {
+            final batch = FirebaseFirestore.instance.batch();
+            for (final doc in paymentSnap.docs) {
+              batch.set(doc.reference, {'verified': false}, SetOptions(merge: true));
+            }
+            await batch.commit();
+          }
+        }
+      } catch (_) {}
       if (!mounted) return false;
       messenger.showSnackBar(
         const SnackBar(content: Text('Cancellation request submitted.')),
@@ -717,26 +793,33 @@ class _ActivityScreenState extends State<ActivityScreen>
 
   Widget _buildEmptyState(IconData icon, String title, String subtitle) {
     return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.max,
-        children: [
-          Icon(icon, size: 32, color: activityAccentBlue),
-          const SizedBox(height: 10),
-          Text(
-            title,
-            style: const TextStyle(
-              fontWeight: FontWeight.w700,
-              fontSize: 15,
-              color: activityPrimaryTextColor,
-            ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 360),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 32, color: activityAccentBlue),
+              const SizedBox(height: 10),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: activityPrimaryTextColor,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                subtitle,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+            ],
           ),
-          const SizedBox(height: 4),
-          Text(
-            subtitle,
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 12, color: Colors.black54),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -752,24 +835,37 @@ class _ActivityScreenState extends State<ActivityScreen>
       return deriveDueAwareStatus(status: entry.status, date: date, time: time);
     }
 
-    bool isScheduled(_EnrichedBooking entry) => effectiveStatus(entry) == 'SCHEDULED';
+    bool isOngoing(_EnrichedBooking entry) {
+      final status = effectiveStatus(entry);
+      return status == 'ASSIGNED' ||
+          status == 'EMERGENCY_ALERT' ||
+          status == 'ONGOING' ||
+          status == 'IN_PROGRESS' ||
+          status == 'NOTIFY' ||
+          status == 'HANDLE_CLIENT';
+    }
+
+    bool isUpcoming(_EnrichedBooking entry) {
+      final status = effectiveStatus(entry);
+      return status == 'SCHEDULED' || status == 'PENDING' || status == 'READY';
+    }
 
     bool isHistory(_EnrichedBooking entry) =>
         entry.booking.status == BookingStatus.completed ||
         entry.booking.status == BookingStatus.cancelled;
 
     final active = enriched
-        .where((entry) => !isHistory(entry) && !isScheduled(entry))
+        .where((entry) => !isHistory(entry) && isOngoing(entry))
         .toList();
     final upcoming = enriched
-        .where((entry) => !isHistory(entry) && isScheduled(entry))
+        .where((entry) => !isHistory(entry) && isUpcoming(entry))
         .toList();
     final history = enriched.where(isHistory).toList();
 
     return Stack(
       children: [
         DefaultTabController(
-          initialIndex: 0,
+          initialIndex: widget.initialCategoryIndex.clamp(0, 2),
           length: 3,
           child: Column(
             children: [
@@ -845,7 +941,7 @@ class _ActivityScreenState extends State<ActivityScreen>
                         upcoming,
                         Icons.calendar_month_outlined,
                         'No upcoming bookings yet',
-                        'Schedule a caregiver to see it appear here.',
+                        'Assigned and scheduled bookings will appear here.',
                         isHistory: false,
                         showTrackFrontSheetOnDetails: false,
                       ),
@@ -1174,6 +1270,7 @@ class _ActivityScreenState extends State<ActivityScreen>
 
       final bookingsSub = bookingsStream.listen((snapshot) {
         latestBookings = snapshot.docs;
+        _autoPromoteDueScheduledBookings(snapshot.docs);
         emitIfReady();
       }, onError: controller.addError);
       final reviewsSub = reviewsStream.listen(
@@ -1195,6 +1292,41 @@ class _ActivityScreenState extends State<ActivityScreen>
         await reviewsSub.cancel();
       };
     });
+  }
+
+  void _autoPromoteDueScheduledBookings(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  ) {
+    for (final doc in docs) {
+      if (_autoPromotedBookingIds.contains(doc.id)) continue;
+      final data = doc.data();
+      final status = (data['status'] as String?) ?? '';
+      final normalized = normalizeBookingStatus(status);
+      final isUpcoming =
+          normalized == 'SCHEDULED' ||
+          normalized == 'PENDING' ||
+          normalized == 'READY';
+      if (!isUpcoming) continue;
+
+      final date =
+          (data['scheduledDate'] as String?) ?? (data['date'] as String?) ?? '';
+      final time =
+          (data['startTime'] as String?) ?? (data['time'] as String?) ?? '';
+      final dueAware = deriveDueAwareStatus(
+        status: status,
+        date: date,
+        time: time,
+      );
+      if (dueAware != 'ASSIGNED') continue;
+
+      _autoPromotedBookingIds.add(doc.id);
+      doc.reference
+          .update({
+            'status': 'ASSIGNED',
+            'assignedAt': FieldValue.serverTimestamp(),
+          })
+          .catchError((_) => _autoPromotedBookingIds.remove(doc.id));
+    }
   }
 }
 
@@ -1387,13 +1519,18 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
     final messenger = ScaffoldMessenger.of(context);
 
     try {
-      final caregiverId = widget.booking.caregiverId;
+      final caregiverId = widget.booking.caregiverId.trim();
       if (caregiverId.isEmpty) {
         _showSnackBar(context, 'Caregiver not assigned yet');
         return;
       }
 
-      final userId = _auth.userId;
+      final userId = (FirebaseAuth.instance.currentUser?.uid ?? _auth.userId)
+          .trim();
+      if (userId.isEmpty) {
+        _showSnackBar(context, 'Please sign in to start chat');
+        return;
+      }
       final navigator = Navigator.of(context);
       final caregiverName = await _loadCaregiverName();
 
@@ -1426,8 +1563,13 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
     final messenger = ScaffoldMessenger.of(context);
     try {
       final caregiverId = widget.booking.caregiverId;
+      final bookingId = widget.booking.id.trim();
       if (caregiverId.isEmpty) {
         _showSnackBar(context, 'Caregiver not assigned yet');
+        return;
+      }
+      if (bookingId.isEmpty) {
+        _showSnackBar(context, 'Booking not available yet');
         return;
       }
       final personId = widget.booking.personId;
@@ -1438,7 +1580,7 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
 
       await FirebaseFirestore.instance
           .collection('bookings')
-          .doc(widget.booking.id)
+          .doc(bookingId)
           .set({
             'trackingCaregiverId': caregiverId,
             if (personId.isNotEmpty) 'trackingPersonId': personId,
@@ -1449,7 +1591,7 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
       navigator.push(
         MaterialPageRoute(
           builder: (_) => TrackCaregiverScreen(
-            bookingId: widget.booking.id,
+            bookingId: bookingId,
             caregiverName: caregiverName,
             caregiverId: caregiverId,
             personId: personId.isNotEmpty ? personId : null,
@@ -1476,11 +1618,10 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) =>
-            ActivityBookingDetailsScreen(
-              bookingId: widget.booking.id,
-              showTrackFrontSheet: widget.showTrackFrontSheetOnDetails,
-            ),
+        builder: (_) => ActivityBookingDetailsScreen(
+          bookingId: widget.booking.id,
+          showTrackFrontSheet: widget.showTrackFrontSheetOnDetails,
+        ),
       ),
     );
   }
@@ -1507,18 +1648,20 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
     final messenger = ScaffoldMessenger.of(context);
     _showLoadingOverlay();
     try {
+      final caregiverId = widget.booking.caregiverId.trim();
+      if (caregiverId.isEmpty) {
+        _showSnackBar(context, 'Caregiver not assigned yet');
+        return;
+      }
       final caregiverMap =
           widget.caregiverData ??
           (await FirebaseFirestore.instance
                   .collection('caregivers')
-                  .doc(widget.booking.caregiverId)
+                  .doc(caregiverId)
                   .get())
               .data() ??
           <String, dynamic>{};
-      final caregiver = CaregiverModel.safeFromMap(
-        widget.booking.caregiverId,
-        caregiverMap,
-      );
+      final caregiver = CaregiverModel.safeFromMap(caregiverId, caregiverMap);
       final personProfile = _buildPersonProfile();
       final selectedAddress = _buildSelectedAddress(personProfile);
       final hasScheduledTimes =
@@ -1602,8 +1745,8 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
               selectedEntry?['street'],
         ) ??
         widget.booking.personAddress;
-    final latitude = (selectedEntry?['lat'] as num?)?.toDouble();
-    final longitude = (selectedEntry?['lng'] as num?)?.toDouble();
+    final latitude = _toDouble(selectedEntry?['lat']);
+    final longitude = _toDouble(selectedEntry?['lng']);
     final fallbackId = widget.booking.personId.isNotEmpty
         ? widget.booking.personId
         : widget.booking.id;
@@ -1614,7 +1757,7 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
     return PersonProfile(
       id: profileId,
       name: rawName,
-      age: (data['age'] as num?)?.toInt() ?? 0,
+      age: _toInt(data['age']) ?? 0,
       address: addressText,
       conditions: const [],
       photoUrl:
@@ -1648,10 +1791,9 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
           selectedEntry?['addressLine'] ??
           widget.booking.personAddress,
     );
-    final lat = (selectedEntry?['lat'] as num?)?.toDouble();
+    final lat = _toDouble(selectedEntry?['lat']);
     final long =
-        (selectedEntry?['lng'] as num?)?.toDouble() ??
-        (selectedEntry?['long'] as num?)?.toDouble();
+        _toDouble(selectedEntry?['lng']) ?? _toDouble(selectedEntry?['long']);
     final entryId = _stringValue(selectedEntry?['id']);
     final fallbackId = widget.booking.personId.isNotEmpty
         ? widget.booking.personId
@@ -1787,24 +1929,31 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
   }
 
   Future<String> _loadCaregiverName() async {
+    final caregiverId = widget.booking.caregiverId.trim();
+    if (caregiverId.isEmpty) return 'Caregiver';
     final doc = await FirebaseFirestore.instance
         .collection('caregivers')
-        .doc(widget.booking.caregiverId)
+        .doc(caregiverId)
         .get();
     return doc.data()?['name'] as String? ?? 'Caregiver';
   }
 
   List<_ActionConfig> _actionButtons(BuildContext context) {
     final alreadyReviewed = widget.hasReview;
+    final caregiverId = widget.booking.caregiverId.trim();
+    final canChat = caregiverId.isNotEmpty;
     final chatButton = _ActionConfig(
       label: 'Chat',
       icon: Icons.chat_bubble_outline,
-      onPressed: _isChatting ? null : () => _startChat(context),
+      onPressed: (canChat && !_isChatting) ? () => _startChat(context) : null,
       kind: _ActionButtonKind.circle,
-      badgeStream: _chatService.streamUnreadCountForConversation(
-        participantId: _auth.userId,
-        otherUserId: widget.booking.caregiverId,
-      ),
+      enabled: canChat,
+      badgeStream: canChat
+          ? _chatService.streamUnreadCountForConversation(
+              participantId: _auth.userId,
+              otherUserId: caregiverId,
+            )
+          : null,
     );
 
     final normalizedStatus = widget.booking.rawStatus
@@ -1815,7 +1964,8 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
         .replaceAll('__', '_');
     final isScheduled =
         normalizedStatus == 'SCHEDULED' || normalizedStatus == 'PENDING';
-    final isAssigned = normalizedStatus == 'ASSIGNED';
+    final isAssigned =
+        normalizedStatus == 'ASSIGNED' || normalizedStatus == 'EMERGENCY_ALERT';
     final isOngoing =
         normalizedStatus == 'ONGOING' ||
         normalizedStatus == 'IN_PROGRESS' ||
@@ -1868,6 +2018,11 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
           icon: Icons.navigation_outlined,
           tone: _PillTone.teal,
         ),
+        _ActionConfig(
+          label: 'View Details',
+          onPressed: () => _openDetails(context),
+          icon: Icons.info_outline,
+        ),
         chatButton,
       ];
     }
@@ -1916,10 +2071,15 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
       return _buildCard(context, widget.caregiverData!, widget.userData);
     }
 
+    final caregiverId = widget.booking.caregiverId.trim();
+    if (caregiverId.isEmpty) {
+      return _buildCard(context, const {}, widget.userData);
+    }
+
     return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       future: FirebaseFirestore.instance
           .collection('caregivers')
-          .doc(widget.booking.caregiverId)
+          .doc(caregiverId)
           .get(),
       builder: (context, caregiverSnapshot) {
         final caregiverData = caregiverSnapshot.data?.data() ?? {};
@@ -1969,26 +2129,10 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
           children: [
             Row(
               children: [
-                CircleAvatar(
+                DefaultProfileAvatar(
                   radius: 22,
-                  backgroundImage: hasPhoto
-                      ? NetworkImage(caregiverPhoto!)
-                      : null,
-                  backgroundColor: hasPhoto
-                      ? Colors.grey[200]
-                      : _avatarFallbackBackground,
-                  child: hasPhoto
-                      ? null
-                      : Text(
-                          caregiverName.isNotEmpty
-                              ? caregiverName[0].toUpperCase()
-                              : '?',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 12,
-                            color: Colors.black54,
-                          ),
-                        ),
+                  photoUrl: caregiverPhoto,
+                  label: caregiverName,
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -2084,17 +2228,27 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
-                color: Colors.grey[100],
+                color: activityButtonYellow,
                 borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: activityButtonYellow.withValues(alpha: 0.55),
+                ),
               ),
               child: Row(
                 children: [
-                  DefaultProfileAvatar(
-                    radius: 14,
-                    photoUrl: personProfile.photoUrl.trim().isNotEmpty
-                        ? personProfile.photoUrl.trim()
-                        : null,
-                    label: personName,
+                  Container(
+                    padding: const EdgeInsets.all(1.6),
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.white,
+                    ),
+                    child: DefaultProfileAvatar(
+                      radius: 14,
+                      photoUrl: personProfile.photoUrl.trim().isNotEmpty
+                          ? personProfile.photoUrl.trim()
+                          : null,
+                      label: personName,
+                    ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
@@ -2113,18 +2267,24 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
                           Text(
                             personLabel!,
                             style: const TextStyle(
-                              fontSize: 9,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500,
                               color: Colors.black54,
                             ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ],
                         const SizedBox(height: 2),
                         Text(
                           personAddress,
                           style: const TextStyle(
-                            fontSize: 9,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
                             color: Colors.black54,
                           ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ],
                     ),
@@ -2183,18 +2343,38 @@ class _StatusChip extends StatelessWidget {
   final String status;
 
   String get _normalized => status.trim().toLowerCase();
+  bool get _isEmergency =>
+      _normalized == 'emergency_alert' ||
+      _normalized == 'emergency alert' ||
+      _normalized == 'emergency';
+
+  bool get _isScheduledLike =>
+      _normalized == 'scheduled' ||
+      _normalized == 'pending' ||
+      _normalized == 'ready';
+
+  bool get _isOngoingLike =>
+      _normalized == 'ongoing' ||
+      _normalized == 'in_progress' ||
+      _normalized == 'notify' ||
+      _normalized == 'handle_client';
 
   Color get _dotColor {
-    return switch (_normalized) {
-      'ongoing' || 'in_progress' => Colors.blue.shade700,
-      'completed' || 'assigned' => Colors.green.shade700,
-      'cancelled' => Colors.red.shade700,
-      _ => Colors.grey.shade600,
-    };
+    if (_isScheduledLike) return activityButtonYellow;
+    if (_isEmergency) return Colors.red.shade700;
+    if (_isOngoingLike) return Colors.blue.shade700;
+    if (_normalized == 'completed' || _normalized == 'assigned') {
+      return Colors.green.shade700;
+    }
+    if (_normalized == 'cancelled' || _normalized == 'canceled') {
+      return Colors.red.shade700;
+    }
+    return Colors.grey.shade600;
   }
 
   String get _label {
     return switch (_normalized) {
+      _ when _isEmergency => 'Emergency alert',
       'ongoing' || 'in_progress' => 'Ongoing',
       'completed' => 'Completed',
       'cancelled' => 'Cancelled',

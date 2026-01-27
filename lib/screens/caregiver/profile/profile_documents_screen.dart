@@ -12,16 +12,12 @@ import 'profile_documents_edit_screen.dart';
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _profileDarkText60 = Color(0x991B1D29);
 const Color _tealAccent = Color(0xFF00A8A7);
+const Color _accentGold = Color(0xFFF4B63D);
 
 const TextStyle _appBarTitleStyle = TextStyle(
   color: _profileDarkText,
   fontSize: 18,
   fontWeight: FontWeight.w600,
-);
-const TextStyle _sectionHintStyle = TextStyle(
-  fontSize: 15,
-  fontWeight: FontWeight.w600,
-  color: _profileDarkText,
 );
 const TextStyle _documentTitleStyle = TextStyle(
   fontSize: 14,
@@ -66,6 +62,7 @@ class ProfileDocumentsScreen extends StatefulWidget {
 
 class _ProfileDocumentsScreenState extends State<ProfileDocumentsScreen> {
   Stream<QuerySnapshot<Map<String, dynamic>>>? _documentsStream;
+  static const double _emptyStateHeight = 232;
 
   @override
   void initState() {
@@ -257,33 +254,51 @@ class _ProfileDocumentsScreenState extends State<ProfileDocumentsScreen> {
     );
   }
 
-  Widget _buildDocumentsEmptyState() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: const [
-          Icon(Icons.description_outlined, size: 32, color: _tealAccent),
-          SizedBox(height: 10),
-          Text(
-            'No documents yet',
-            style: TextStyle(
-              fontWeight: FontWeight.w700,
-              fontSize: 15,
-              color: _profileDarkText,
+  Widget _buildCenteredEmptyMessage({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) {
+    return SizedBox(
+      height: _emptyStateHeight,
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 32, color: _tealAccent),
+                const SizedBox(height: 10),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15,
+                    color: _profileDarkText,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+              ],
             ),
-            textAlign: TextAlign.center,
           ),
-          SizedBox(height: 4),
-          Text(
-            'Upload ID cards or certifications to share your qualifications.',
-            style: TextStyle(fontSize: 12, color: Colors.black54),
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ],
+        ),
       ),
+    );
+  }
+
+  Widget _buildDocumentsEmptyState() {
+    return _buildCenteredEmptyMessage(
+      icon: Icons.description_outlined,
+      title: 'No documents yet',
+      subtitle: 'Upload ID cards or certifications to share your qualifications.',
     );
   }
 
@@ -294,7 +309,11 @@ class _ProfileDocumentsScreenState extends State<ProfileDocumentsScreen> {
       return Scaffold(
         backgroundColor: Colors.white,
         appBar: _buildAppBar(),
-        body: const Center(child: Text('Please sign in to view documents.')),
+        body: _buildCenteredEmptyMessage(
+          icon: Icons.description_outlined,
+          title: 'Please sign in',
+          subtitle: 'Sign in to upload and manage your documents.',
+        ),
       );
     }
     final stream =
@@ -310,11 +329,10 @@ class _ProfileDocumentsScreenState extends State<ProfileDocumentsScreen> {
         stream: stream,
         builder: (context, snapshot) {
           if (snapshot.hasError) {
-            return Center(
-              child: Text(
-                'Failed to load documents: ${snapshot.error}',
-                style: const TextStyle(color: Colors.redAccent),
-              ),
+            return _buildCenteredEmptyMessage(
+              icon: Icons.description_outlined,
+              title: 'Unable to load documents',
+              subtitle: 'Please try again.',
             );
           }
           if (!snapshot.hasData) {
@@ -370,22 +388,21 @@ class _AddDocumentCard extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: _accentGold,
           borderRadius: BorderRadius.circular(UiTokens.r16),
-          border: Border.all(color: Colors.grey.shade300, width: 1.1),
-          boxShadow: _cardShadow,
+          border: Border.all(color: _accentGold.withValues(alpha: 0.55), width: 1.1),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: const [
-            Icon(Icons.add, color: Colors.black54, size: 18),
+            Icon(Icons.add, color: Colors.black, size: 18),
             SizedBox(width: 8),
             Text(
               "Add New Document",
               style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
-                color: Colors.black87,
+                color: Colors.black,
               ),
             ),
           ],
@@ -418,7 +435,6 @@ class _DocumentCard extends StatelessWidget {
     final docName = (data['name'] as String?) ?? 'Document';
     final fileLabel = (data['fileName'] as String?) ?? 'PDF File';
     final isVerified = data['status'] as bool? ?? false;
-    final iconColor = Colors.grey.shade200;
     final borderColor = Colors.grey.shade300;
     return Container(
       decoration: BoxDecoration(
@@ -438,10 +454,10 @@ class _DocumentCard extends StatelessWidget {
                 width: 52,
                 height: 52,
                 decoration: BoxDecoration(
-                  color: _primaryBlue.withOpacity(0.12),
+                  color: _primaryBlue.withValues(alpha: 0.12),
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: _primaryBlue.withOpacity(0.4),
+                    color: _primaryBlue.withValues(alpha: 0.4),
                     width: 1.2,
                   ),
                 ),

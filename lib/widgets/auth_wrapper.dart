@@ -2,7 +2,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import '../services/auth_notice.dart';
 import '../screens/auth/touchdown_screen.dart';
+import '../screens/admin/admin_root_screen.dart';
 import '../screens/caregiver/caregiver_root_screen.dart';
 import '../screens/user/user_root_screen.dart';
 
@@ -16,6 +18,62 @@ class AuthWrapper extends StatefulWidget {
 class _AuthWrapperState extends State<AuthWrapper> {
   void _retry() => setState(() {});
 
+  Future<({bool adminExists, bool caregiverExists, bool userExists})>
+  _resolveAccountType({
+    required FirebaseFirestore db,
+    required String uid,
+    required String email,
+  }) async {
+    final futures = await Future.wait([
+      db.collection("admin").doc(uid).get(),
+      db.collection("caregivers").doc(uid).get(),
+      db.collection("users").doc(uid).get(),
+    ]);
+
+    final adminSnap = futures[0] as DocumentSnapshot;
+    final caregiverSnap = futures[1] as DocumentSnapshot;
+    final userSnap = futures[2] as DocumentSnapshot;
+
+    var adminExists = adminSnap.exists;
+    if (!adminExists && email.trim().isNotEmpty) {
+      final candidates = <String>{
+        email.trim(),
+        email.trim().toLowerCase(),
+      }.where((e) => e.isNotEmpty).toList();
+
+      for (final candidate in candidates) {
+        final query = await db
+            .collection("admin")
+            .where("email", isEqualTo: candidate)
+            .limit(1)
+            .get();
+        if (query.docs.isEmpty) continue;
+        adminExists = true;
+
+        // Best-effort: link to `admin/$uid` for future lookups.
+        final doc = query.docs.first;
+        try {
+          await db.collection("admin").doc(uid).set(
+            {
+              ...doc.data(),
+              "email": candidate,
+              "role": (doc.data()["role"] as String?) ?? "admin",
+              "linkedFrom": doc.id,
+            },
+            SetOptions(merge: true),
+          );
+        } catch (_) {}
+        break;
+      }
+    }
+
+    return (
+      adminExists: adminExists,
+      caregiverExists: caregiverSnap.exists,
+      userExists: userSnap.exists,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<User?>(
@@ -25,21 +83,13 @@ class _AuthWrapperState extends State<AuthWrapper> {
           return const TouchdownScreen();
         }
 
-        final uid = snapshot.data!.uid;
+        final user = snapshot.data!;
+        final uid = user.uid;
+        final email = (user.email ?? '').trim();
 
         final db = FirebaseFirestore.instance;
-        return FutureBuilder<({bool caregiverExists, bool userExists})>(
-          future: Future.wait([
-            db.collection("caregivers").doc(uid).get(),
-            db.collection("users").doc(uid).get(),
-          ]).then((snaps) {
-            final caregiverSnap = snaps[0] as DocumentSnapshot;
-            final userSnap = snaps[1] as DocumentSnapshot;
-            return (
-              caregiverExists: caregiverSnap.exists,
-              userExists: userSnap.exists,
-            );
-          }),
+        return FutureBuilder<({bool adminExists, bool caregiverExists, bool userExists})>(
+          future: _resolveAccountType(db: db, uid: uid, email: email),
           builder: (context, accountSnap) {
             if (accountSnap.connectionState == ConnectionState.waiting) {
               return const Scaffold(
@@ -57,18 +107,97 @@ class _AuthWrapperState extends State<AuthWrapper> {
               );
             }
 
+            final adminExists = accountSnap.data?.adminExists == true;
             final caregiverExists = accountSnap.data?.caregiverExists == true;
             final userExists = accountSnap.data?.userExists == true;
 
+            if (adminExists) {
+              return const AdminRootScreen();
+            }
             if (caregiverExists) {
-              return const CaregiverRootScreen();
+              return _ForceLogoutGate(
+                uid: uid,
+                child: const CaregiverRootScreen(),
+              );
             }
             if (userExists) {
-              return const UserRootScreen();
+              return _ForceLogoutGate(
+                uid: uid,
+                child: const UserRootScreen(),
+              );
             }
 
             FirebaseAuth.instance.signOut();
             return const TouchdownScreen();
+          },
+        );
+      },
+    );
+  }
+}
+
+class _ForceLogoutGate extends StatefulWidget {
+  const _ForceLogoutGate({required this.uid, required this.child});
+
+  final String uid;
+  final Widget child;
+
+  @override
+  State<_ForceLogoutGate> createState() => _ForceLogoutGateState();
+}
+
+class _ForceLogoutGateState extends State<_ForceLogoutGate> {
+  Timestamp? _lastSeen;
+  bool _signingOut = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = widget.uid.trim();
+    if (uid.isEmpty) return widget.child;
+
+    final signedInAt = FirebaseAuth.instance.currentUser?.metadata.lastSignInTime;
+    final db = FirebaseFirestore.instance;
+    final caregiverRef = db.collection('caregivers').doc(uid);
+    final userRef = db.collection('users').doc(uid);
+
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: caregiverRef.snapshots(),
+      builder: (context, caregiverSnap) {
+        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: userRef.snapshots(),
+          builder: (context, userSnap) {
+            final caregiverTs =
+                caregiverSnap.data?.data()?['forceLogoutAt'] as Timestamp?;
+            final userTs = userSnap.data?.data()?['forceLogoutAt'] as Timestamp?;
+            final ts = () {
+              if (caregiverTs == null) return userTs;
+              if (userTs == null) return caregiverTs;
+              return caregiverTs.compareTo(userTs) >= 0 ? caregiverTs : userTs;
+            }();
+        if (!_signingOut && ts != null) {
+          final tsDate = ts.toDate();
+          final alreadyRelogged =
+              signedInAt != null && !signedInAt.isBefore(tsDate);
+          if (alreadyRelogged) {
+            return widget.child;
+          }
+          final shouldLogout = _lastSeen == null || ts.compareTo(_lastSeen!) > 0;
+          if (shouldLogout) {
+            _lastSeen = ts;
+            _signingOut = true;
+            WidgetsBinding.instance.addPostFrameCallback((_) async {
+              try {
+                AuthNotice.set(
+                  'Successfully verified as caregiver. Please log in again as caregiver.',
+                );
+                await FirebaseAuth.instance.signOut();
+              } finally {
+                _signingOut = false;
+              }
+            });
+          }
+        }
+        return widget.child;
           },
         );
       },

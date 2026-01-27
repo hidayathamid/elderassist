@@ -33,6 +33,12 @@ subprojects {
 subprojects {
     plugins.withId("com.android.library") {
         extensions.configure<LibraryExtension>("android") {
+            // Keep library modules in sync with app compileSdk to avoid
+            // resource linking failures (e.g. android:attr/lStar requires 31+).
+            compileSdk = 35
+            defaultConfig {
+                minSdk = 24
+            }
             when (project.name) {
                 "jitsi_meet" -> namespace = "com.gunschu.jitsi_meet"
                 "jitsi_meet_wrapper" -> namespace = "dev.saibotma.jitsi_meet_wrapper"

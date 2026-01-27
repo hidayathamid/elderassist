@@ -5,6 +5,8 @@ import 'package:intl/intl.dart';
 import 'dart:math' as math;
 
 import 'package:emergencies_disability_assistance_app/widgets/safe_network_image.dart';
+import 'package:emergencies_disability_assistance_app/screens/user/activity/activity_screen.dart'
+    show activityAccentBlue, activityPrimaryTextColor;
 
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _pageBackground = Color(0xFFF7F8FA);
@@ -52,6 +54,43 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
     if (value is num) return value.toInt().clamp(1, 5);
     if (value is String) return (int.tryParse(value.trim()) ?? 0).clamp(1, 5);
     return 0;
+  }
+
+  Widget _buildEmptyState({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) {
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 360),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 32, color: activityAccentBlue),
+              const SizedBox(height: 10),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: activityPrimaryTextColor,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                subtitle,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<_UserMini> _fetchUserMini({
@@ -448,7 +487,11 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
         children: [
           Text(rating.toString()),
           const SizedBox(width: 4),
-          const Icon(Icons.star_rounded, size: 14, color: _accentGold),
+          Icon(
+            Icons.star_rounded,
+            size: 14,
+            color: selected ? Colors.black : _accentGold,
+          ),
           if (rest.isNotEmpty) ...[const SizedBox(width: 4), Text(rest)],
         ],
       );
@@ -456,7 +499,7 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
     return TextButton(
       onPressed: onTap,
       style: TextButton.styleFrom(
-        foregroundColor: selected ? Colors.white : _profileDarkText,
+        foregroundColor: selected ? Colors.black : _profileDarkText,
         padding: const EdgeInsets.symmetric(horizontal: 8),
         minimumSize: const Size(0, 28),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -464,11 +507,11 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
           borderRadius: BorderRadius.circular(999),
           side: BorderSide(
             color: selected
-                ? _accentBlue.withValues(alpha: 0.9)
+                ? _accentGold.withValues(alpha: 0.9)
                 : Colors.black.withValues(alpha: 0.08),
           ),
         ),
-        backgroundColor: selected ? _accentBlue : Colors.white,
+        backgroundColor: selected ? _accentGold : Colors.white,
         textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
       ),
       child: content,
@@ -479,57 +522,10 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
     required String message,
     String explanation = "It'll show up as soon as it becomes available.",
   }) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-      physics: const BouncingScrollPhysics(),
-      children: [
-        _buildSectionHeader(
-          title: 'Reviews',
-        ),
-        const SizedBox(height: 12),
-        Container(
-          decoration: _cardDecoration(),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 42,
-                height: 42,
-                decoration: BoxDecoration(
-                  color: _accentBlue.withValues(alpha: 0.12),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(
-                  Icons.bolt_rounded,
-                  size: 22,
-                  color: _accentBlue,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                message,
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: _profileDarkText,
-                  fontWeight: FontWeight.w800,
-                ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 4),
-              Text(
-                explanation,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.black.withValues(alpha: 0.6),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
+    return _buildEmptyState(
+      icon: Icons.bolt_rounded,
+      title: message,
+      subtitle: explanation,
     );
   }
 
@@ -609,7 +605,11 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
         stream: stream,
         builder: (context, snapshot) {
           if (caregiverId.isEmpty) {
-            return const Center(child: Text('Please sign in to view reviews.'));
+            return _buildEmptyState(
+              icon: Icons.bolt_rounded,
+              title: 'Please sign in to view reviews',
+              subtitle: 'Sign in to see your latest feedback and ratings.',
+            );
           }
           if (snapshot.hasError) {
             return _buildUnavailablePlaceholder(
@@ -630,7 +630,11 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
               return tb.compareTo(ta);
             });
           if (allDocs.isEmpty) {
-            return const Center(child: Text('No reviews yet.'));
+            return _buildEmptyState(
+              icon: Icons.bolt_rounded,
+              title: 'No reviews yet',
+              subtitle: 'Reviews will appear once clients leave feedback.',
+            );
           }
 
           final counts = <int, int>{1: 0, 2: 0, 3: 0, 4: 0, 5: 0};
@@ -735,17 +739,12 @@ class _ProfileReviewScreenState extends State<ProfileReviewScreen> {
               ),
               const SizedBox(height: 6),
               if (docs.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 40),
-                  child: Center(
-                    child: Text(
-                      'No reviews for this filter.',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.black.withValues(alpha: 0.55),
-                      ),
-                    ),
+                SizedBox(
+                  height: 220,
+                  child: _buildEmptyState(
+                    icon: Icons.bolt_rounded,
+                    title: 'No reviews for this filter',
+                    subtitle: 'Try another filter to see more reviews.',
                   ),
                 )
               else

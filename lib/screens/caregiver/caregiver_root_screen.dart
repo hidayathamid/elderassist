@@ -1,8 +1,12 @@
+import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:geolocator/geolocator.dart';
 
 import '../../../services/auth_service.dart';
 import '../../../services/chat_service.dart';
@@ -18,7 +22,14 @@ const Color _caregiverNavBarBackground = Colors.white;
 const Color _caregiverIdleSosBackground = _caregiverNavBarBackground;
 
 class CaregiverRootScreen extends StatefulWidget {
-  const CaregiverRootScreen({super.key});
+  const CaregiverRootScreen({
+    super.key,
+    this.initialIndex = 0,
+    this.jobsInitialCategoryIndex = 0,
+  });
+
+  final int initialIndex;
+  final int jobsInitialCategoryIndex;
 
   @override
   State<CaregiverRootScreen> createState() => _CaregiverRootScreenState();
@@ -30,27 +41,210 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
   final AuthService _auth = AuthService();
   final ChatService _chatService = ChatService();
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+  final FirebaseFunctions _functions = FirebaseFunctions.instanceFor(
+    region: 'asia-southeast1',
+  );
   bool _initialSeenSetup = false;
 
   late final List<Widget> _pages;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _activeBookingSub;
+  Timer? _locationTimer;
+  String? _activeCaregiverId;
+  String? _activeBookingId;
+  bool _locationInFlight = false;
+  String? _lastLiveLocLogKey;
 
   @override
   void initState() {
     super.initState();
+    final requested = widget.initialIndex;
+    final maxIndex = 4;
+    if (requested < 0) {
+      _selectedIndex = 0;
+    } else if (requested > maxIndex) {
+      _selectedIndex = maxIndex;
+    } else {
+      _selectedIndex = requested;
+    }
     _tabIndexNotifier.value = _selectedIndex;
     _pages = [
       CaregiverHomeScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 0),
-      CaregiverJobsScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 1),
-      CaregiverSosRootScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 2),
-      CaregiverChatListScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 3),
-      CaregiverProfileScreen(tabIndexListenable: _tabIndexNotifier, tabIndex: 4),
+      CaregiverJobsScreen(
+        tabIndexListenable: _tabIndexNotifier,
+        tabIndex: 1,
+        initialCategoryIndex: widget.jobsInitialCategoryIndex,
+      ),
+      CaregiverSosRootScreen(
+        tabIndexListenable: _tabIndexNotifier,
+        tabIndex: 2,
+      ),
+      CaregiverChatListScreen(
+        tabIndexListenable: _tabIndexNotifier,
+        tabIndex: 3,
+      ),
+      CaregiverProfileScreen(
+        tabIndexListenable: _tabIndexNotifier,
+        tabIndex: 4,
+      ),
     ];
   }
 
   @override
   void dispose() {
     _tabIndexNotifier.dispose();
+    _activeBookingSub?.cancel();
+    _locationTimer?.cancel();
     super.dispose();
+  }
+
+  Future<bool> _ensureLocationPermission() async {
+    final enabled = await Geolocator.isLocationServiceEnabled();
+    if (!enabled) return false;
+
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied) return false;
+    if (permission == LocationPermission.deniedForever) return false;
+    return true;
+  }
+
+  void _ensureActiveBookingWatcher(String caregiverId) {
+    final trimmed = caregiverId.trim();
+    if (trimmed.isEmpty) {
+      _stopLocationUpdates();
+      return;
+    }
+    if (_activeCaregiverId == trimmed && _activeBookingSub != null) return;
+    _activeCaregiverId = trimmed;
+    _activeBookingSub?.cancel();
+    _activeBookingSub = _db
+        .collection('bookings')
+        .where('caregiverId', isEqualTo: trimmed)
+        .limit(20)
+        .snapshots()
+        .listen((snapshot) {
+          if (snapshot.docs.isEmpty) {
+            _stopLocationUpdates();
+            return;
+          }
+          String? bestBookingId;
+          for (final doc in snapshot.docs) {
+            final status = (doc.data()['status'] as String?) ?? '';
+            final normalized = status
+                .trim()
+                .toUpperCase()
+                .replaceAll(' ', '_')
+                .replaceAll('-', '_')
+                .replaceAll('__', '_');
+            final isOngoing =
+                normalized == 'ONGOING' ||
+                normalized == 'IN_PROGRESS' ||
+                normalized == 'HANDLE_CLIENT';
+            if (!isOngoing) continue;
+            bestBookingId = doc.id;
+            break;
+          }
+          if (bestBookingId == null) {
+            _stopLocationUpdates();
+            return;
+          }
+          _startLocationUpdates(caregiverId: trimmed, bookingId: bestBookingId);
+        });
+  }
+
+  void _stopLocationUpdates() {
+    _activeBookingId = null;
+    _locationTimer?.cancel();
+    _locationTimer = null;
+    if (kDebugMode) {
+      debugPrint('[LiveLoc] stopped (no ongoing booking).');
+    }
+  }
+
+  void _startLocationUpdates({
+    required String caregiverId,
+    required String bookingId,
+  }) {
+    if (_activeBookingId == bookingId && _locationTimer != null) return;
+    _activeBookingId = bookingId;
+    _locationTimer?.cancel();
+    if (kDebugMode) {
+      debugPrint(
+        '[LiveLoc] start timer caregiver=$caregiverId booking=$bookingId',
+      );
+    }
+    unawaited(
+      _pushLocationOnce(caregiverId: caregiverId, bookingId: bookingId),
+    );
+    _locationTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      unawaited(
+        _pushLocationOnce(caregiverId: caregiverId, bookingId: bookingId),
+      );
+    });
+  }
+
+  Future<void> _pushLocationOnce({
+    required String caregiverId,
+    required String bookingId,
+  }) async {
+    if (_locationInFlight) return;
+    _locationInFlight = true;
+    try {
+      final canLocate = await _ensureLocationPermission();
+      if (!canLocate) {
+        if (kDebugMode) {
+          debugPrint('[LiveLoc] no location permission/service.');
+        }
+        return;
+      }
+      final pos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 10),
+      );
+      final logKey =
+          '$bookingId|${pos.latitude.toStringAsFixed(5)},${pos.longitude.toStringAsFixed(5)}';
+      if (kDebugMode && _lastLiveLocLogKey != logKey) {
+        _lastLiveLocLogKey = logKey;
+        debugPrint(
+          '[LiveLoc] pos booking=$bookingId lat=${pos.latitude} lng=${pos.longitude}',
+        );
+      }
+      try {
+        final callable = _functions.httpsCallable('updateCaregiverLocation');
+        await callable.call({
+          'lat': pos.latitude,
+          'lng': pos.longitude,
+          'bookingId': bookingId,
+        });
+        if (kDebugMode) {
+          debugPrint('[LiveLoc] updated via cloud function.');
+        }
+        return;
+      } catch (_) {
+        // fallback to direct update
+      }
+      final caregiverRef = _db.collection('caregivers').doc(caregiverId);
+      final caregiverSnap = await caregiverRef.get();
+      if (!caregiverSnap.exists) return;
+      await caregiverRef.set(
+        {
+          'lat': pos.latitude,
+          'lng': pos.longitude,
+          'location': GeoPoint(pos.latitude, pos.longitude),
+          'locationUpdatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+      if (kDebugMode) {
+        debugPrint('[LiveLoc] updated caregiver doc directly.');
+      }
+    } catch (_) {
+      // silent: do not spam UI while caregiver navigates
+    } finally {
+      _locationInFlight = false;
+    }
   }
 
   void _onTabSelected(int index) {
@@ -65,6 +259,11 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
   Widget build(BuildContext context) {
     final double bottomInset = MediaQuery.of(context).padding.bottom;
     final caregiverId = _auth.userId;
+    if (caregiverId.isNotEmpty) {
+      _ensureActiveBookingWatcher(caregiverId);
+    } else {
+      _stopLocationUpdates();
+    }
     final chatBadgeStream = caregiverId.isNotEmpty
         ? _chatService.streamUnreadCountForCaregiver(caregiverId)
         : Stream<int>.value(0);
@@ -76,6 +275,10 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
     final jobBadgeStream = caregiverId.isNotEmpty
         ? _jobsBadgeStream(caregiverId)
         : Stream<int>.value(0);
+
+    final sosBadgeStream = caregiverId.isNotEmpty
+        ? _sosOfferBadgeStream(caregiverId)
+        : Stream<int>.value(0);
     return Scaffold(
       backgroundColor: Colors.grey[50],
       extendBody: true,
@@ -84,6 +287,7 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
         bottomInset: bottomInset,
         caregiverId: caregiverId,
         jobBadgeStream: jobBadgeStream,
+        sosBadgeStream: sosBadgeStream,
         chatBadgeStream: chatBadgeStream,
       ),
     );
@@ -93,6 +297,7 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
     required double bottomInset,
     required String caregiverId,
     required Stream<int> jobBadgeStream,
+    required Stream<int> sosBadgeStream,
     required Stream<int> chatBadgeStream,
   }) {
     final padding = EdgeInsets.only(
@@ -153,14 +358,21 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
                   );
                 },
               ),
-              _CaregiverNavBubbleItem(
-                icon: Icons.sos_rounded,
-                label: 'Emergency',
-                index: 2,
-                isActive: _selectedIndex == 2,
-                isSos: true,
-                activeColor: _caregiverNavActiveBlue,
-                onTap: () => _onTabSelected(2),
+              StreamBuilder<int>(
+                stream: sosBadgeStream,
+                builder: (context, snapshot) {
+                  final badgeCount = snapshot.data ?? 0;
+                  return _CaregiverNavBubbleItem(
+                    icon: Icons.sos_rounded,
+                    label: 'Emergency',
+                    index: 2,
+                    isActive: _selectedIndex == 2,
+                    isSos: true,
+                    activeColor: _caregiverNavActiveBlue,
+                    onTap: () => _onTabSelected(2),
+                    badgeCount: badgeCount,
+                  );
+                },
               ),
               StreamBuilder<int>(
                 stream: chatBadgeStream,
@@ -200,49 +412,68 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
     final data = snap.data();
     final existing = data?['lastSeenJobsAt'];
     if (existing != null) return;
-    await docRef.set(
-      {'lastSeenJobsAt': FieldValue.serverTimestamp()},
-      SetOptions(merge: true),
-    );
+    await docRef.set({
+      'lastSeenJobsAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   }
 
   Future<void> _markJobsSeen() async {
     final caregiverId = _auth.userId;
     if (caregiverId.isEmpty) return;
-    await _db.collection('caregivers').doc(caregiverId).set(
-      {'lastSeenJobsAt': FieldValue.serverTimestamp()},
-      SetOptions(merge: true),
-    );
+    await _db.collection('caregivers').doc(caregiverId).set({
+      'lastSeenJobsAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   }
 
   Stream<int> _jobsBadgeStream(String caregiverId) {
-    return _db.collection('caregivers').doc(caregiverId).snapshots().asyncExpand(
-      (doc) {
-        final lastSeen = doc.data()?['lastSeenJobsAt'] as Timestamp?;
-        if (lastSeen == null) return Stream<int>.value(0);
-        return _db
-            .collection('bookings')
-            .where('caregiverId', isEqualTo: caregiverId)
-            .where('createdAt', isGreaterThan: lastSeen)
-            .orderBy('createdAt', descending: true)
-            .snapshots()
-            .map((snapshot) {
-          var count = 0;
-          for (final booking in snapshot.docs) {
-            final data = booking.data();
-            if ((data['hidden'] as bool?) == true) continue;
-            final status = (data['status'] as String?)?.trim().toUpperCase();
-            final isJobStatus = status == 'ASSIGNED' ||
-                status == 'ONGOING' ||
-                status == 'IN_PROGRESS' ||
-                status == 'SCHEDULED';
-            if (!isJobStatus) continue;
-            count++;
-          }
-          return count;
-        });
-      },
-    ).distinct();
+    return _db
+        .collection('caregivers')
+        .doc(caregiverId)
+        .snapshots()
+        .asyncExpand((doc) {
+          final lastSeen = doc.data()?['lastSeenJobsAt'] as Timestamp?;
+          if (lastSeen == null) return Stream<int>.value(0);
+          return _db
+              .collection('bookings')
+              .where('caregiverId', isEqualTo: caregiverId)
+              .where('createdAt', isGreaterThan: lastSeen)
+              .orderBy('createdAt', descending: true)
+              .snapshots()
+              .map((snapshot) {
+                var count = 0;
+                for (final booking in snapshot.docs) {
+                  final data = booking.data();
+                  final hiddenLegacy = (data['hidden'] as bool?) == true;
+                  final hiddenForCaregiver =
+                      (data['hiddenForCaregiver'] as bool?) == true;
+                  if (hiddenLegacy || hiddenForCaregiver) continue;
+                  final status = (data['status'] as String?)
+                      ?.trim()
+                      .toUpperCase();
+                  final isJobStatus =
+                      status == 'ASSIGNED' ||
+                      status == 'ONGOING' ||
+                      status == 'IN_PROGRESS' ||
+                      status == 'SCHEDULED';
+                  if (!isJobStatus) continue;
+                  count++;
+                }
+                return count;
+              });
+        })
+        .distinct();
+  }
+
+  Stream<int> _sosOfferBadgeStream(String caregiverId) {
+    if (caregiverId.isEmpty) return Stream<int>.value(0);
+    return _db
+        .collection('caregivers')
+        .doc(caregiverId)
+        .collection('sosOffers')
+        .where('status', isEqualTo: 'OFFERED')
+        .snapshots()
+        .map((snapshot) => snapshot.docs.length)
+        .distinct();
   }
 }
 

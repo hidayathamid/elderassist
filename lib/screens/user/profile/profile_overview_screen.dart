@@ -16,6 +16,7 @@ import '../../../models/activity_booking.dart';
 import 'package:emergencies_disability_assistance_app/models/payment_document_target.dart';
 import '../../../models/user_model.dart';
 import '../../../services/auth_service.dart';
+import '../../../services/payment_badge_service.dart';
 import '../../auth/touchdown_screen.dart';
 
 const Color _accentGold = Color(0xFFF4B63D);
@@ -520,7 +521,10 @@ class _ProfileOverviewContent extends StatelessWidget {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => const ProfileEditScreen(),
+                          builder: (_) => const ProfileEditScreen(
+                            showBudgetField: true,
+                            showPasswordResetField: true,
+                          ),
                         ),
                       );
                     },
@@ -570,17 +574,25 @@ class _ProfileOverviewContent extends StatelessWidget {
                     },
                   ),
                   const _ZUSDivider(),
-                  _ZUSRow(
-                    icon: Icons.credit_card_outlined,
-                    label: "Payments & Billing",
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => const ProfilePaymentsScreen(
-                            target: PaymentDocumentTarget.user,
-                          ),
-                        ),
+                  StreamBuilder<int>(
+                    stream: PaymentBadgeService.userNewPaymentsCount(),
+                    builder: (context, snap) {
+                      final count = snap.data ?? 0;
+                      return _ZUSRow(
+                        icon: Icons.credit_card_outlined,
+                        label: "Payments & Billing",
+                        count: count > 0 ? count : null,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const ProfilePaymentsScreen(
+                                target: PaymentDocumentTarget.user,
+                                initialTabIndex: 1,
+                              ),
+                            ),
+                          );
+                        },
                       );
                     },
                   ),
@@ -714,10 +726,10 @@ class _SummaryItem extends StatelessWidget {
         const SizedBox(height: 4),
         Text(
           value.toString(),
-          style: TextStyle(
+          style: const TextStyle(
             fontSize: 14,
             fontWeight: FontWeight.bold,
-            color: itemColor,
+            color: Colors.black,
           ),
         ),
         Text(
@@ -740,10 +752,10 @@ class _OverviewServiceChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final background = selected ? _tealAccent : Colors.white;
-    final foreground = selected ? Colors.white : _profileDarkText;
+    final background = selected ? _accentGold : Colors.white;
+    final foreground = selected ? Colors.black : _profileDarkText;
     final borderColor = selected
-        ? _tealAccent.withValues(alpha: 0.45)
+        ? _accentGold.withValues(alpha: 0.45)
         : _serviceChipBorder;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -809,14 +821,14 @@ class _ZUSRow extends StatelessWidget {
                   vertical: 2.5,
                 ),
                 decoration: BoxDecoration(
-                  color: _tealAccent,
+                  color: _accentGold,
                   borderRadius: BorderRadius.circular(24),
                 ),
                 child: Text(
                   count.toString(),
                   style: const TextStyle(
                     fontSize: 11,
-                    color: Colors.white,
+                    color: Colors.black,
                     fontWeight: FontWeight.w600,
                   ),
                 ),

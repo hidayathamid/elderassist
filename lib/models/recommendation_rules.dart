@@ -37,7 +37,7 @@ class RecommendationRules {
 
   static RecommendationRules defaults() {
     return const RecommendationRules(
-      maxRuleDistanceKm: 12.0,
+      maxRuleDistanceKm: 15.0,
       preferredDistanceKm: 6.0,
       minAcceptableRating: 3.0,
       ratingPenaltyThreshold: 3.5,
@@ -100,4 +100,3 @@ class RecommendationRules {
     );
   }
 }
-

@@ -33,6 +33,7 @@ Future<ScheduleBookingResult?> showScheduleBookingTelegramSheet({
   required Color primaryColor,
   String? excludeBookingId,
   bool allowInitialDayEvenIfUnavailable = false,
+  bool enableDrag = false,
   Color? barrierColor,
 }) {
   final initialSelected = DateTime(
@@ -46,6 +47,7 @@ Future<ScheduleBookingResult?> showScheduleBookingTelegramSheet({
   return showModalBottomSheet<ScheduleBookingResult>(
     context: context,
     isScrollControlled: true,
+    enableDrag: enableDrag,
     barrierColor: barrierColor ?? Colors.black.withValues(alpha: 0.54),
     backgroundColor: Colors.transparent,
     builder: (ctx) {
