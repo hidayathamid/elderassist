@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'dart:async';
@@ -10,10 +11,11 @@ import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl_phone_field/countries.dart';
-import 'package:intl_phone_field/country_picker_dialog.dart';
-import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:emergencies_disability_assistance_app/services/geocoding_service.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
+
+import 'profile_email_edit_screen.dart';
+import 'profile_phone_edit_screen.dart';
 
 const Color _accentGold = Color(0xFFF4B63D);
 const Color _profileDarkText = Color(0xFF1B1D29);
@@ -56,13 +58,14 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   final _firstNameController = TextEditingController();
   final _emailController = TextEditingController();
   final _phoneController = TextEditingController();
+  final _phoneDisplayController = TextEditingController();
   final _budgetController = TextEditingController();
   final _addressController = TextEditingController();
   final _picker = ImagePicker();
   final _bioController = TextEditingController();
   final _passwordMaskController = TextEditingController(text: '••••••••');
   String _bioInitial = '';
-    String _addressInitial = '';
+  String _addressInitial = '';
   String _initialBudgetText = '';
   bool _isCaregiver = false;
 
@@ -77,7 +80,6 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   String _initialName = "";
   String _initialEmail = "";
   String _initialPhoneFull = "";
-  String _initialAddress = "";
   String? _emailError;
   String? _phoneError;
   String? _nameError;
@@ -130,7 +132,9 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     if (trimmed.isEmpty) return null;
     final parsed = double.tryParse(trimmed);
     if (parsed == null) return 'Enter a valid budget amount.';
-    if (parsed < 10 || parsed > 150) return 'Budget must be between 10 and 150.';
+    if (parsed < 10 || parsed > 150) {
+      return 'Budget must be between 10 and 150.';
+    }
     return null;
   }
 
@@ -142,10 +146,13 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     if (_hidePhone) {
       _fullPhoneNumber = '';
     } else {
-      final national = phone.isNotEmpty ? _stripDialCode(phone, dialSegment) : '';
+      final national = phone.isNotEmpty
+          ? _stripDialCode(phone, dialSegment)
+          : '';
       final candidate = national.isNotEmpty ? '$dialSegment$national' : '';
       _fullPhoneNumber = _collapseRepeatedDialPrefix(candidate, dialSegment);
     }
+    _phoneDisplayController.text = _fullPhoneNumber;
     final bioValue = _bioController.text.trim();
     final addressValue = _addressController.text.trim();
     final budgetValue = _budgetController.text.trim();
@@ -164,7 +171,9 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
               ? "Email must end with @gmail.com"
               : null);
     final nameError = name.isEmpty ? "Name is required" : null;
-    final phoneError = _hidePhone ? null : (phone.isEmpty ? "Phone is required" : null);
+    final phoneError = _hidePhone
+        ? null
+        : (phone.isEmpty ? "Phone is required" : null);
     final dialError = _hidePhone ? null : _validatePhoneMatch();
     final budgetError = _showBudget ? _validateBudget(budgetValue) : null;
     if (dirty != _hasChanges ||
@@ -383,8 +392,6 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         hasCaregiverData ||
         caregiverRole == 'caregiver' ||
         userRole == 'caregiver';
-    final bool forceCaregiverSource =
-        widget.useCaregiverData && hasCaregiverData;
     final bool shouldUseCaregiverData =
         hasCaregiverData || widget.useCaregiverData;
     final showCaregiverFields = isCaregiverRole || widget.useCaregiverData;
@@ -411,6 +418,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         : '';
     _phoneController.text = national;
     _fullPhoneNumber = national.isNotEmpty ? '$matchedDial$national' : '';
+    _phoneDisplayController.text = _fullPhoneNumber;
     _fullPhoneNumber = _collapseRepeatedDialPrefix(
       _fullPhoneNumber,
       matchedDial,
@@ -435,10 +443,14 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     _addressInitial = addressValue;
     _bioController.text = bioValue;
     _bioInitial = bioValue;
-    final lat = _coordinateFromData(
-        caregiverData ?? dataMap, ['lat', 'latitude']);
-    final lng = _coordinateFromData(
-        caregiverData ?? dataMap, ['lng', 'longitude']);
+    final lat = _coordinateFromData(caregiverData ?? dataMap, [
+      'lat',
+      'latitude',
+    ]);
+    final lng = _coordinateFromData(caregiverData ?? dataMap, [
+      'lng',
+      'longitude',
+    ]);
     if (lat != null && lng != null) {
       await _placeMarker(
         LatLng(lat, lng),
@@ -481,10 +493,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     }
   }
 
-  double? _coordinateFromData(
-    Map<String, dynamic>? source,
-    List<String> keys,
-  ) {
+  double? _coordinateFromData(Map<String, dynamic>? source, List<String> keys) {
     if (source == null) return null;
     for (final key in keys) {
       final value = source[key];
@@ -496,6 +505,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     }
     return null;
   }
+
   Future<void> _placeMarker(
     LatLng pos, {
     bool animate = true,
@@ -545,7 +555,6 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           }
         });
       }
-    } catch (_) {
     } catch (_) {}
   }
 
@@ -615,17 +624,17 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     try {
       final bytes = await picked.readAsBytes();
       final ref = FirebaseStorage.instance.ref().child(
-        _isAdmin ? "admin/$uid/profile_photo.jpg" : "users/$uid/profile_photo.jpg",
+        _isAdmin
+            ? "admin/$uid/profile_photo.jpg"
+            : "users/$uid/profile_photo.jpg",
       );
       await ref.putData(bytes, SettableMetadata(contentType: "image/jpeg"));
       final downloadUrl = await ref.getDownloadURL();
       if (_isAdmin) {
         final adminRef =
-            _adminDocRef ?? FirebaseFirestore.instance.collection('admin').doc(uid);
-        await adminRef.set(
-          {"photoUrl": downloadUrl},
-          SetOptions(merge: true),
-        );
+            _adminDocRef ??
+            FirebaseFirestore.instance.collection('admin').doc(uid);
+        await adminRef.set({"photoUrl": downloadUrl}, SetOptions(merge: true));
       } else {
         final targetCollection = _isCaregiver ? "caregivers" : "users";
         await FirebaseFirestore.instance
@@ -670,16 +679,14 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
       setState(() => _saving = true);
       try {
         final ref =
-            _adminDocRef ?? FirebaseFirestore.instance.collection('admin').doc(uid);
-        await ref.set(
-          {
-            'name': fullName,
-            'email': email,
-            'role': 'admin',
-            'updatedAt': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
+            _adminDocRef ??
+            FirebaseFirestore.instance.collection('admin').doc(uid);
+        await ref.set({
+          'name': fullName,
+          'email': email,
+          'role': 'admin',
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
 
         if (!mounted) return;
         setState(() {
@@ -721,34 +728,36 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     }
 
     try {
-        final trimmedAddress = _addressController.text.trim();
-        final defaultAddressLabel =
-            trimmedAddress.isNotEmpty ? trimmedAddress : null;
-        final coords = await _resolveAddressCoordinates(trimmedAddress);
-        if (_isCaregiver) {
-          final caregiverUpdate = <String, dynamic>{
-            "name": fullName,
-            "email": email,
-            "phone": phoneToSave,
-            "bio": bioValue,
-            "photoUrl": _photoUrl ?? '',
-            if (defaultAddressLabel != null)
-              "defaultAddress": defaultAddressLabel,
-            if (coords != null) ...{
-              "lat": coords.latitude,
-              "lng": coords.longitude,
-            },
-          };
-          await FirebaseFirestore.instance
-              .collection("caregivers")
-              .doc(uid)
-              .set(caregiverUpdate, SetOptions(merge: true));
-        } else {
-          final userUpdate = <String, dynamic>{
-            "name": fullName,
-            "email": email,
-            "phone": phoneToSave,
-            if (_showBudget) ...() {
+      final trimmedAddress = _addressController.text.trim();
+      final defaultAddressLabel = trimmedAddress.isNotEmpty
+          ? trimmedAddress
+          : null;
+      final coords = await _resolveAddressCoordinates(trimmedAddress);
+      if (_isCaregiver) {
+        final caregiverUpdate = <String, dynamic>{
+          "name": fullName,
+          "email": email,
+          "phone": phoneToSave,
+          "bio": bioValue,
+          "photoUrl": _photoUrl ?? '',
+          if (defaultAddressLabel != null)
+            "defaultAddress": defaultAddressLabel,
+          if (coords != null) ...{
+            "lat": coords.latitude,
+            "lng": coords.longitude,
+          },
+        };
+        await FirebaseFirestore.instance
+            .collection("caregivers")
+            .doc(uid)
+            .set(caregiverUpdate, SetOptions(merge: true));
+      } else {
+        final userUpdate = <String, dynamic>{
+          "name": fullName,
+          "email": email,
+          "phone": phoneToSave,
+          if (_showBudget)
+            ...() {
               final trimmed = _budgetController.text.trim();
               if (trimmed.isEmpty) {
                 return _initialBudgetText.isNotEmpty
@@ -759,15 +768,15 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
               if (parsed == null) return const <String, dynamic>{};
               return <String, dynamic>{"budget": parsed};
             }(),
-            if (defaultAddressLabel != null)
-              "defaultAddress": defaultAddressLabel,
-            if (coords != null) ...{
-              "lat": coords.latitude,
-              "lng": coords.longitude,
-            },
-          };
-          await FirebaseFirestore.instance
-              .collection("users")
+          if (defaultAddressLabel != null)
+            "defaultAddress": defaultAddressLabel,
+          if (coords != null) ...{
+            "lat": coords.latitude,
+            "lng": coords.longitude,
+          },
+        };
+        await FirebaseFirestore.instance
+            .collection("users")
             .doc(uid)
             .set(userUpdate, SetOptions(merge: true));
       }
@@ -780,9 +789,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         _initialPhoneFull = _fullPhoneNumber;
         _initialBudgetText = _budgetController.text.trim();
         _bioInitial = bioValue;
-          if (_isCaregiver) {
-            _initialAddress = trimmedAddress;
-          }
+        _addressInitial = trimmedAddress;
         _hasChanges = false;
       });
 
@@ -802,6 +809,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     _firstNameController.dispose();
     _emailController.dispose();
     _phoneController.dispose();
+    _phoneDisplayController.dispose();
     _budgetController.dispose();
     _addressController.dispose();
     _bioController.dispose();
@@ -811,7 +819,9 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   }
 
   static const Color _dialogBackground = Color(0xFFF7F8FA);
-  static const TextStyle _dialogTitleStyle = TextStyle(fontWeight: FontWeight.w700);
+  static const TextStyle _dialogTitleStyle = TextStyle(
+    fontWeight: FontWeight.w700,
+  );
   static const TextStyle _dialogContentStyle = TextStyle(color: Colors.black87);
 
   Future<void> _showProfileStyleMessageDialog({
@@ -871,6 +881,11 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
 
     try {
       await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      try {
+        await FirebaseFunctions.instance
+            .httpsCallable('notifyPasswordResetRequested')
+            .call();
+      } catch (_) {}
       if (!mounted) return;
       await _showProfileStyleMessageDialog(
         title: 'Password reset',
@@ -971,27 +986,28 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     return result ?? false;
   }
 
-    Future<bool> _handleBackPress() async {
-      final shouldLeave = await _confirmDiscard();
-      if (shouldLeave && mounted) {
-        _returnToOverview();
-      }
-      return false;
+  Future<bool> _handleBackPress() async {
+    final shouldLeave = await _confirmDiscard();
+    if (shouldLeave && mounted) {
+      _returnToOverview();
     }
+    return false;
+  }
 
-    Future<LatLng?> _resolveAddressCoordinates(String address) async {
-      final trimmed = address.trim();
-      if (trimmed.isEmpty) return null;
-      if (_pickedLatLng != null) return _pickedLatLng;
-      return await geocodeAddress(trimmed);
-    }
+  Future<LatLng?> _resolveAddressCoordinates(String address) async {
+    final trimmed = address.trim();
+    if (trimmed.isEmpty) return null;
+    if (_pickedLatLng != null) return _pickedLatLng;
+    return await geocodeAddress(trimmed);
+  }
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: () async {
-        final shouldLeave = await _handleBackPress();
-        return shouldLeave;
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _handleBackPress();
       },
       child: Scaffold(
         backgroundColor: Colors.grey[50],
@@ -1114,7 +1130,15 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
                               hint: "Email",
                               keyboardType: TextInputType.emailAddress,
                               helperText: _emailError,
-                              enabled: !_isAdmin,
+                              enabled: true,
+                              readOnly: true,
+                              enableInteractiveSelection: false,
+                              suffixIcon: _compactEditButton(
+                                onPressed: _isAdmin
+                                    ? null
+                                    : _openEmailEditScreen,
+                                tooltip: 'Edit email',
+                              ),
                             ),
                             const SizedBox(height: 10),
                             if (!_hidePhone) _phoneField(),
@@ -1158,7 +1182,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
                               ) {
                                 if (states.contains(WidgetState.disabled)) {
                                   return _hasChanges
-                                      ? _accentGold.withOpacity(0.8)
+                                      ? _accentGold.withValues(alpha: 0.8)
                                       : Colors.grey.shade300;
                                 }
                                 return _accentGold;
@@ -1175,13 +1199,13 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
                               }),
                               elevation:
                                   WidgetStateProperty.resolveWith<double>((
-                                states,
-                              ) {
-                                if (states.contains(WidgetState.disabled)) {
-                                  return 0;
-                                }
-                                return 2;
-                              }),
+                                    states,
+                                  ) {
+                                    if (states.contains(WidgetState.disabled)) {
+                                      return 0;
+                                    }
+                                    return 2;
+                                  }),
                               padding: WidgetStateProperty.all(
                                 const EdgeInsets.symmetric(vertical: 14),
                               ),
@@ -1217,16 +1241,78 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     );
   }
 
+  Widget _compactEditButton({
+    required VoidCallback? onPressed,
+    required String tooltip,
+  }) {
+    return IconButton(
+      onPressed: onPressed,
+      tooltip: tooltip,
+      icon: const Icon(Icons.edit_rounded, size: 16),
+      color: _profileDarkText,
+      padding: EdgeInsets.zero,
+      visualDensity: VisualDensity.compact,
+      constraints: const BoxConstraints.tightFor(width: 30, height: 30),
+      style: IconButton.styleFrom(
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+    );
+  }
+
+  Future<void> _openEmailEditScreen() async {
+    final result = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (_) => ProfileEmailEditScreen(
+          initialEmail: _emailController.text.trim(),
+          isCaregiver: _isCaregiver,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    final next = (result ?? '').trim();
+    if (next.isEmpty) return;
+    _emailController.text = next;
+    _onFieldChanged();
+  }
+
+  Future<void> _openPhoneEditScreen() async {
+    final result = await Navigator.of(context).push<ProfilePhoneEditResult>(
+      MaterialPageRoute(
+        builder: (_) => ProfilePhoneEditScreen(
+          initialDialCode: _selectedDialCode,
+          initialCountryCode: _currentCountryCode,
+          initialNationalNumber: _phoneController.text.trim(),
+          isCaregiver: _isCaregiver,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (result == null) return;
+    setState(() {
+      _selectedDialCode = result.dialCode;
+      _currentCountryCode = result.countryCode;
+      _phoneController.text = result.nationalNumber;
+    });
+    _onFieldChanged();
+  }
+
   Widget _buildTextField({
     required TextEditingController controller,
     required String hint,
     TextInputType keyboardType = TextInputType.text,
     bool enabled = true,
+    FocusNode? focusNode,
+    Widget? suffixIcon,
+    bool readOnly = false,
+    bool enableInteractiveSelection = true,
   }) {
     return TextField(
       controller: controller,
       keyboardType: keyboardType,
       enabled: enabled,
+      focusNode: focusNode,
+      readOnly: readOnly,
+      enableInteractiveSelection: enableInteractiveSelection,
       style: _inputFieldTextStyle,
       decoration: InputDecoration(
         hintText: hint,
@@ -1249,6 +1335,11 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           borderRadius: BorderRadius.all(Radius.circular(16)),
           borderSide: BorderSide(color: _profileDarkText, width: 1.1),
         ),
+        suffixIcon: suffixIcon,
+        suffixIconConstraints: const BoxConstraints(
+          minWidth: 34,
+          minHeight: 34,
+        ),
       ),
     );
   }
@@ -1260,6 +1351,10 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
     TextInputType keyboardType = TextInputType.text,
     String? helperText,
     bool enabled = true,
+    FocusNode? focusNode,
+    Widget? suffixIcon,
+    bool readOnly = false,
+    bool enableInteractiveSelection = true,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1278,6 +1373,10 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           hint: hint,
           keyboardType: keyboardType,
           enabled: enabled,
+          focusNode: focusNode,
+          suffixIcon: suffixIcon,
+          readOnly: readOnly,
+          enableInteractiveSelection: enableInteractiveSelection,
         ),
         if (helperText != null)
           Padding(
@@ -1308,104 +1407,29 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           ),
         ),
         const SizedBox(height: 6),
-        IntlPhoneField(
-          key: ValueKey(_currentCountryCode),
-          controller: _phoneController,
-          initialCountryCode: _currentCountryCode,
-          disableLengthCheck: true,
-          decoration: InputDecoration(
-            hintText: "123 4567 890",
-            hintStyle: const TextStyle(color: Colors.black38),
-            filled: true,
-            fillColor: Colors.white,
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(18),
-              borderSide: BorderSide(
-                color: _phoneError != null ? Colors.red : Colors.grey[300]!,
-              ),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(18),
-              borderSide: BorderSide(
-                color: _phoneError != null ? Colors.red : Colors.grey[300]!,
-              ),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: const BorderRadius.all(Radius.circular(18)),
-              borderSide: BorderSide(
-                color: _phoneError != null ? Colors.red : Colors.black87,
-                width: 1.2,
-              ),
-            ),
-            errorText: _phoneError,
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 10,
-            ),
-            prefixStyle: const TextStyle(
-              fontSize: 0,
-              height: 0,
-              color: Colors.transparent,
-            ),
+        _buildTextField(
+          controller: _phoneDisplayController,
+          hint: "Phone Number",
+          keyboardType: TextInputType.phone,
+          readOnly: true,
+          enableInteractiveSelection: false,
+          suffixIcon: _compactEditButton(
+            onPressed: _hidePhone ? null : _openPhoneEditScreen,
+            tooltip: 'Edit phone number',
           ),
-          style: const TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            color: _profileDarkText,
-          ),
-          pickerDialogStyle: PickerDialogStyle(
-            backgroundColor: Colors.white,
-            countryNameStyle: const TextStyle(
-              color: Colors.black87,
-              fontWeight: FontWeight.w600,
-            ),
-            countryCodeStyle: const TextStyle(
-              color: Colors.black87,
-              fontWeight: FontWeight.w600,
-            ),
-            listTilePadding: const EdgeInsets.symmetric(
-              horizontal: 14,
-              vertical: 10,
-            ),
-            listTileDivider: Divider(
-              height: 1,
-              thickness: 1,
-              color: Colors.grey[200],
-            ),
-            searchFieldPadding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-            searchFieldInputDecoration: InputDecoration(
-              hintText: 'Search country',
-              hintStyle: const TextStyle(color: Colors.black54),
-              prefixIcon: const Icon(Icons.search, color: Colors.black54),
-              filled: true,
-              fillColor: Colors.white,
-              contentPadding: const EdgeInsets.symmetric(vertical: 12),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(18),
-                borderSide: BorderSide(color: Colors.grey[300]!),
-              ),
-              focusedBorder: const OutlineInputBorder(
-                borderRadius: BorderRadius.all(Radius.circular(18)),
-                borderSide: BorderSide(color: Colors.black87, width: 1.2),
-              ),
-            ),
-          ),
-          dropdownIcon: const Icon(Icons.expand_more, size: 18),
-          showDropdownIcon: true,
-          onChanged: (_) => _onFieldChanged(),
-          onCountryChanged: (country) {
-            _selectedDialCode = _normalizeDialCode('+${country.dialCode}');
-            _currentCountryCode = country.code;
-            final nationalInput = _phoneController.text.trim();
-            final normalized = nationalInput.isNotEmpty
-                ? _stripDialCode(nationalInput, _selectedDialCode)
-                : '';
-            if (normalized != nationalInput) {
-              _phoneController.text = normalized;
-            }
-            _onFieldChanged();
-          },
         ),
+        if (_phoneError != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4, left: 6),
+            child: Text(
+              _phoneError!,
+              style: const TextStyle(
+                fontSize: 11,
+                color: Color(0xFFE53935),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -1447,10 +1471,13 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
               borderRadius: BorderRadius.all(Radius.circular(16)),
               borderSide: BorderSide(color: _profileDarkText, width: 1.1),
             ),
-            suffixIcon: TextButton(
+            suffixIcon: _compactEditButton(
               onPressed: _sendPasswordResetFromProfile,
-              style: TextButton.styleFrom(foregroundColor: _profileDarkText),
-              child: const Icon(Icons.edit_rounded, size: 18),
+              tooltip: 'Reset password',
+            ),
+            suffixIconConstraints: const BoxConstraints(
+              minWidth: 34,
+              minHeight: 34,
             ),
           ),
         ),

@@ -14,6 +14,7 @@ import 'package:intl/intl.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../ui_tokens.dart';
 import '../../widgets/default_profile_avatar.dart';
@@ -40,16 +41,14 @@ const List<BoxShadow> _cardShadow = [
 ];
 
 final DateFormat _userDateFormat = DateFormat('MMM d, yyyy');
+final DateFormat _verificationDocumentsDateFormat = DateFormat(
+  'MMM d, yyyy • h:mm a',
+);
 
 const TextStyle _userTitleStyle = TextStyle(
   fontSize: 14,
   fontWeight: FontWeight.w600,
   color: _profileDarkText,
-);
-const TextStyle _userSubStyle = TextStyle(
-  fontSize: 12,
-  fontWeight: FontWeight.w500,
-  color: _profileDarkText60,
 );
 
 Widget _buildEmptyState(IconData icon, String title, String subtitle) {
@@ -103,6 +102,13 @@ class AdminUsersScreen extends StatelessWidget {
       child: const _AdminUsersDashboard(),
     );
   }
+}
+
+class _ScheduleTimeRange {
+  const _ScheduleTimeRange({required this.start, required this.end});
+
+  final TimeOfDay start;
+  final TimeOfDay end;
 }
 
 class _UsersFilterBar extends StatelessWidget {
@@ -499,19 +505,20 @@ class _AdminUserCard extends StatelessWidget {
     final email = entry.email.trim();
     final phone = entry.phone.trim();
     final address = entry.defaultAddress.trim();
-    final subtitleParts = <String>[
-      if (email.isNotEmpty) email,
-      if (phone.isNotEmpty) phone,
-      if (address.isNotEmpty) address,
-    ];
-    final subtitle = subtitleParts.join(' • ');
-
     final label = entry.type == _AdminUserType.caregiver
         ? 'Caregiver'
         : 'Client';
-    final createdLabel = entry.createdAt != null
-        ? 'Created: ${_userDateFormat.format(entry.createdAt!)}'
-        : 'Created: unknown';
+    final createdValue = entry.createdAt != null
+        ? _userDateFormat.format(entry.createdAt!)
+        : 'Unknown';
+
+    final rows = <({String label, String value})>[
+      (label: 'Created', value: createdValue),
+      (label: 'User ID', value: entry.id),
+      if (email.isNotEmpty) (label: 'Email', value: email),
+      if (phone.isNotEmpty) (label: 'Contact', value: phone),
+      if (address.isNotEmpty) (label: 'Location', value: address),
+    ];
 
     return Container(
       decoration: BoxDecoration(
@@ -586,74 +593,31 @@ class _AdminUserCard extends StatelessWidget {
                         _UserTypeChip(label: label),
                       ],
                     ),
-                    const SizedBox(height: UiTokens.s4),
-                    Text(
-                      createdLabel,
-                      style: _userSubStyle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (subtitle.isNotEmpty) ...[
-                      const SizedBox(height: UiTokens.s4),
-                      Text(
-                        subtitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: _userSubStyle,
-                      ),
-                    ],
                   ],
                 ),
               ),
             ],
           ),
-          const SizedBox(height: UiTokens.s10),
-          Row(
-            children: [
-              Text(
-                'User ID',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
-                  color: Colors.black.withValues(alpha: 0.50),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  entry.id,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                    color: _profileDarkText,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
+          Divider(
+            height: UiTokens.s16,
+            thickness: 1,
+            color: Colors.black.withValues(alpha: 0.06),
           ),
-          const SizedBox(height: UiTokens.s6),
-          if (email.isNotEmpty) Text(email, style: _userSubStyle),
-          if (phone.isNotEmpty) ...[
-            const SizedBox(height: UiTokens.s2),
-            Text(phone, style: _userSubStyle),
-          ],
-          if (address.isNotEmpty) ...[
-            const SizedBox(height: UiTokens.s2),
-            Text(address, style: _userSubStyle),
-          ],
+          ...List.generate(rows.length, (index) {
+            final row = rows[index];
+            final isLast = index == rows.length - 1;
+            return _UserFieldRow(
+              label: row.label,
+              value: row.value,
+              showBorder: !isLast,
+            );
+          }),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: UiTokens.s12),
-            child: Align(
-              alignment: Alignment.center,
-              child: FractionallySizedBox(
-                widthFactor: 0.85,
-                child: Container(
-                  height: 1.2,
-                  color: Colors.black.withAlpha(20),
-                ),
-              ),
+            child: Divider(
+              height: 1,
+              thickness: 1,
+              color: Colors.black.withValues(alpha: 0.08),
             ),
           ),
           Row(
@@ -692,6 +656,63 @@ class _AdminUserCard extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _UserFieldRow extends StatelessWidget {
+  const _UserFieldRow({
+    required this.label,
+    required this.value,
+    this.showBorder = true,
+  });
+
+  final String label;
+  final String value;
+  final bool showBorder;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: showBorder
+              ? BorderSide(color: Colors.black.withValues(alpha: 0.06))
+              : BorderSide.none,
+        ),
+      ),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 104,
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                color: Colors.black.withValues(alpha: 0.50),
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              value.trim().isEmpty ? '-' : value.trim(),
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                color: _profileDarkText,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.right,
+            ),
           ),
         ],
       ),
@@ -1395,10 +1416,68 @@ class _AdminUsersDashboardState extends State<_AdminUsersDashboard>
       ),
     );
     if (confirm != true) return;
+    if (!mounted) return;
+    BuildContext? loadingDialogContext;
+    var loadingOpen = true;
+
+    void closeLoadingIfOpen() {
+      if (!loadingOpen) return;
+      final ctx = loadingDialogContext;
+      if (ctx == null) return;
+      final nav = Navigator.of(ctx, rootNavigator: true);
+      if (nav.canPop()) {
+        nav.pop();
+      }
+      loadingOpen = false;
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        loadingDialogContext = dialogContext;
+        return const AlertDialog(
+          backgroundColor: Colors.white,
+          content: Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2.2),
+                ),
+                SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    'Deleting user…',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
     try {
-      await entry.ref.delete();
+      final callable = _functions.httpsCallable('adminCascadeDeleteUser');
+      await callable.call(<String, dynamic>{'uid': entry.id});
+      closeLoadingIfOpen();
+      if (!mounted) return;
       _showSnack('User deleted.');
+    } on FirebaseFunctionsException catch (err) {
+      closeLoadingIfOpen();
+      if (!mounted) return;
+      final message = (err.message ?? '').trim();
+      _showSnack(
+        message.isNotEmpty
+            ? message
+            : 'Failed to delete user. Please try again.',
+      );
     } catch (_) {
+      closeLoadingIfOpen();
+      if (!mounted) return;
       _showSnack('Failed to delete user. Please try again.');
     }
   }
@@ -2122,10 +2201,18 @@ class _AdminUserDetailsSheetState extends State<_AdminUserDetailsSheet> {
   int _selectedTabIndex = 0;
   int? _selectedRatingFilter;
   final Map<String, Future<_UserMini>> _reviewUserCache = {};
+  DateTime? _scheduleSelectedDay;
+  final Map<String, List<_ScheduleTimeRange>> _scheduleTakenCache = {};
+  final Set<String> _scheduleLoadingTaken = <String>{};
 
   List<String> _tabLabelsForRole(_AdminUserType type) {
     if (type == _AdminUserType.caregiver) {
-      return const <String>['Caregiver details', 'Reviews'];
+      return const <String>[
+        'Caregiver details',
+        'Reviews',
+        'Documents',
+        'Schedule',
+      ];
     }
     return const <String>[
       'Client details',
@@ -2135,6 +2222,104 @@ class _AdminUserDetailsSheetState extends State<_AdminUserDetailsSheet> {
   }
 
   String _string(dynamic value) => value?.toString().trim() ?? '';
+
+  String _ymd(DateTime d) {
+    final y = d.year.toString().padLeft(4, '0');
+    final m = d.month.toString().padLeft(2, '0');
+    final dd = d.day.toString().padLeft(2, '0');
+    return '$y-$m-$dd';
+  }
+
+  TimeOfDay? _parseStoredTime(String raw) {
+    final normalized = raw.trim();
+    if (normalized.isEmpty) return null;
+    final hm = normalized.split(':');
+    if (hm.length >= 2) {
+      final hour = int.tryParse(hm[0]);
+      final minute = int.tryParse(hm[1]);
+      if (hour != null && minute != null) {
+        return TimeOfDay(hour: hour.clamp(0, 23), minute: minute.clamp(0, 59));
+      }
+    }
+    try {
+      final t = DateFormat('h:mm a').parseLoose(normalized.toUpperCase());
+      return TimeOfDay(hour: t.hour, minute: t.minute);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  TimeOfDay _endTimeFromStart(TimeOfDay startTime) {
+    final totalMinutes = (startTime.hour * 60) + startTime.minute + 120;
+    final clamped = totalMinutes.clamp(0, 24 * 60 - 1);
+    return TimeOfDay(hour: clamped ~/ 60, minute: clamped % 60);
+  }
+
+  Future<List<_ScheduleTimeRange>> _fetchTakenRanges({
+    required String caregiverId,
+    required DateTime day,
+  }) async {
+    try {
+      final ymd = _ymd(day);
+      final snap = await FirebaseFirestore.instance
+          .collection('bookings')
+          .where('caregiverId', isEqualTo: caregiverId)
+          .get();
+
+      const allowedStatuses = <String>{
+        'ASSIGNED',
+        'SCHEDULED',
+        'PENDING',
+        'READY',
+        'ONGOING',
+        'IN_PROGRESS',
+        'NOTIFY',
+        'HANDLE_CLIENT',
+        'MISSING',
+        'COMPLETED',
+      };
+
+      bool matchesDay(dynamic value) {
+        if (value == null) return false;
+        if (value is Timestamp) return _ymd(value.toDate()) == ymd;
+        final raw = value.toString().trim();
+        return raw.isNotEmpty && raw == ymd;
+      }
+
+      final ranges = <_ScheduleTimeRange>[];
+      final seen = <String>{};
+      for (final doc in snap.docs) {
+        if (!seen.add(doc.id)) continue;
+        final data = doc.data();
+        final status = (data['status']?.toString().trim() ?? '').toUpperCase();
+        if (status.isEmpty) continue;
+        if (status == 'EMERGENCY_ALERT') continue;
+        if (status.startsWith('CANCEL')) continue;
+        if (!allowedStatuses.contains(status)) continue;
+        if (!matchesDay(data['scheduledDate']) && !matchesDay(data['date'])) {
+          continue;
+        }
+        final start =
+            _parseStoredTime(data['startTime']?.toString() ?? '') ??
+            _parseStoredTime(data['time']?.toString() ?? '');
+        if (start == null) continue;
+        var end = _parseStoredTime(data['endTime']?.toString() ?? '');
+        end ??= _endTimeFromStart(start);
+        final sMin = start.hour * 60 + start.minute;
+        final eMin = end.hour * 60 + end.minute;
+        if (eMin <= sMin) end = _endTimeFromStart(start);
+        ranges.add(_ScheduleTimeRange(start: start, end: end));
+      }
+      ranges.sort((a, b) {
+        final aMin = a.start.hour * 60 + a.start.minute;
+        final bMin = b.start.hour * 60 + b.start.minute;
+        return aMin.compareTo(bMin);
+      });
+      return ranges;
+    } catch (_) {
+      return const <_ScheduleTimeRange>[];
+    }
+  }
 
   List<Map<String, dynamic>> _extractListOfMaps(dynamic raw) {
     if (raw is List) {
@@ -2625,6 +2810,18 @@ class _AdminUserDetailsSheetState extends State<_AdminUserDetailsSheet> {
                             );
                           }
 
+                          if (selectedIndex == 2) {
+                            return _buildCaregiverDocumentsTab(
+                              caregiverId: entry.id,
+                            );
+                          }
+
+                          if (selectedIndex == 3) {
+                            return _buildCaregiverScheduleTab(
+                              caregiverId: entry.id,
+                            );
+                          }
+
                           final stream = FirebaseFirestore.instance
                               .collection('reviews')
                               .where('caregiverId', isEqualTo: entry.id)
@@ -2700,14 +2897,6 @@ class _AdminUserDetailsSheetState extends State<_AdminUserDetailsSheet> {
                                               selected,
                                         )
                                         .toList(growable: false);
-
-                              if (docs.isEmpty || totalCount == 0) {
-                                return const _UsersDetailsPlaceholder(
-                                  message: 'Reviews unavailable',
-                                  explanation: 'No reviews yet.',
-                                  centerVertically: true,
-                                );
-                              }
 
                               return Column(
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2839,7 +3028,15 @@ class _AdminUserDetailsSheetState extends State<_AdminUserDetailsSheet> {
                                     ),
                                   ),
                                   const SizedBox(height: 6),
-                                  if (visibleDocs.isEmpty)
+                                  if (totalCount == 0)
+                                    const Padding(
+                                      padding: EdgeInsets.only(top: 6),
+                                      child: _UsersDetailsPlaceholder(
+                                        message: 'Reviews unavailable',
+                                        explanation: 'No reviews yet.',
+                                      ),
+                                    )
+                                  else if (visibleDocs.isEmpty)
                                     const Padding(
                                       padding: EdgeInsets.only(top: 6),
                                       child: _UsersDetailsPlaceholder(
@@ -3284,6 +3481,598 @@ class _AdminUserDetailsSheetState extends State<_AdminUserDetailsSheet> {
           );
         },
       ),
+    );
+  }
+
+  Widget _buildCaregiverDocumentsTab({required String caregiverId}) {
+    final uid = caregiverId.trim();
+    final documentsStream = uid.isEmpty
+        ? null
+        : FirebaseFirestore.instance
+              .collection('documents')
+              .where('caregiverId', isEqualTo: uid)
+              .snapshots();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const _UsersDetailsSectionHeader(title: 'Documents'),
+        const SizedBox(height: 6),
+        _VerificationDocumentsCard(stream: documentsStream),
+      ],
+    );
+  }
+
+  Widget _buildCaregiverScheduleTab({required String caregiverId}) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final selectedDay = _scheduleSelectedDay ?? today;
+    final selectedKey = _ymd(selectedDay);
+    _scheduleSelectedDay ??= today;
+
+    final availabilityStream = caregiverId.isNotEmpty
+        ? FirebaseFirestore.instance
+              .collection('availability')
+              .doc(caregiverId)
+              .snapshots()
+        : const Stream<DocumentSnapshot<Map<String, dynamic>>>.empty();
+
+    Widget eventCard({
+      required String title,
+      required String subtitle,
+      required Color background,
+      required Color foreground,
+      IconData? icon,
+    }) {
+      return Container(
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x12000000),
+              blurRadius: 16,
+              offset: Offset(0, 8),
+            ),
+          ],
+        ),
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                if (icon != null) ...[
+                  Icon(icon, size: 15, color: foreground),
+                  const SizedBox(width: 8),
+                ],
+                Expanded(
+                  child: Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w900,
+                      color: foreground,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            if (subtitle.trim().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                subtitle,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  height: 1.3,
+                  color: foreground.withValues(alpha: 0.78),
+                ),
+              ),
+            ],
+          ],
+        ),
+      );
+    }
+
+    Widget dateStrip(DateTime selected) {
+      final start = selected.subtract(const Duration(days: 3));
+      final days = List<DateTime>.generate(
+        7,
+        (i) => DateTime(start.year, start.month, start.day + i),
+      );
+      final monthLabel = DateFormat('MMM').format(selected);
+
+      return Row(
+        children: [
+          SizedBox(
+            width: 44,
+            child: Text(
+              monthLabel,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                color: Colors.black.withValues(alpha: 0.60),
+              ),
+            ),
+          ),
+          Expanded(
+            child: SizedBox(
+              height: 56,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                physics: const BouncingScrollPhysics(),
+                itemCount: days.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (context, index) {
+                  final d = days[index];
+                  final isPast = d.isBefore(today);
+                  final isSelected =
+                      d.year == selected.year &&
+                      d.month == selected.month &&
+                      d.day == selected.day;
+                  final weekday = DateFormat('EEE').format(d);
+                  final dayNum = d.day.toString().padLeft(2, '0');
+
+                  return InkWell(
+                    onTap: () => setState(() => _scheduleSelectedDay = d),
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
+                      width: 54,
+                      decoration: BoxDecoration(
+                        color: isSelected ? _primaryBlue : Colors.transparent,
+                        borderRadius: BorderRadius.circular(10),
+                        boxShadow: isSelected
+                            ? const [
+                                BoxShadow(
+                                  color: Color(0x24000000),
+                                  blurRadius: 10,
+                                  offset: Offset(0, 6),
+                                ),
+                              ]
+                            : null,
+                      ),
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            weekday,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              height: 1.0,
+                              color: isSelected
+                                  ? Colors.white.withValues(alpha: 0.9)
+                                  : Colors.black.withValues(
+                                      alpha: isPast ? 0.32 : 0.45,
+                                    ),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            dayNum,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w900,
+                              height: 1.0,
+                              color: isSelected
+                                  ? Colors.white
+                                  : (isPast
+                                        ? Colors.black.withValues(alpha: 0.45)
+                                        : _profileDarkText),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    Widget bookedTimelineDayView({
+      required TimeOfDay windowStart,
+      required TimeOfDay windowEnd,
+      required List<_ScheduleTimeRange> taken,
+    }) {
+      int toMinutes(TimeOfDay t) => t.hour * 60 + t.minute;
+      int floorToHour(int m) => (m ~/ 60) * 60;
+      int ceilToHour(int m) => ((m + 59) ~/ 60) * 60;
+      String labelForMinute(int m) {
+        final h = (m ~/ 60).clamp(0, 23);
+        final min = (m % 60).clamp(0, 59);
+        final dt = DateTime(2000, 1, 1, h, min);
+        return DateFormat('h a').format(dt).toLowerCase();
+      }
+
+      const palette = <Color>[
+        Color(0xFF4F5BFF),
+        Color(0xFFFFB930),
+        Color(0xFF2ECC71),
+        Color(0xFF7E57C2),
+      ];
+
+      final blocks = <({int start, int end, Color color, String title})>[];
+      for (int i = 0; i < taken.length; i++) {
+        final r = taken[i];
+        final s = toMinutes(r.start);
+        final e = toMinutes(r.end);
+        if (e <= s) continue;
+        blocks.add((
+          start: s,
+          end: e,
+          color: palette[i % palette.length],
+          title: 'Booked',
+        ));
+      }
+
+      final baseStart = toMinutes(windowStart);
+      final baseEnd = toMinutes(windowEnd);
+      final startMin = floorToHour(baseStart);
+      final endMin = ceilToHour(baseEnd);
+      final hourCount = ((endMin - startMin) / 60).ceil().clamp(1, 48);
+      final pxPerMin = 0.85;
+
+      int lanesFor(List<({int start, int end})> spans) {
+        final sorted = spans.toList()
+          ..sort((a, b) => a.start.compareTo(b.start));
+        final laneEnds = <int>[];
+        for (final s in sorted) {
+          var placed = false;
+          for (int i = 0; i < laneEnds.length; i++) {
+            if (s.start >= laneEnds[i]) {
+              laneEnds[i] = s.end;
+              placed = true;
+              break;
+            }
+          }
+          if (!placed) laneEnds.add(s.end);
+        }
+        return laneEnds.length.clamp(1, 4);
+      }
+
+      final lanes = lanesFor([
+        for (final b in blocks) (start: b.start, end: b.end),
+      ]);
+
+      final sorted = blocks.toList()
+        ..sort((a, b) => a.start.compareTo(b.start));
+      final laneEnds = List<int>.filled(lanes, -999999);
+      final laidOut =
+          <({int start, int end, Color color, String title, int lane})>[];
+      for (final b in sorted) {
+        int lane = 0;
+        for (int i = 0; i < laneEnds.length; i++) {
+          if (b.start >= laneEnds[i]) {
+            lane = i;
+            break;
+          }
+          lane = i;
+        }
+        laneEnds[lane] = b.end;
+        laidOut.add((
+          start: b.start,
+          end: b.end,
+          color: b.color,
+          title: b.title,
+          lane: lane,
+        ));
+      }
+
+      final totalHeight = (hourCount * 60 * pxPerMin).toDouble();
+
+      return Container(
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.02),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+        ),
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+        child: SizedBox(
+          height: totalHeight,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 52,
+                child: SizedBox(
+                  height: totalHeight,
+                  child: Column(
+                    children: [
+                      for (int i = 0; i <= hourCount; i++)
+                        SizedBox(
+                          height: i == hourCount ? 0 : 60 * pxPerMin,
+                          child: Align(
+                            alignment: Alignment.topLeft,
+                            child: Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Text(
+                                labelForMinute(startMin + (i * 60)),
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w800,
+                                  color: Colors.black.withValues(alpha: 0.55),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, c) {
+                    final laneGap = 8.0;
+                    final laneWidth =
+                        (c.maxWidth - (laneGap * (lanes - 1))) / lanes;
+                    return SizedBox(
+                      height: totalHeight,
+                      child: Stack(
+                        children: [
+                          for (int i = 0; i <= hourCount; i++)
+                            Positioned(
+                              top: i * 60 * pxPerMin,
+                              left: 0,
+                              right: 0,
+                              child: Container(
+                                height: 1,
+                                color: Colors.black.withValues(alpha: 0.06),
+                              ),
+                            ),
+                          for (final e in laidOut)
+                            Positioned(
+                              top: (e.start - startMin) * pxPerMin,
+                              left: e.lane * (laneWidth + laneGap),
+                              width: laneWidth,
+                              height: ((e.end - e.start) * pxPerMin).clamp(
+                                18.0,
+                                9999.0,
+                              ),
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: e.color,
+                                  borderRadius: BorderRadius.circular(12),
+                                  boxShadow: const [
+                                    BoxShadow(
+                                      color: Color(0x24000000),
+                                      blurRadius: 14,
+                                      offset: Offset(0, 8),
+                                    ),
+                                  ],
+                                ),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 10,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      e.title,
+                                      style: const TextStyle(
+                                        fontSize: 12.5,
+                                        fontWeight: FontWeight.w900,
+                                        color: Colors.white,
+                                        height: 1.1,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      '${labelForMinute(e.start)} - ${labelForMinute(e.end)}',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w800,
+                                        color: Colors.white.withValues(
+                                          alpha: 0.92,
+                                        ),
+                                        height: 1.1,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: availabilityStream,
+      builder: (context, availabilitySnap) {
+        final availability =
+            availabilitySnap.data?.data() ?? const <String, dynamic>{};
+
+        List<DateTimeRange> blockedRanges() {
+          final raw = availability['blockedDates'];
+          if (raw is! Iterable) return const [];
+          final ranges = <DateTimeRange>[];
+          for (final entry in raw) {
+            if (entry is! Map) continue;
+            final startRaw = entry['start']?.toString();
+            final endRaw = entry['end']?.toString();
+            final start = startRaw == null ? null : DateTime.tryParse(startRaw);
+            final end = endRaw == null ? null : DateTime.tryParse(endRaw);
+            if (start == null || end == null) continue;
+            ranges.add(
+              DateTimeRange(
+                start: DateTime(start.year, start.month, start.day),
+                end: DateTime(end.year, end.month, end.day),
+              ),
+            );
+          }
+          return ranges;
+        }
+
+        Map<int, ({bool available, TimeOfDay start, TimeOfDay end})>
+        weeklyRanges() {
+          const dayToWeekday = <String, int>{
+            'Monday': DateTime.monday,
+            'Tuesday': DateTime.tuesday,
+            'Wednesday': DateTime.wednesday,
+            'Thursday': DateTime.thursday,
+            'Friday': DateTime.friday,
+            'Saturday': DateTime.saturday,
+            'Sunday': DateTime.sunday,
+          };
+          final raw = availability['weeklySchedule'];
+          if (raw is! Iterable) return const {};
+          final map =
+              <int, ({bool available, TimeOfDay start, TimeOfDay end})>{};
+          for (final entry in raw) {
+            if (entry is! Map) continue;
+            final dayName = entry['day']?.toString();
+            final weekday = dayToWeekday[dayName];
+            if (weekday == null) continue;
+            final availableFlag = entry['available'] as bool? ?? true;
+            final startRaw = entry['start']?.toString() ?? '08:00';
+            final endRaw = entry['end']?.toString() ?? '18:00';
+            final start =
+                _parseStoredTime(startRaw) ??
+                const TimeOfDay(hour: 8, minute: 0);
+            final end =
+                _parseStoredTime(endRaw) ??
+                const TimeOfDay(hour: 18, minute: 0);
+            map[weekday] = (available: availableFlag, start: start, end: end);
+          }
+          return map;
+        }
+
+        final blockedRangesValue = blockedRanges();
+        final weeklyValue = weeklyRanges();
+        final normalizedDay = DateTime(
+          selectedDay.year,
+          selectedDay.month,
+          selectedDay.day,
+        );
+        final blockedByDates = blockedRangesValue.any((r) {
+          final start = DateTime(r.start.year, r.start.month, r.start.day);
+          final end = DateTime(r.end.year, r.end.month, r.end.day);
+          return !normalizedDay.isBefore(start) && !normalizedDay.isAfter(end);
+        });
+        final blocked = blockedByDates;
+
+        final weekly = weeklyValue[normalizedDay.weekday];
+        final availableWindow = (weekly == null || !weekly.available)
+            ? null
+            : (weekly.start, weekly.end);
+        final dayOff = weekly != null && !weekly.available;
+
+        if (caregiverId.isNotEmpty &&
+            !_scheduleTakenCache.containsKey(selectedKey) &&
+            !_scheduleLoadingTaken.contains(selectedKey)) {
+          _scheduleLoadingTaken.add(selectedKey);
+          WidgetsBinding.instance.addPostFrameCallback((_) async {
+            final next = await _fetchTakenRanges(
+              caregiverId: caregiverId,
+              day: selectedDay,
+            );
+            if (!mounted) return;
+            setState(() {
+              _scheduleTakenCache[selectedKey] = next;
+              _scheduleLoadingTaken.remove(selectedKey);
+            });
+          });
+        }
+
+        final taken =
+            _scheduleTakenCache[selectedKey] ?? const <_ScheduleTimeRange>[];
+        final isLoadingTaken =
+            caregiverId.isNotEmpty &&
+            !_scheduleTakenCache.containsKey(selectedKey);
+
+        final header = dateStrip(selectedDay);
+        final timelineItems = <Widget>[];
+        if (isLoadingTaken) {
+          timelineItems.add(
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.black.withValues(alpha: 0.35),
+                  ),
+                ),
+              ),
+            ),
+          );
+        } else if (blocked || dayOff || availableWindow == null) {
+          timelineItems.add(
+            eventCard(
+              title: 'Unavailable',
+              subtitle: blocked ? 'Blocked' : 'Not available',
+              background: Colors.black.withValues(alpha: 0.06),
+              foreground: _profileDarkText,
+              icon: Icons.block_rounded,
+            ),
+          );
+        } else {
+          timelineItems.add(
+            bookedTimelineDayView(
+              windowStart: availableWindow.$1,
+              windowEnd: availableWindow.$2,
+              taken: taken,
+            ),
+          );
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const _UsersDetailsSectionHeader(title: 'Schedule'),
+            Container(
+              margin: const EdgeInsets.only(top: 6),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: Colors.black.withValues(alpha: 0.12),
+                  width: 1.2,
+                ),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x1A000000),
+                    blurRadius: 16,
+                    offset: Offset(0, 8),
+                  ),
+                ],
+              ),
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  header,
+                  const SizedBox(height: 14),
+                  ...timelineItems,
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -4220,6 +5009,374 @@ class _AdminUserEditSheetState extends State<_AdminUserEditSheet> {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _VerificationInfoRow extends StatelessWidget {
+  const _VerificationInfoRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 112,
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+              color: Colors.black.withValues(alpha: 0.50),
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            value.trim().isNotEmpty ? value.trim() : '-',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              color: _profileDarkText,
+              height: 1.2,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _VerificationDocumentRow extends StatelessWidget {
+  const _VerificationDocumentRow({
+    required this.title,
+    required this.fileName,
+    required this.updatedAt,
+    required this.verified,
+    required this.onOpen,
+  });
+
+  final String title;
+  final String fileName;
+  final String updatedAt;
+  final bool verified;
+  final VoidCallback? onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final statusLabel = verified ? 'Verified' : 'Pending';
+    final statusColor = verified ? _primaryBlue : const Color(0xFFF4B63D);
+    final statusIcon = verified
+        ? Icons.check_circle_rounded
+        : Icons.pending_actions_rounded;
+
+    IconData leadingIcon() {
+      final t = title.toLowerCase();
+      if (t.contains('selfie')) return Icons.camera_alt_outlined;
+      if (t.contains('front')) return Icons.credit_card_outlined;
+      if (t.contains('back')) return Icons.credit_card_rounded;
+      return Icons.description_outlined;
+    }
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0A000000),
+            blurRadius: 10,
+            offset: Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.04),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  leadingIcon(),
+                  size: 18,
+                  color: Colors.black.withValues(alpha: 0.72),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w900,
+                    color: _profileDarkText,
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.grey),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.06),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(statusIcon, size: 12, color: statusColor),
+                    const SizedBox(width: 5),
+                    Text(
+                      statusLabel,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 10,
+                        color: Colors.black.withValues(alpha: 0.80),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF7F8FA),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.black.withValues(alpha: 0.05)),
+            ),
+            child: Column(
+              children: [
+                _VerificationInfoRow(label: 'File name', value: fileName),
+                Divider(
+                  height: 14,
+                  thickness: 1,
+                  color: Colors.black.withValues(alpha: 0.06),
+                ),
+                _VerificationInfoRow(label: 'Updated at', value: updatedAt),
+                Divider(
+                  height: 14,
+                  thickness: 1,
+                  color: Colors.black.withValues(alpha: 0.06),
+                ),
+                _VerificationInfoRow(label: 'Status', value: statusLabel),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: onOpen,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: activityButtonYellow,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    textStyle: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  child: const Text('Open'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VerificationDocumentsCard extends StatelessWidget {
+  const _VerificationDocumentsCard({required this.stream});
+
+  final Stream<QuerySnapshot<Map<String, dynamic>>>? stream;
+
+  Widget _shell({required Widget child}) {
+    return child;
+  }
+
+  Future<void> _openDocument(BuildContext context, String url) async {
+    if (url.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No document link available.')),
+      );
+      return;
+    }
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to open the document.')),
+      );
+      return;
+    }
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to open the document.')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (stream == null) {
+      return _shell(
+        child: const Padding(
+          padding: EdgeInsets.fromLTRB(14, 12, 14, 12),
+          child: Text(
+            'No caregiver selected.',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              color: _profileDarkText,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: stream,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return _shell(
+            child: const Padding(
+              padding: EdgeInsets.fromLTRB(14, 12, 14, 12),
+              child: Text(
+                'Unable to load documents.',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  color: _profileDarkText,
+                ),
+              ),
+            ),
+          );
+        }
+        if (!snapshot.hasData) {
+          return _shell(
+            child: const Padding(
+              padding: EdgeInsets.all(14),
+              child: Center(child: CircularProgressIndicator()),
+            ),
+          );
+        }
+
+        final docs = snapshot.data?.docs ?? const [];
+        if (docs.isEmpty) {
+          return _shell(
+            child: const Padding(
+              padding: EdgeInsets.fromLTRB(14, 12, 14, 12),
+              child: Text(
+                'No documents uploaded yet.',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  color: _profileDarkText,
+                ),
+              ),
+            ),
+          );
+        }
+
+        const requiredNames = <String>[
+          'Selfie with identification card',
+          'Identification card (Front)',
+          'Identification card (Back)',
+        ];
+
+        DocumentSnapshot<Map<String, dynamic>>? firstByName(String name) {
+          for (final d in docs) {
+            final n = ((d.data()['name'] as String?) ?? '').trim();
+            if (n == name) return d;
+          }
+          return null;
+        }
+
+        final pickedIds = <String>{};
+        final orderedDocs = <DocumentSnapshot<Map<String, dynamic>>>[];
+        for (final name in requiredNames) {
+          final doc = firstByName(name);
+          if (doc == null) continue;
+          if (!pickedIds.add(doc.id)) continue;
+          orderedDocs.add(doc);
+        }
+
+        final remaining =
+            <DocumentSnapshot<Map<String, dynamic>>>[
+              for (final d in docs)
+                if (pickedIds.add(d.id)) d,
+            ]..sort((a, b) {
+              final ta = (a.data()?['updatedAt'] as Timestamp?)?.toDate();
+              final tb = (b.data()?['updatedAt'] as Timestamp?)?.toDate();
+              if (ta == null && tb == null) return 0;
+              if (ta == null) return 1;
+              if (tb == null) return -1;
+              return tb.compareTo(ta);
+            });
+
+        orderedDocs.addAll(remaining);
+
+        Widget docItem(DocumentSnapshot<Map<String, dynamic>> doc) {
+          final Map<String, dynamic> docData =
+              doc.data() ?? const <String, dynamic>{};
+          final url = ((docData['fileUrl'] as String?) ?? '').trim();
+          final updatedAtTs = docData['updatedAt'] as Timestamp?;
+          return Column(
+            children: [
+              _VerificationDocumentRow(
+                title: ((docData['name'] as String?) ?? 'Document').trim(),
+                fileName: ((docData['fileName'] as String?) ?? '').trim(),
+                updatedAt: updatedAtTs == null
+                    ? '-'
+                    : _verificationDocumentsDateFormat.format(
+                        updatedAtTs.toDate(),
+                      ),
+                verified: (docData['status'] as bool?) == true,
+                onOpen: url.isEmpty ? null : () => _openDocument(context, url),
+              ),
+              const SizedBox(height: 10),
+            ],
+          );
+        }
+
+        return _shell(
+          child: Padding(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [for (final doc in orderedDocs) docItem(doc)],
+            ),
+          ),
+        );
+      },
     );
   }
 }

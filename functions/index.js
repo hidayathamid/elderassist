@@ -90,6 +90,9 @@ function getTwilioConfig() {
     sid: String(cfg.sid || "").trim(),
     token: String(cfg.token || cfg.auth_token || "").trim(),
     from: String(cfg.from || cfg.from_number || "").trim(),
+    whatsappFrom: String(
+      cfg.whatsapp_from || cfg.whatsappFrom || cfg.from_whatsapp || "",
+    ).trim(),
   };
 }
 
@@ -102,6 +105,33 @@ function normalizeE164(phone) {
   return cleaned;
 }
 
+function firstNonEmptyString(...values) {
+  for (const v of values) {
+    const s = String(v || "").trim();
+    if (s) return s;
+  }
+  return "";
+}
+
+function extractUserPhone(userData) {
+  const data = userData || {};
+  return firstNonEmptyString(
+    data.phone,
+    data.phoneNumber,
+    data.mobile,
+    data.mobileNumber,
+    data.contact,
+    data.tel,
+    data.phoneNo,
+    data.whatsapp,
+    data.whatsappNumber,
+  );
+}
+
+function extractCaregiverPhone(caregiverData) {
+  return extractUserPhone(caregiverData);
+}
+
 async function sendTwilioSms({ to, body }) {
   const cfg = getTwilioConfig();
   if (!cfg.sid || !cfg.token || !cfg.from) {
@@ -112,6 +142,18 @@ async function sendTwilioSms({ to, body }) {
   }
   const client = twilio(cfg.sid, cfg.token);
   return await client.messages.create({ from: cfg.from, to, body });
+}
+
+async function sendTwilioWhatsApp({ to, body }) {
+  const cfg = getTwilioConfig();
+  if (!cfg.sid || !cfg.token || !cfg.whatsappFrom) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "Twilio WhatsApp not configured. Set functions config: twilio.sid, twilio.token, twilio.whatsapp_from (e.g. whatsapp:+14155238886)",
+    );
+  }
+  const client = twilio(cfg.sid, cfg.token);
+  return await client.messages.create({ from: cfg.whatsappFrom, to, body });
 }
 
 function escapeHtml(input) {
@@ -488,6 +530,208 @@ exports.generateAdminUsersReport = functions
     return await callShiftPdfHtmlToPdf({ html, fileName });
   });
 
+// =====================================================
+// ADMIN: CASCADE DELETE USER (AUDIT + HIDE EVERYWHERE)
+// =====================================================
+exports.adminCascadeDeleteUser = functions
+  .region("asia-southeast1")
+  .https.onCall(async (data, context) => {
+    const adminCtx = await assertAdmin(context);
+    const targetUid = String(data?.uid || "").trim();
+    if (!targetUid) {
+      throw new functions.https.HttpsError("invalid-argument", "Missing uid");
+    }
+
+    const deletedAt = admin.firestore.FieldValue.serverTimestamp();
+    const deletedBy = adminCtx.uid;
+
+    // Best-effort: delete Firebase Auth user (login disabled).
+    try {
+      await admin.auth().deleteUser(targetUid);
+    } catch (_) {}
+
+    const userRef = db.collection("users").doc(targetUid);
+    const caregiverRef = db.collection("caregivers").doc(targetUid);
+    const waitingRef = db.collection("waitinglist").doc(targetUid);
+
+    const [userSnap, caregiverSnap, waitingSnap] = await Promise.all([
+      userRef.get().catch(() => null),
+      caregiverRef.get().catch(() => null),
+      waitingRef.get().catch(() => null),
+    ]);
+
+    // Store a lightweight audit snapshot (do NOT expose to app UIs).
+    await db
+      .collection("auditDeletedAccounts")
+      .doc(targetUid)
+      .set(
+        {
+          uid: targetUid,
+          deletedAt,
+          deletedBy,
+          user: userSnap && userSnap.exists ? userSnap.data() || {} : null,
+          caregiver:
+            caregiverSnap && caregiverSnap.exists ? caregiverSnap.data() || {} : null,
+          waiting:
+            waitingSnap && waitingSnap.exists ? waitingSnap.data() || {} : null,
+        },
+        { merge: true },
+      );
+
+    async function commitBatchSafely(batch) {
+      try {
+        await batch.commit();
+      } catch (e) {
+        throw new functions.https.HttpsError(
+          "internal",
+          `Failed to cascade delete user: ${e?.message || e}`,
+        );
+      }
+    }
+
+    async function applyPagedQuery(baseQuery, handleDoc) {
+      let last = null;
+      const idField = admin.firestore.FieldPath.documentId();
+      for (;;) {
+        let q = baseQuery.orderBy(idField).limit(400);
+        if (last) q = q.startAfter(last);
+        const snap = await q.get();
+        if (snap.empty) break;
+
+        let batch = db.batch();
+        let opCount = 0;
+        for (const doc of snap.docs) {
+          await handleDoc(doc, {
+            set: (ref, payload) => {
+              batch.set(ref, payload, { merge: true });
+              opCount++;
+            },
+            update: (ref, payload) => {
+              batch.set(ref, payload, { merge: true });
+              opCount++;
+            },
+            delete: (ref) => {
+              batch.delete(ref);
+              opCount++;
+            },
+          });
+
+          if (opCount >= 430) {
+            await commitBatchSafely(batch);
+            batch = db.batch();
+            opCount = 0;
+          }
+        }
+
+        if (opCount > 0) {
+          await commitBatchSafely(batch);
+        }
+
+        last = snap.docs[snap.docs.length - 1];
+      }
+    }
+
+    const commonAudit = {
+      deletedByAdmin: true,
+      deletedByAdminUid: deletedBy,
+      deletedUserUid: targetUid,
+      deletedAt,
+    };
+
+    // Hide bookings for everyone (client + caregiver UIs already respect these flags).
+    const hideBooking = {
+      ...commonAudit,
+      hidden: true,
+      hiddenForClient: true,
+      hiddenForCaregiver: true,
+    };
+    await applyPagedQuery(
+      db.collection("bookings").where("userId", "==", targetUid),
+      async (doc, b) => b.update(doc.ref, hideBooking),
+    );
+    await applyPagedQuery(
+      db.collection("bookings").where("caregiverId", "==", targetUid),
+      async (doc, b) => b.update(doc.ref, hideBooking),
+    );
+
+    // Hide payments for everyone.
+    const hidePayment = {
+      ...commonAudit,
+      hidden: true,
+    };
+    await applyPagedQuery(
+      db.collection("payments").where("userId", "==", targetUid),
+      async (doc, b) => b.update(doc.ref, hidePayment),
+    );
+    await applyPagedQuery(
+      db.collection("payments").where("booking.caregiverId", "==", targetUid),
+      async (doc, b) => b.update(doc.ref, hidePayment),
+    );
+
+    // Hide documents uploads.
+    const hideDoc = { ...commonAudit, hidden: true };
+    await applyPagedQuery(
+      db.collection("documents").where("userId", "==", targetUid),
+      async (doc, b) => b.update(doc.ref, hideDoc),
+    );
+    await applyPagedQuery(
+      db.collection("documents").where("caregiverId", "==", targetUid),
+      async (doc, b) => b.update(doc.ref, hideDoc),
+    );
+
+    // Hide withdraw/refund requests (payout UIs).
+    const hideWithdraw = { ...commonAudit, hidden: true };
+    await applyPagedQuery(
+      db.collection("withdrawRequests").where("requestedBy", "==", targetUid),
+      async (doc, b) => b.update(doc.ref, hideWithdraw),
+    );
+    await applyPagedQuery(
+      db.collection("withdrawRequests").where("caregiverId", "==", targetUid),
+      async (doc, b) => b.update(doc.ref, hideWithdraw),
+    );
+
+    // Hide SOS records.
+    const hideSos = { ...commonAudit, hidden: true };
+    await applyPagedQuery(
+      db.collection("sos").where("userId", "==", targetUid),
+      async (doc, b) => b.update(doc.ref, hideSos),
+    );
+    await applyPagedQuery(
+      db.collection("sos").where("ownerUserId", "==", targetUid),
+      async (doc, b) => b.update(doc.ref, hideSos),
+    );
+    await applyPagedQuery(
+      db.collection("sos").where("caregiverId", "==", targetUid),
+      async (doc, b) => b.update(doc.ref, hideSos),
+    );
+
+    // Hide chats for all participants (uses per-user hidden map in your schema).
+    await applyPagedQuery(
+      db.collection("chats").where("participants", "array-contains", targetUid),
+      async (doc, b) => {
+        const data = doc.data() || {};
+        const participants = Array.isArray(data.participants) ? data.participants : [];
+        const hidden = {};
+        for (const p of participants) {
+          const id = String(p || "").trim();
+          if (!id) continue;
+          hidden[id] = true;
+        }
+        hidden[targetUid] = true;
+        b.update(doc.ref, { ...commonAudit, hidden });
+      },
+    );
+
+    // Remove canonical profile docs so they won't show in admin lists or app lookups.
+    const finalBatch = db.batch();
+    finalBatch.delete(userRef);
+    finalBatch.delete(caregiverRef);
+    finalBatch.delete(waitingRef);
+    await commitBatchSafely(finalBatch);
+
+    return { ok: true, uid: targetUid };
+  });
+
 exports.generateAdminCaregiverVerificationsReport = functions
   .region("asia-southeast1")
   .https.onCall(async (data, context) => {
@@ -635,13 +879,24 @@ exports.sendSosSmsToEmergencyContacts = functions
       return { ok: true, skipped: true, reason: "no_contacts", sent: 0, failed: 0 };
     }
 
-    const ownerName = String(sos.userName || userData.name || "Owner").trim();
+    const profileName = String(
+      userData.name || userData.fullName || userData.displayName || "",
+    ).trim();
+    const sosName = String(sos.userName || "").trim();
+    const ownerName =
+      profileName ||
+      (sosName && sosName.toLowerCase() !== "you" ? sosName : "") ||
+      "Owner";
     const personName = String(sos.selectedPersonName || sos.personName || "selected person").trim();
     const location = String(sos.personAddress || sos.address || sos.addressLabel || "").trim();
+    const ownerPhone = extractUserPhone(userData);
 
-    const body = location
+    const baseBody = location
       ? `ElderAssist SOS: ${ownerName} activated SOS for ${personName}. Location: ${location}.`
       : `ElderAssist SOS: ${ownerName} activated SOS for ${personName}.`;
+    const body = ownerPhone
+      ? `${baseBody} You can contact the owner through this number: ${ownerPhone}.`
+      : baseBody;
 
     let sent = 0;
     let failed = 0;
@@ -659,7 +914,10 @@ exports.sendSosSmsToEmergencyContacts = functions
         sent += 1;
       } catch (err) {
         failed += 1;
-        failures.push({ to, reason: String(err && err.message ? err.message : err).slice(0, 160) });
+        failures.push({
+          id: c && c.id,
+          reason: String(err && err.message ? err.message : err).slice(0, 160),
+        });
       }
     }
 
@@ -668,11 +926,620 @@ exports.sendSosSmsToEmergencyContacts = functions
         smsNotifiedAt: admin.firestore.FieldValue.serverTimestamp(),
         smsNotifiedCount: sent,
         smsFailedCount: failed,
+        smsFailureSample: failures.slice(0, 5),
       },
       { merge: true },
     );
 
+    console.log("sendSosSmsToEmergencyContacts summary", {
+      sosId,
+      sent,
+      failed,
+      failureSample: failures.slice(0, 5),
+    });
+
     return { ok: true, sent, failed, failures: failures.slice(0, 5) };
+  });
+
+exports.sendSosWhatsAppToEmergencyContacts = functions
+  .region("asia-southeast1")
+  .https.onCall(async (data, context) => {
+    if (!context.auth || !context.auth.uid) {
+      throw new functions.https.HttpsError("unauthenticated", "Sign in required.");
+    }
+    const uid = String(context.auth.uid).trim();
+    const sosId = String((data && data.sosId) || "").trim();
+    if (!sosId) {
+      throw new functions.https.HttpsError("invalid-argument", "Missing sosId.");
+    }
+
+    const sosRef = db.collection("sos").doc(sosId);
+    const sosSnap = await sosRef.get();
+    if (!sosSnap.exists) {
+      throw new functions.https.HttpsError("not-found", "SOS request not found.");
+    }
+    const sos = sosSnap.data() || {};
+    const ownerId = String(sos.userId || "").trim();
+    if (!ownerId || ownerId !== uid) {
+      throw new functions.https.HttpsError("permission-denied", "Not allowed.");
+    }
+
+    // Prevent duplicate sends for the same SOS.
+    if (sos.whatsappNotifiedAt) {
+      return { ok: true, skipped: true, sent: 0, failed: 0 };
+    }
+
+    const userSnap = await db.collection("users").doc(uid).get();
+    const userData = userSnap.exists ? userSnap.data() || {} : {};
+    const contactsRaw = userData.emergencyContacts;
+    const contacts = Array.isArray(contactsRaw) ? contactsRaw : [];
+    if (!contacts.length) {
+      await sosRef.set(
+        {
+          whatsappNotifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+          whatsappNotifiedCount: 0,
+        },
+        { merge: true },
+      );
+      return {
+        ok: true,
+        skipped: true,
+        reason: "no_contacts",
+        sent: 0,
+        failed: 0,
+      };
+    }
+
+    const profileName = String(
+      userData.name || userData.fullName || userData.displayName || "",
+    ).trim();
+    const sosName = String(sos.userName || "").trim();
+    const ownerName =
+      profileName ||
+      (sosName && sosName.toLowerCase() !== "you" ? sosName : "") ||
+      "Owner";
+
+    const personName = String(
+      sos.selectedPersonName || sos.personName || "selected person",
+    ).trim();
+    const location = String(
+      sos.personAddress || sos.address || sos.addressLabel || "",
+    ).trim();
+    const ownerPhone = extractUserPhone(userData);
+
+    const baseBody = location
+      ? `ElderAssist SOS: ${ownerName} activated SOS for ${personName}. Location: ${location}.`
+      : `ElderAssist SOS: ${ownerName} activated SOS for ${personName}.`;
+    const body = ownerPhone
+      ? `${baseBody} You can contact the owner through this number: ${ownerPhone}.`
+      : baseBody;
+
+    let sent = 0;
+    let failed = 0;
+    const failures = [];
+
+    for (const c of contacts) {
+      const toE164 = normalizeE164(c && c.phone);
+      if (!toE164) {
+        failed += 1;
+        failures.push({ id: c && c.id, reason: "invalid_phone" });
+        continue;
+      }
+      const to = `whatsapp:${toE164}`;
+      try {
+        await sendTwilioWhatsApp({ to, body });
+        sent += 1;
+      } catch (err) {
+        failed += 1;
+        failures.push({
+          id: c && c.id,
+          reason: String(err && err.message ? err.message : err).slice(0, 160),
+        });
+      }
+    }
+
+    await sosRef.set(
+      {
+        whatsappNotifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+        whatsappNotifiedCount: sent,
+        whatsappFailedCount: failed,
+        whatsappFailureSample: failures.slice(0, 5),
+      },
+      { merge: true },
+    );
+
+    console.log("sendSosWhatsAppToEmergencyContacts summary", {
+      sosId,
+      sent,
+      failed,
+      failureSample: failures.slice(0, 5),
+    });
+
+    return { ok: true, sent, failed, failures: failures.slice(0, 5) };
+  });
+
+// Auto-notify emergency contacts when SOS is first created (WhatsApp preferred, SMS fallback).
+exports.notifySosActivatedViaTwilio = functions
+  .region("asia-southeast1")
+  .firestore.document("sos/{sosId}")
+  .onCreate(async (snapshot, context) => {
+    const sosId = String(context.params.sosId || "").trim();
+    const sos = snapshot.data() || {};
+    const ownerId = String(sos.userId || "").trim();
+    if (!sosId || !ownerId) return null;
+
+    // Dedup (in case of replays).
+    if (sos.twilioActivationNotifiedAt) return null;
+
+    const userSnap = await db.collection("users").doc(ownerId).get();
+    const userData = userSnap.exists ? userSnap.data() || {} : {};
+    const contactsRaw = userData.emergencyContacts;
+    const contactsAll = Array.isArray(contactsRaw) ? contactsRaw : [];
+
+    const notifyIds = Array.isArray(sos.notifyContactIds)
+      ? sos.notifyContactIds.map((id) => String(id || "").trim()).filter(Boolean)
+      : [];
+    const contacts =
+      notifyIds.length > 0
+        ? contactsAll.filter((c) => notifyIds.includes(String(c && c.id).trim()))
+        : contactsAll;
+
+    if (!contacts.length) {
+      await snapshot.ref.set(
+        {
+          twilioActivationNotifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+          twilioActivationNotifiedCount: 0,
+          twilioActivationFailedCount: 0,
+          twilioActivationError: "no_emergency_contacts",
+        },
+        { merge: true },
+      );
+      return null;
+    }
+
+    const profileName = String(
+      userData.name || userData.fullName || userData.displayName || "",
+    ).trim();
+    const sosName = String(sos.userName || "").trim();
+    const ownerName =
+      profileName ||
+      (sosName && sosName.toLowerCase() !== "you" ? sosName : "") ||
+      "Owner";
+
+    const personName = String(sos.selectedPersonName || sos.personName || "selected person").trim();
+    const location = String(sos.personAddress || sos.address || sos.addressLabel || "").trim();
+    const ownerPhone = extractUserPhone(userData);
+
+    const baseBody = location
+      ? `ElderAssist SOS: ${ownerName} activated SOS for ${personName}. Location: ${location}.`
+      : `ElderAssist SOS: ${ownerName} activated SOS for ${personName}.`;
+    const body = ownerPhone
+      ? `${baseBody} You can contact the owner through this number: ${ownerPhone}.`
+      : baseBody;
+
+    let sent = 0;
+    let failed = 0;
+    const failures = [];
+
+    for (const c of contacts) {
+      const toE164 = normalizeE164(c && c.phone);
+      if (!toE164) {
+        failed += 1;
+        failures.push({ id: c && c.id, reason: "invalid_phone" });
+        continue;
+      }
+      try {
+        await sendTwilioWhatsApp({ to: `whatsapp:${toE164}`, body });
+        sent += 1;
+        continue;
+      } catch (err) {
+        const waErr = String(err && err.message ? err.message : err).slice(0, 160);
+        try {
+          await sendTwilioSms({ to: toE164, body });
+          sent += 1;
+        } catch (err2) {
+          failed += 1;
+          failures.push({
+            id: c && c.id,
+            reason: String(err2 && err2.message ? err2.message : err2).slice(0, 160),
+            waReason: waErr,
+          });
+        }
+      }
+    }
+
+    await snapshot.ref.set(
+      {
+        twilioActivationNotifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+        twilioActivationNotifiedCount: sent,
+        twilioActivationFailedCount: failed,
+        twilioActivationFailureSample: failures.slice(0, 5),
+        ...(failed > 0 ? { twilioActivationError: "some_failed" } : {}),
+      },
+      { merge: true },
+    );
+
+    console.log("notifySosActivatedViaTwilio summary", {
+      sosId,
+      recipients: contacts.length,
+      sent,
+      failed,
+      failureSample: failures.slice(0, 3),
+    });
+
+    return null;
+  });
+
+function sosStageMessage({
+  status,
+  stage,
+  ongoingStatus,
+  caregiverName,
+  personName,
+}) {
+  const st = String(status || "").toUpperCase().trim();
+  const cg = String(caregiverName || "Your caregiver").trim() || "Your caregiver";
+  const person = String(personName || "the selected person").trim() || "the selected person";
+  const stageNorm = String(stage || "").toUpperCase().trim();
+  const ongoingNorm = String(ongoingStatus || "").toUpperCase().trim();
+
+  if (st === "RESPONDER_ASSIGNED") return `${cg} accepted your SOS request.`;
+  if (st === "RESOLVED") return `SOS marked as resolved.`;
+  if (st === "CANCELLED" || st === "CANCELED") return `SOS was cancelled.`;
+  if (st === "TIMEOUT") return `SOS timed out.`;
+  if (st === "NO_MATCH") return `No caregiver match was found.`;
+  if (st === "NO_RESPONDER") return `No caregiver responded to the SOS.`;
+
+  // Prefer explicit session stage.
+  switch (stageNorm) {
+    case "START_SESSION":
+      return `${cg} is on the way.`;
+    case "ARRIVED":
+      return `${cg} has arrived at the care location.`;
+    case "PROVIDE_SERVICES":
+      return `${cg} is providing services now.`;
+    case "JOBS_DONE":
+      return `${cg} finished the required tasks.`;
+    case "COMPLETED":
+      return `SOS session for ${person} has been completed.`;
+    default:
+      break;
+  }
+
+  // Fallback to ongoingStatus if stage isn't present.
+  switch (ongoingNorm) {
+    case "START_SESSION":
+      return `${cg} is on the way.`;
+    case "ARRIVED":
+      return `${cg} has arrived at the care location.`;
+    case "PROVIDE_SERVICES":
+      return `${cg} is providing services now.`;
+    case "JOBS_DONE":
+      return `${cg} finished the required tasks.`;
+    case "COMPLETED":
+      return `SOS session for ${person} has been completed.`;
+    default:
+      return "";
+  }
+}
+
+function bookingStageMessage({
+  status,
+  stage,
+  ongoingStatus,
+  caregiverName,
+  personName,
+}) {
+  // Reuse the same wording rules.
+  return sosStageMessage({
+    status,
+    stage,
+    ongoingStatus,
+    caregiverName,
+    personName,
+  });
+}
+
+exports.notifySosOwnerStatusViaTwilio = functions
+  .region("asia-southeast1")
+  .firestore.document("sos/{sosId}")
+  .onUpdate(async (change, context) => {
+    const before = change.before.data() || {};
+    const after = change.after.data() || {};
+
+    // Only for emergency alert SOS flows.
+    const bookingStatus = String(after.bookingStatus || "").toUpperCase().trim();
+    if (bookingStatus !== "EMERGENCY_ALERT") return null;
+
+    const ownerUserId = String(after.userId || "").trim();
+    if (!ownerUserId) return null;
+
+    const status = String(after.status || "").toUpperCase().trim();
+    const stage = String(after.caregiverSessionStage || "").toUpperCase().trim();
+    const ongoingStatus = String(after.ongoingStatus || "").toUpperCase().trim();
+
+    // Only notify on meaningful state changes.
+    const statusChanged =
+      String(before.status || "").toUpperCase().trim() !== status;
+    const stageChanged =
+      String(before.caregiverSessionStage || "").toUpperCase().trim() !== stage;
+    const ongoingChanged =
+      String(before.ongoingStatus || "").toUpperCase().trim() !== ongoingStatus;
+
+    const responderAction = String(after.lastResponderAction || "").toUpperCase().trim();
+    const responderAt = String(after.lastResponderActionAt || "").trim();
+    const responderKey = responderAction && responderAt ? `${responderAction}|${responderAt}` : "";
+    const prevResponderAction = String(before.lastResponderAction || "").toUpperCase().trim();
+    const prevResponderAt = String(before.lastResponderActionAt || "").trim();
+    const prevResponderKey =
+      prevResponderAction && prevResponderAt ? `${prevResponderAction}|${prevResponderAt}` : "";
+    const responderChanged = responderKey && responderKey !== prevResponderKey;
+
+    if (!statusChanged && !stageChanged && !ongoingChanged && !responderChanged) return null;
+
+    const key = responderChanged
+      ? `RESPONDER:${responderKey}`
+      : `${status}|${stage}|${ongoingStatus}`;
+    const lastKey = String(after.twilioOwnerStatusLastKey || "").trim();
+    if (lastKey === key) return null;
+
+    const caregiverName = String(after.caregiverName || "").trim();
+
+    const personName = String(
+      after.selectedPersonName || after.personName || after.personLabel || "",
+    ).trim();
+
+    let messageCore = "";
+    let includeCaregiverContact = false;
+    if (responderChanged) {
+      const responderName = String(after.lastResponderName || caregiverName || "Caregiver").trim();
+      const responderPhone = String(after.lastResponderPhone || after.caregiverPhone || "").trim();
+      if (responderAction === "ACCEPTED") {
+        messageCore = `${responderName} accepted your request.`;
+        includeCaregiverContact = Boolean(responderPhone);
+      } else if (responderAction === "DECLINED" || responderAction === "REJECTED") {
+        messageCore = `${responderName} rejected your request.`;
+        includeCaregiverContact = Boolean(responderPhone);
+      } else {
+        // Unknown responder event; fall back to regular stage message.
+      }
+      if (includeCaregiverContact && responderPhone) {
+        messageCore = `${messageCore} You can contact caregiver through this number: ${responderPhone}.`;
+      }
+    }
+
+    if (!messageCore) {
+      messageCore = sosStageMessage({
+        status,
+        stage,
+        ongoingStatus,
+        caregiverName,
+        personName,
+      });
+    }
+    if (!messageCore) return null;
+
+    const userSnap = await db.collection("users").doc(ownerUserId).get();
+    const userData = userSnap.exists ? userSnap.data() || {} : {};
+    const contactsRaw = userData.emergencyContacts;
+    const contactsAll = Array.isArray(contactsRaw) ? contactsRaw : [];
+    const notifyIds = Array.isArray(after.notifyContactIds)
+      ? after.notifyContactIds.map((id) => String(id || "").trim()).filter(Boolean)
+      : [];
+    const contacts =
+      notifyIds.length > 0
+        ? contactsAll.filter((c) => notifyIds.includes(String(c && c.id).trim()))
+        : contactsAll;
+
+    if (!contacts.length) {
+      await change.after.ref.set(
+        {
+          twilioOwnerStatusLastKey: key,
+          twilioOwnerStatusLastAt: admin.firestore.FieldValue.serverTimestamp(),
+          twilioOwnerStatusLastError: "no_emergency_contacts",
+        },
+        { merge: true },
+      );
+      return null;
+    }
+
+    const body = `ElderAssist SOS Update: ${messageCore}`;
+
+    let sent = 0;
+    let failed = 0;
+    const failures = [];
+
+    for (const c of contacts) {
+      const toE164 = normalizeE164(c && c.phone);
+      if (!toE164) {
+        failed += 1;
+        failures.push({ id: c && c.id, reason: "invalid_phone" });
+        continue;
+      }
+
+      // Prefer WhatsApp if configured; fallback to SMS per contact.
+      try {
+        await sendTwilioWhatsApp({ to: `whatsapp:${toE164}`, body });
+        sent += 1;
+        continue;
+      } catch (err) {
+        const waErr = String(err && err.message ? err.message : err).slice(0, 160);
+        try {
+          await sendTwilioSms({ to: toE164, body });
+          sent += 1;
+        } catch (err2) {
+          failed += 1;
+          failures.push({
+            id: c && c.id,
+            reason: String(err2 && err2.message ? err2.message : err2).slice(0, 160),
+            waReason: waErr,
+          });
+        }
+      }
+    }
+
+    await change.after.ref.set(
+      {
+        twilioOwnerStatusLastKey: key,
+        twilioOwnerStatusLastAt: admin.firestore.FieldValue.serverTimestamp(),
+        twilioOwnerStatusLastSentCount: sent,
+        twilioOwnerStatusLastFailedCount: failed,
+        twilioOwnerStatusLastFailureSample: failures.slice(0, 5),
+        ...(failed > 0 ? { twilioOwnerStatusLastError: "some_failed" } : {}),
+      },
+      { merge: true },
+    );
+
+    console.log("notifySosOwnerStatusViaTwilio summary", {
+      sosId: context.params.sosId,
+      key,
+      recipients: contacts.length,
+      sent,
+      failed,
+      failureSample: failures.slice(0, 3),
+    });
+
+    return null;
+  });
+
+exports.notifyEmergencyBookingStatusViaTwilio = functions
+  .region("asia-southeast1")
+  .firestore.document("bookings/{bookingId}")
+  .onUpdate(async (change, context) => {
+    const before = change.before.data() || {};
+    const after = change.after.data() || {};
+
+    const sosId = String(after.sosId || "").trim();
+    if (!sosId) return null;
+
+    const userId = String(after.userId || "").trim();
+    if (!userId) return null;
+
+    const status = String(after.status || "").toUpperCase().trim();
+    const stage = String(after.caregiverSessionStage || "").toUpperCase().trim();
+    const ongoingStatus = String(after.ongoingStatus || "").toUpperCase().trim();
+
+    const statusChanged =
+      String(before.status || "").toUpperCase().trim() !== status;
+    const stageChanged =
+      String(before.caregiverSessionStage || "").toUpperCase().trim() !== stage;
+    const ongoingChanged =
+      String(before.ongoingStatus || "").toUpperCase().trim() !== ongoingStatus;
+
+    if (!statusChanged && !stageChanged && !ongoingChanged) return null;
+
+    const key = `${status}|${stage}|${ongoingStatus}`;
+    const lastKey = String(after.twilioEmergencyStatusLastKey || "").trim();
+    if (lastKey === key) return null;
+
+    const caregiverName = String(
+      after.caregiverName || after.assignedCaregiverName || "",
+    ).trim();
+    const personName = String(
+      after.personName || after.selectedPersonName || after.addressLabel || "",
+    ).trim();
+
+    const messageCore = bookingStageMessage({
+      status,
+      stage,
+      ongoingStatus,
+      caregiverName,
+      personName,
+    });
+    if (!messageCore) return null;
+
+    const userSnap = await db.collection("users").doc(userId).get();
+    const userData = userSnap.exists ? userSnap.data() || {} : {};
+
+    const contactsRaw = userData.emergencyContacts;
+    const contactsAll = Array.isArray(contactsRaw) ? contactsRaw : [];
+
+    // If SOS specified a subset of contacts, respect it.
+    let notifyIds = [];
+    try {
+      const sosSnap = await db.collection("sos").doc(sosId).get();
+      const sosData = sosSnap.exists ? sosSnap.data() || {} : {};
+      notifyIds = Array.isArray(sosData.notifyContactIds)
+        ? sosData.notifyContactIds.map((id) => String(id || "").trim()).filter(Boolean)
+        : [];
+    } catch (_) {
+      // ignore sos lookup failures, send to all contacts
+    }
+
+    const contacts =
+      notifyIds.length > 0
+        ? contactsAll.filter((c) => notifyIds.includes(String(c && c.id).trim()))
+        : contactsAll;
+
+    if (!contacts.length) {
+      await change.after.ref.set(
+        {
+          twilioEmergencyStatusLastKey: key,
+          twilioEmergencyStatusLastAt: admin.firestore.FieldValue.serverTimestamp(),
+          twilioEmergencyStatusLastError: "no_emergency_contacts",
+        },
+        { merge: true },
+      );
+      return null;
+    }
+
+    const body = `ElderAssist SOS Update: ${messageCore}`;
+
+    let sent = 0;
+    let failed = 0;
+    const failures = [];
+
+    for (const c of contacts) {
+      const toE164 = normalizeE164(c && c.phone);
+      if (!toE164) {
+        failed += 1;
+        failures.push({ id: c && c.id, reason: "invalid_phone" });
+        continue;
+      }
+
+      try {
+        await sendTwilioWhatsApp({ to: `whatsapp:${toE164}`, body });
+        sent += 1;
+        continue;
+      } catch (err) {
+        const waErr = String(err && err.message ? err.message : err).slice(0, 160);
+        try {
+          await sendTwilioSms({ to: toE164, body });
+          sent += 1;
+        } catch (err2) {
+          failed += 1;
+          failures.push({
+            id: c && c.id,
+            reason: String(err2 && err2.message ? err2.message : err2).slice(0, 160),
+            waReason: waErr,
+          });
+        }
+      }
+    }
+
+    await change.after.ref.set(
+      {
+        twilioEmergencyStatusLastKey: key,
+        twilioEmergencyStatusLastAt: admin.firestore.FieldValue.serverTimestamp(),
+        twilioEmergencyStatusLastSentCount: sent,
+        twilioEmergencyStatusLastFailedCount: failed,
+        twilioEmergencyStatusLastFailureSample: failures.slice(0, 5),
+        ...(failed > 0 ? { twilioEmergencyStatusLastError: "some_failed" } : {}),
+      },
+      { merge: true },
+    );
+
+    console.log("notifyEmergencyBookingStatusViaTwilio summary", {
+      bookingId: context.params.bookingId,
+      sosId,
+      key,
+      recipients: contacts.length,
+      sent,
+      failed,
+      failureSample: failures.slice(0, 3),
+    });
+
+    return null;
   });
 
 exports.generateAdminBookingsReport = functions
@@ -1558,6 +2425,752 @@ exports.syncPaymentBookingStatus = functions
     }
   });
 
+function formatMalaysiaIsoDate(date = new Date()) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kuala_Lumpur",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(date);
+    const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+    const y = map.year || "0000";
+    const m = map.month || "01";
+    const d = map.day || "01";
+    return `${y}-${m}-${d}`;
+  } catch (_) {
+    // Fallback: best effort.
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+function buildBookingTimeLabel(booking) {
+  const startTime = String(booking.startTime || "").trim();
+  const endTime = String(booking.endTime || "").trim();
+  const time = String(booking.time || "").trim();
+  if (startTime && endTime) return `${startTime} - ${endTime}`;
+  return time || startTime || "-";
+}
+
+function buildBookingReminderBody(booking) {
+  const dateIso = String(booking.date || booking.scheduledDate || "").trim();
+  const timeLabel = buildBookingTimeLabel(booking);
+  const todayIso = formatMalaysiaIsoDate(new Date());
+  const dateLabel = dateIso && /^\d{4}-\d{2}-\d{2}$/.test(dateIso)
+    ? (dateIso === todayIso ? "today" : `on ${dateIso}`)
+    : "today";
+  return `You have a booking ${dateLabel} at ${timeLabel}.`;
+}
+
+function buildCaregiverReminderBody(booking) {
+  const person = String(booking.personName || "client").trim();
+  const dateIso = String(booking.date || booking.scheduledDate || "").trim();
+  const timeLabel = buildBookingTimeLabel(booking);
+  const todayIso = formatMalaysiaIsoDate(new Date());
+  const dateLabel = dateIso && /^\d{4}-\d{2}-\d{2}$/.test(dateIso)
+    ? (dateIso === todayIso ? "today" : `on ${dateIso}`)
+    : "today";
+  return `You have a booking with ${person} ${dateLabel} at ${timeLabel}.`;
+}
+
+function ongoingStatusToClientMessage(value) {
+  const status = normalizeEnum(value);
+  if (!status) return null;
+  if (status === "START_SESSION" || status === "STARTED" || status === "ON_THE_WAY") {
+    return "Your caregiver is on the way.";
+  }
+  if (status === "ARRIVED") return "Your caregiver has arrived.";
+  if (status === "PROVIDE_SERVICES" || status === "PROVIDING_SERVICES") {
+    return "Your caregiver is providing services.";
+  }
+  if (status === "JOBS_DONE" || status === "JOB_DONE") return "Your booking is marked as done.";
+  if (status === "COMPLETED") return "Your booking has been completed.";
+  return null;
+}
+
+// BOOKING STATUS + ONGOING STATUS notifications (client + caregiver).
+exports.notifyBookingUpdates = functions
+  .region("asia-southeast1")
+  .firestore.document("bookings/{bookingId}")
+  .onUpdate(async (change, context) => {
+    const before = change.before.data() || {};
+    const after = change.after.data() || {};
+    const bookingId = String(context.params.bookingId || "").trim();
+    if (!bookingId) return null;
+
+    const userId = String(after.userId || before.userId || "").trim();
+    const caregiverId = String(after.caregiverId || before.caregiverId || "").trim();
+
+    const beforeStatus = normalizeBookingStatus(before.status);
+    const afterStatus = normalizeBookingStatus(after.status);
+    const beforeOngoing = normalizeEnum(before.ongoingStatus);
+    const afterOngoing = normalizeEnum(after.ongoingStatus);
+
+    const personName = String(after.personName || after.selectedPersonName || "Client").trim();
+    const caregiverName = String(after.caregiverName || "Caregiver").trim();
+
+    if (afterOngoing && afterOngoing !== beforeOngoing && userId) {
+      const msg = ongoingStatusToClientMessage(afterOngoing);
+      if (msg) {
+        await sendTopicNotification({
+          topic: userId,
+          title: "Booking Update",
+          body: msg,
+          data: {
+            type: "booking_stage",
+            bookingId,
+            ongoingStatus: afterOngoing,
+          },
+          regionLabel: "notifyBookingUpdates",
+        });
+      }
+    }
+
+    if (afterStatus && afterStatus !== beforeStatus) {
+      if (afterStatus === BOOKING_ASSIGNED_STATUS) {
+        if (userId) {
+          await sendTopicNotification({
+            topic: userId,
+            title: "Booking Active",
+            body: `${caregiverName} is assigned to your booking.`,
+            data: { type: "booking_status", bookingId, status: afterStatus },
+            regionLabel: "notifyBookingUpdates",
+          });
+        }
+        if (caregiverId) {
+          await sendTopicNotification({
+            topic: caregiverId,
+            title: "Booking Active",
+            body: `You have an active booking with ${personName}.`,
+            data: { type: "booking_status", bookingId, status: afterStatus },
+            regionLabel: "notifyBookingUpdates",
+          });
+        }
+      } else if (afterStatus === BOOKING_CANCELLED_STATUS) {
+        if (userId) {
+          await sendTopicNotification({
+            topic: userId,
+            title: "Booking Cancelled",
+            body: "Your booking has been cancelled.",
+            data: { type: "booking_status", bookingId, status: afterStatus },
+            regionLabel: "notifyBookingUpdates",
+          });
+        }
+        if (caregiverId) {
+          await sendTopicNotification({
+            topic: caregiverId,
+            title: "Booking Cancelled",
+            body: `Booking with ${personName} has been cancelled.`,
+            data: { type: "booking_status", bookingId, status: afterStatus },
+            regionLabel: "notifyBookingUpdates",
+          });
+        }
+      } else if (afterStatus === BOOKING_COMPLETED_STATUS) {
+        if (userId) {
+          await sendTopicNotification({
+            topic: userId,
+            title: "Booking Completed",
+            body: "Your booking has been completed.",
+            data: { type: "booking_status", bookingId, status: afterStatus },
+            regionLabel: "notifyBookingUpdates",
+          });
+        }
+        if (caregiverId) {
+          await sendTopicNotification({
+            topic: caregiverId,
+            title: "Booking Completed",
+            body: `Booking with ${personName} has been completed.`,
+            data: { type: "booking_status", bookingId, status: afterStatus },
+            regionLabel: "notifyBookingUpdates",
+          });
+        }
+      }
+    }
+
+    return null;
+  });
+
+// BOOKING REMINDERS: 30 minutes before scheduledAt (client + caregiver).
+exports.sendBookingReminders30m = functions
+  .region("asia-southeast1")
+  .pubsub.schedule("every 1 minutes")
+  .timeZone("Asia/Kuala_Lumpur")
+  .onRun(async () => {
+    const now = admin.firestore.Timestamp.now();
+    const target = admin.firestore.Timestamp.fromMillis(
+      now.toMillis() + 30 * 60 * 1000,
+    );
+
+    // Query by scheduledAt only (avoid composite index), then filter in-memory.
+    const windowStart = admin.firestore.Timestamp.fromMillis(
+      target.toMillis() - 60 * 1000,
+    );
+    const windowEnd = admin.firestore.Timestamp.fromMillis(
+      target.toMillis() + 60 * 1000,
+    );
+
+    const snapshot = await db
+      .collection("bookings")
+      .where("scheduledAt", ">=", windowStart)
+      .where("scheduledAt", "<=", windowEnd)
+      .limit(200)
+      .get();
+    if (snapshot.empty) return null;
+
+    const batch = db.batch();
+    let processed = 0;
+
+    for (const doc of snapshot.docs) {
+      const booking = doc.data() || {};
+      const status = normalizeBookingStatus(booking.status);
+      if (status !== BOOKING_SCHEDULED_STATUS) continue;
+
+      const userId = String(booking.userId || "").trim();
+      const caregiverId = String(booking.caregiverId || "").trim();
+      if (!userId || !caregiverId) continue;
+
+      const userSentAt = booking.reminder30mUserAt || null;
+      const caregiverSentAt = booking.reminder30mCaregiverAt || null;
+
+      if (!userSentAt) {
+        await sendTopicNotification({
+          topic: userId,
+          title: "Booking Reminder",
+          body: buildBookingReminderBody(booking),
+          data: { type: "booking_reminder", bookingId: doc.id, minutes: "30" },
+          regionLabel: "sendBookingReminders30m",
+        });
+        batch.set(
+          doc.ref,
+          { reminder30mUserAt: admin.firestore.FieldValue.serverTimestamp() },
+          { merge: true },
+        );
+      }
+
+      if (!caregiverSentAt) {
+        await sendTopicNotification({
+          topic: caregiverId,
+          title: "Booking Reminder",
+          body: buildCaregiverReminderBody(booking),
+          data: { type: "booking_reminder", bookingId: doc.id, minutes: "30" },
+          regionLabel: "sendBookingReminders30m",
+        });
+        batch.set(
+          doc.ref,
+          { reminder30mCaregiverAt: admin.firestore.FieldValue.serverTimestamp() },
+          { merge: true },
+        );
+      }
+
+      processed += 1;
+    }
+
+    if (processed > 0) {
+      await batch.commit();
+    }
+    return { processed };
+  });
+
+// PAYMENTS: notify user when payment succeeds/fails.
+exports.notifyPaymentStatus = functions
+  .region("asia-southeast1")
+  .firestore.document("payments/{paymentId}")
+  .onWrite(async (change, context) => {
+    const before = change.before.exists ? change.before.data() || {} : {};
+    const after = change.after.exists ? change.after.data() || {} : null;
+    if (!after) return null;
+
+    const beforeStatus = normalizeEnum(before.paymentStatus);
+    const afterStatus = normalizeEnum(after.paymentStatus);
+    const beforeVerified = Boolean(before.verified);
+    const afterVerified = Boolean(after.verified);
+    const statusChanged = !change.before.exists || beforeStatus !== afterStatus;
+    const verifiedChanged = change.before.exists && beforeVerified !== afterVerified;
+    if (!afterStatus || (!statusChanged && !verifiedChanged)) return null;
+
+    const userId = String(after.userId || "").trim();
+    if (!userId) return null;
+
+    const bookingId = String(after.bookingId || "").trim();
+    const billCode = String(after.billCode || context.params.paymentId || "").trim();
+
+    let title = "";
+    let body = "";
+    if (afterStatus === "PAID" || afterStatus === "SUCCESS") {
+      title = "Payment Successful";
+      body = "Your payment has been received.";
+    } else if (afterStatus === "FAILED" || afterStatus === "CANCELLED" || afterStatus === "CANCELED") {
+      title = "Payment Failed";
+      body = "Your payment was not completed. Please try again.";
+    } else if (afterStatus === "REFUND_REQUESTED") {
+      title = "Refund Requested";
+      body = "Your refund request has been submitted for verification.";
+    } else if (afterStatus === "REFUNDED") {
+      title = "Refund Verified";
+      body = "Your refund has been verified.";
+    } else if (verifiedChanged && afterVerified) {
+      title = "Refund Verified";
+      body = "Your refund has been verified.";
+    } else {
+      return null;
+    }
+
+    await sendTopicNotification({
+      topic: userId,
+      title,
+      body,
+      data: {
+        type: "payment_status",
+        bookingId,
+        billCode,
+        paymentStatus: afterStatus,
+        verified: afterVerified ? "true" : "false",
+      },
+      regionLabel: "notifyPaymentStatus",
+    });
+
+    return null;
+  });
+
+// WITHDRAW REQUESTS: notify caregiver when request is approved/rejected.
+exports.notifyWithdrawRequestStatus = functions
+  .region("asia-southeast1")
+  .firestore.document("withdrawRequests/{requestId}")
+  .onWrite(async (change, context) => {
+    const before = change.before.exists ? change.before.data() || {} : {};
+    const after = change.after.exists ? change.after.data() || {} : null;
+    if (!after) return null;
+
+    const beforeStatus = normalizeEnum(before.status);
+    const afterStatus = normalizeEnum(after.status);
+    if (!afterStatus || (change.before.exists && beforeStatus === afterStatus)) {
+      return null;
+    }
+
+    const caregiverId = String(after.caregiverId || after.requestedBy || "").trim();
+    if (!caregiverId) return null;
+
+    let title = "";
+    let body = "";
+    if (afterStatus === "APPROVED") {
+      title = "Withdrawal Approved";
+      body = "Your withdrawal request has been approved.";
+    } else if (afterStatus === "REJECTED" || afterStatus === "DECLINED") {
+      title = "Withdrawal Rejected";
+      body = "Your withdrawal request was rejected.";
+    } else {
+      return null;
+    }
+
+    await sendTopicNotification({
+      topic: caregiverId,
+      title,
+      body,
+      data: {
+        type: "withdraw_status",
+        requestId: String(context.params.requestId || "").trim(),
+        status: afterStatus,
+      },
+      regionLabel: "notifyWithdrawRequestStatus",
+    });
+
+    return null;
+  });
+
+// DOCUMENTS: notify caregiver when document is verified/unverified.
+exports.notifyDocumentVerification = functions
+  .region("asia-southeast1")
+  .firestore.document("documents/{docId}")
+  .onWrite(async (change, context) => {
+    const before = change.before.exists ? change.before.data() || {} : {};
+    const after = change.after.exists ? change.after.data() || {} : null;
+    if (!after) return null;
+
+    const beforeStatus = Boolean(before.status);
+    const afterStatus = Boolean(after.status);
+    if (change.before.exists && beforeStatus === afterStatus) return null;
+
+    const caregiverId = String(after.caregiverId || "").trim();
+    if (!caregiverId) return null;
+
+    // Only notify when admin toggles verification (ignore initial create=false).
+    if (!change.before.exists && afterStatus === false) return null;
+
+    const docName = String(after.name || after.fileName || "Document").trim();
+    const title = afterStatus ? "Document Verified" : "Document Unverified";
+    const body = afterStatus
+      ? `${docName} has been verified.`
+      : `${docName} has been marked unverified.`;
+
+    await sendTopicNotification({
+      topic: caregiverId,
+      title,
+      body,
+      data: {
+        type: "document_status",
+        docId: String(context.params.docId || "").trim(),
+        status: afterStatus ? "VERIFIED" : "UNVERIFIED",
+      },
+      regionLabel: "notifyDocumentVerification",
+    });
+
+    return null;
+  });
+
+function mapByIdFromAddressList(list) {
+  const out = new Map();
+  const arr = Array.isArray(list) ? list : [];
+  for (const item of arr) {
+    if (!item || typeof item !== "object") continue;
+    const id = String(item.id || item.personId || "").trim();
+    if (!id) continue;
+    out.set(id, item);
+  }
+  return out;
+}
+
+function stringifyAddressEntry(entry) {
+  if (!entry || typeof entry !== "object") return "";
+  const safe = {
+    id: String(entry.id || "").trim(),
+    name: String(entry.name || "").trim(),
+    phone: String(entry.phone || "").trim(),
+    address: String(entry.address || "").trim(),
+    label: String(entry.label || "").trim(),
+    isDefault: Boolean(entry.isDefault),
+    photoUrl: String(entry.photoUrl || "").trim(),
+  };
+  return JSON.stringify(safe);
+}
+
+function diffAddressList(beforeList, afterList) {
+  const beforeMap = mapByIdFromAddressList(beforeList);
+  const afterMap = mapByIdFromAddressList(afterList);
+
+  const added = [];
+  const removed = [];
+  const updated = [];
+
+  for (const [id, afterEntry] of afterMap.entries()) {
+    if (!beforeMap.has(id)) {
+      added.push(afterEntry);
+      continue;
+    }
+    const beforeEntry = beforeMap.get(id);
+    if (stringifyAddressEntry(beforeEntry) !== stringifyAddressEntry(afterEntry)) {
+      updated.push(afterEntry);
+    }
+  }
+  for (const [id, beforeEntry] of beforeMap.entries()) {
+    if (!afterMap.has(id)) removed.push(beforeEntry);
+  }
+
+  return { added, removed, updated };
+}
+
+function buildAccountUpdateMessage({ profileChanges, addressDiff }) {
+  const parts = [];
+  if (profileChanges.length) {
+    parts.push(`Profile: ${profileChanges.join(", ")}.`);
+  }
+  const addressParts = [];
+  if (addressDiff.added.length) addressParts.push(`${addressDiff.added.length} added`);
+  if (addressDiff.updated.length) addressParts.push(`${addressDiff.updated.length} updated`);
+  if (addressDiff.removed.length) addressParts.push(`${addressDiff.removed.length} removed`);
+  if (addressParts.length) {
+    parts.push(`Addresses: ${addressParts.join(", ")}.`);
+  }
+  return parts.join(" ");
+}
+
+// USERS: notify profile/security + addresses add/edit/remove.
+exports.notifyUserAccountUpdates = functions
+  .region("asia-southeast1")
+  .firestore.document("users/{userId}")
+  .onUpdate(async (change, context) => {
+    const userId = String(context.params.userId || "").trim();
+    if (!userId) return null;
+
+    const before = change.before.data() || {};
+    const after = change.after.data() || {};
+
+    const profileChanges = [];
+    const beforeEmail = String(before.email || "").trim();
+    const afterEmail = String(after.email || "").trim();
+    if (afterEmail && beforeEmail && afterEmail !== beforeEmail) profileChanges.push("email changed");
+
+    const beforePhone = String(before.phone || "").trim();
+    const afterPhone = String(after.phone || "").trim();
+    if (afterPhone && beforePhone && afterPhone !== beforePhone) profileChanges.push("phone changed");
+
+    const beforeName = String(before.name || "").trim();
+    const afterName = String(after.name || "").trim();
+    if (afterName && beforeName && afterName !== beforeName) profileChanges.push("name updated");
+
+    const beforePhoto = String(before.photoUrl || "").trim();
+    const afterPhoto = String(after.photoUrl || "").trim();
+    if (afterPhoto && beforePhoto && afterPhoto !== beforePhoto) profileChanges.push("photo updated");
+
+    const beforeDefaultAddress = String(before.defaultAddress || "").trim();
+    const afterDefaultAddress = String(after.defaultAddress || "").trim();
+    if (afterDefaultAddress && beforeDefaultAddress && afterDefaultAddress !== beforeDefaultAddress) {
+      profileChanges.push("default address updated");
+    }
+
+    const addressDiff = diffAddressList(before.address, after.address);
+    const hasAddressChanges =
+      addressDiff.added.length || addressDiff.updated.length || addressDiff.removed.length;
+
+    if (!profileChanges.length && !hasAddressChanges) return null;
+
+    const title = profileChanges.some((c) => c.includes("email") || c.includes("phone"))
+      ? "Security Update"
+      : "Account Updated";
+    const body = buildAccountUpdateMessage({ profileChanges, addressDiff }) || "Your account was updated.";
+
+    await sendTopicNotification({
+      topic: userId,
+      title,
+      body,
+      data: {
+        type: "account_update",
+        userId,
+      },
+      regionLabel: "notifyUserAccountUpdates",
+    });
+
+    return null;
+  });
+
+// CAREGIVERS: notify profile/security updates.
+exports.notifyCaregiverAccountUpdates = functions
+  .region("asia-southeast1")
+  .firestore.document("caregivers/{caregiverId}")
+  .onUpdate(async (change, context) => {
+    const caregiverId = String(context.params.caregiverId || "").trim();
+    if (!caregiverId) return null;
+
+    const before = change.before.data() || {};
+    const after = change.after.data() || {};
+
+    const profileChanges = [];
+    const beforeEmail = String(before.email || "").trim();
+    const afterEmail = String(after.email || "").trim();
+    if (afterEmail && beforeEmail && afterEmail !== beforeEmail) profileChanges.push("email changed");
+
+    const beforePhone = String(before.phone || "").trim();
+    const afterPhone = String(after.phone || "").trim();
+    if (afterPhone && beforePhone && afterPhone !== beforePhone) profileChanges.push("phone changed");
+
+    const beforeName = String(before.name || "").trim();
+    const afterName = String(after.name || "").trim();
+    if (afterName && beforeName && afterName !== beforeName) profileChanges.push("name updated");
+
+    const beforePhoto = String(before.photoUrl || "").trim();
+    const afterPhoto = String(after.photoUrl || "").trim();
+    if (afterPhoto && beforePhoto && afterPhoto !== beforePhoto) profileChanges.push("photo updated");
+
+    const beforeDefaultAddress = String(before.defaultAddress || "").trim();
+    const afterDefaultAddress = String(after.defaultAddress || "").trim();
+    if (afterDefaultAddress && beforeDefaultAddress && afterDefaultAddress !== beforeDefaultAddress) {
+      profileChanges.push("default address updated");
+    }
+
+    if (!profileChanges.length) return null;
+
+    const title = profileChanges.some((c) => c.includes("email") || c.includes("phone"))
+      ? "Security Update"
+      : "Profile Updated";
+    const body = `Your caregiver profile was updated: ${profileChanges.join(", ")}.`;
+
+    await sendTopicNotification({
+      topic: caregiverId,
+      title,
+      body,
+      data: {
+        type: "account_update",
+        caregiverId,
+      },
+      regionLabel: "notifyCaregiverAccountUpdates",
+    });
+
+    return null;
+  });
+
+async function listAdminTopicTargets(limit = 50) {
+  try {
+    const snap = await db.collection("admin").limit(Math.max(1, Math.min(limit, 200))).get();
+    return snap.docs
+      .map((d) => String(d.id || "").trim())
+      .filter(Boolean);
+  } catch (_) {
+    return [];
+  }
+}
+
+async function notifyAdmins({ title, body, data, regionLabel }) {
+  const adminIds = await listAdminTopicTargets(50);
+  if (!adminIds.length) return;
+  await Promise.all(
+    adminIds.map((id) =>
+      sendTopicNotification({
+        topic: id,
+        title,
+        body,
+        data,
+        regionLabel,
+      }),
+    ),
+  );
+}
+
+// Optional: notify the signed-in user when they request a password reset from inside the app.
+exports.notifyPasswordResetRequested = functions
+  .region("asia-southeast1")
+  .https.onCall(async (_data, context) => {
+    if (!context.auth) {
+      throw new functions.https.HttpsError("unauthenticated");
+    }
+    const uid = String(context.auth.uid || "").trim();
+    if (!uid) {
+      throw new functions.https.HttpsError("unauthenticated");
+    }
+
+    await sendTopicNotification({
+      topic: uid,
+      title: "Security Update",
+      body: "A password reset link was requested for your account.",
+      data: {
+        type: "security_password_reset",
+        userId: uid,
+      },
+      regionLabel: "notifyPasswordResetRequested",
+    });
+
+    return { success: true };
+  });
+
+// ADMIN: notify on key events (SOS created, refund requested/verified, withdraw request created/updated).
+exports.notifyAdminSosCreated = functions
+  .region("asia-southeast1")
+  .firestore.document("sos/{sosId}")
+  .onCreate(async (snapshot, context) => {
+    const sosId = String(context.params.sosId || "").trim();
+    const sos = snapshot.data() || {};
+    const personName = String(sos.selectedPersonName || sos.personName || "Person").trim();
+    const address = String(sos.personAddress || sos.addressLabel || sos.address || "").trim();
+    const userName = String(sos.userName || "User").trim();
+    const body = address
+      ? `${userName} activated SOS for ${personName} near ${address}.`
+      : `${userName} activated SOS for ${personName}.`;
+    await notifyAdmins({
+      title: "New SOS",
+      body,
+      data: { type: "admin_sos", sosId },
+      regionLabel: "notifyAdminSosCreated",
+    });
+    return null;
+  });
+
+exports.notifyAdminRefundEvents = functions
+  .region("asia-southeast1")
+  .firestore.document("payments/{paymentId}")
+  .onWrite(async (change, context) => {
+    const before = change.before.exists ? change.before.data() || {} : {};
+    const after = change.after.exists ? change.after.data() || {} : null;
+    if (!after) return null;
+
+    const beforeStatus = normalizeEnum(before.paymentStatus);
+    const afterStatus = normalizeEnum(after.paymentStatus);
+    const beforeVerified = Boolean(before.verified);
+    const afterVerified = Boolean(after.verified);
+
+    const bookingId = String(after.bookingId || "").trim();
+    const paymentId = String(context.params.paymentId || "").trim();
+
+    if (afterStatus === "REFUND_REQUESTED" && afterStatus !== beforeStatus) {
+      await notifyAdmins({
+        title: "Refund Requested",
+        body: `A refund was requested for booking ${bookingId || "-"}.`,
+        data: { type: "admin_refund_requested", bookingId, paymentId },
+        regionLabel: "notifyAdminRefundEvents",
+      });
+      return null;
+    }
+
+    if (
+      (afterStatus === "REFUNDED" && afterStatus !== beforeStatus) ||
+      (afterVerified && !beforeVerified)
+    ) {
+      await notifyAdmins({
+        title: "Refund Verified",
+        body: `A refund was verified for booking ${bookingId || "-"}.`,
+        data: { type: "admin_refund_verified", bookingId, paymentId },
+        regionLabel: "notifyAdminRefundEvents",
+      });
+      return null;
+    }
+
+    return null;
+  });
+
+exports.notifyAdminWithdrawEvents = functions
+  .region("asia-southeast1")
+  .firestore.document("withdrawRequests/{requestId}")
+  .onWrite(async (change, context) => {
+    const before = change.before.exists ? change.before.data() || {} : {};
+    const after = change.after.exists ? change.after.data() || {} : null;
+    if (!after) return null;
+
+    const beforeStatus = normalizeEnum(before.status);
+    const afterStatus = normalizeEnum(after.status);
+    if (!afterStatus) return null;
+
+    const requestId = String(context.params.requestId || "").trim();
+    const caregiverId = String(after.caregiverId || after.requestedBy || "").trim();
+
+    if (!change.before.exists && afterStatus === "PENDING") {
+      await notifyAdmins({
+        title: "New Withdrawal Request",
+        body: `A caregiver requested a withdrawal (${caregiverId || "-" }).`,
+        data: { type: "admin_withdraw_created", requestId, caregiverId },
+        regionLabel: "notifyAdminWithdrawEvents",
+      });
+      return null;
+    }
+
+    if (change.before.exists && beforeStatus !== afterStatus) {
+      await notifyAdmins({
+        title: "Withdrawal Updated",
+        body: `Withdrawal request ${requestId} is now ${afterStatus}.`,
+        data: { type: "admin_withdraw_updated", requestId, caregiverId, status: afterStatus },
+        regionLabel: "notifyAdminWithdrawEvents",
+      });
+    }
+
+    return null;
+  });
+
+exports.notifyAdminDocumentUploaded = functions
+  .region("asia-southeast1")
+  .firestore.document("documents/{docId}")
+  .onCreate(async (snapshot, context) => {
+    const docId = String(context.params.docId || "").trim();
+    const docData = snapshot.data() || {};
+    const caregiverId = String(docData.caregiverId || "").trim();
+    const name = String(docData.name || docData.fileName || "Document").trim();
+
+    await notifyAdmins({
+      title: "New Document Upload",
+      body: caregiverId
+        ? `${name} uploaded by caregiver ${caregiverId}.`
+        : `${name} uploaded.`,
+      data: { type: "admin_document_uploaded", docId, caregiverId },
+      regionLabel: "notifyAdminDocumentUploaded",
+    });
+    return null;
+  });
+
 // One-time helper: backfill missing payments.bookingStatus using embedded booking
 // fields (date/time). Admin only.
 exports.backfillPaymentsBookingStatus = functions
@@ -1864,6 +3477,232 @@ exports.sendChatNotification = functions
         body: message.text?.slice(0, 50) || "",
       },
     });
+
+    return null;
+  });
+
+// =====================================================
+// SOS NOTIFICATIONS
+// =====================================================
+exports.notifySosActivated = functions
+  .region("us-central1")
+  .firestore.document("sos/{sosId}")
+  .onCreate(async (snapshot, context) => {
+    const data = snapshot.data() || {};
+    const sosId = String(context.params.sosId || "").trim();
+    const userId = String(data.userId || "").trim();
+    if (!userId || !sosId) return null;
+
+    const personName = String(
+      data.selectedPersonName || data.personName || "User",
+    ).trim();
+
+    try {
+      await admin.messaging().send({
+        topic: userId,
+        notification: {
+          title: "SOS Activated",
+          body: `Searching caregiver for ${personName}.`,
+        },
+        data: {
+          type: "sos_activated",
+          sosId,
+          userId,
+          personName,
+        },
+        android: { priority: "high" },
+        apns: { headers: { "apns-priority": "10" } },
+      });
+    } catch (err) {
+      console.error("notifySosActivated failed", sosId, err);
+    }
+
+    return null;
+  });
+
+exports.notifySosOffer = functions
+  .region("us-central1")
+  .firestore.document("caregivers/{caregiverId}/sosOffers/{sosId}")
+  .onCreate(async (snapshot, context) => {
+    const offer = snapshot.data() || {};
+    const caregiverId = String(context.params.caregiverId || "").trim();
+    const sosId = String(context.params.sosId || "").trim();
+    if (!caregiverId || !sosId) return null;
+
+    const status = String(offer.status || "").trim().toUpperCase();
+    if (status && status !== "OFFERED") return null;
+
+    const selectedPersonName = String(
+      offer.selectedPersonName || offer.personName || "Client",
+    ).trim();
+    const addressLabel = String(offer.addressLabel || offer.address || "").trim();
+
+    const body = addressLabel
+      ? `${selectedPersonName} needs help near ${addressLabel}.`
+      : `${selectedPersonName} needs help nearby.`;
+
+    try {
+      await admin.messaging().send({
+        topic: caregiverId,
+        notification: {
+          title: "New SOS Request",
+          body,
+        },
+        data: {
+          type: "sos_offer",
+          sosId,
+          caregiverId,
+          userId: String(offer.userId || "").trim(),
+          personName: selectedPersonName,
+        },
+        android: { priority: "high" },
+        apns: { headers: { "apns-priority": "10" } },
+      });
+    } catch (err) {
+      console.error("notifySosOffer failed", caregiverId, sosId, err);
+    }
+
+    return null;
+  });
+
+function normalizePushData(raw) {
+  const out = {};
+  const input = raw && typeof raw === "object" ? raw : {};
+  for (const [k, v] of Object.entries(input)) {
+    if (v === undefined || v === null) continue;
+    out[String(k)] = typeof v === "string" ? v : JSON.stringify(v);
+  }
+  return out;
+}
+
+async function sendTopicNotification({
+  topic,
+  title,
+  body,
+  data,
+  regionLabel = "push",
+}) {
+  const normalizedTopic = String(topic || "").trim();
+  if (!normalizedTopic) return;
+  const notificationTitle = String(title || "").trim() || "ElderAssist";
+  const notificationBody = String(body || "").trim();
+  if (!notificationBody) return;
+
+  try {
+    await admin.messaging().send({
+      topic: normalizedTopic,
+      notification: {
+        title: notificationTitle,
+        body: notificationBody,
+      },
+      data: normalizePushData(data),
+      android: { priority: "high" },
+      apns: { headers: { "apns-priority": "10" } },
+    });
+  } catch (err) {
+    console.error(`${regionLabel} notification failed`, normalizedTopic, err);
+  }
+}
+
+function normalizeEnum(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replaceAll("-", "_")
+    .replaceAll(" ", "_")
+    .replaceAll("__", "_");
+}
+
+// SOS status updates to client (accept/reject/timeout/resolved).
+exports.notifySosStatus = functions
+  .region("asia-southeast1")
+  .firestore.document("sos/{sosId}")
+  .onUpdate(async (change, context) => {
+    const before = change.before.data() || {};
+    const after = change.after.data() || {};
+    const sosId = String(context.params.sosId || "").trim();
+
+    const userId = String(after.userId || before.userId || "").trim();
+    if (!userId || !sosId) return null;
+
+    const beforeStatus = normalizeEnum(before.status);
+    const afterStatus = normalizeEnum(after.status);
+    if (!afterStatus || afterStatus === beforeStatus) return null;
+
+    const personName = String(
+      after.selectedPersonName || after.personName || "User",
+    ).trim();
+    const caregiverName = String(after.caregiverName || "Caregiver").trim();
+
+    let title = "";
+    let body = "";
+
+    if (afterStatus === "RESPONDER_ASSIGNED") {
+      title = "Caregiver Found";
+      body = `${caregiverName} accepted your SOS request for ${personName}.`;
+    } else if (afterStatus === "NO_MATCH" || afterStatus === "NO_RESPONDER") {
+      title = "No Caregiver Available";
+      body = `No nearby caregiver is available right now for ${personName}.`;
+    } else if (afterStatus === "TIMEOUT") {
+      title = "SOS Timeout";
+      body = `Caregivers are currently busy. Please try again for ${personName}.`;
+    } else if (afterStatus === "RESOLVED") {
+      title = "SOS Resolved";
+      body = `SOS marked safe for ${personName}.`;
+    } else {
+      return null;
+    }
+
+    await sendTopicNotification({
+      topic: userId,
+      title,
+      body,
+      data: {
+        type: "sos_status",
+        sosId,
+        userId,
+        status: afterStatus,
+      },
+      regionLabel: "notifySosStatus",
+    });
+
+    // Also notify caregivers when SOS is marked safe / cancelled by the user.
+    if (afterStatus === "RESOLVED") {
+      const caregiverId = String(
+        after.caregiverId || before.caregiverId || "",
+      ).trim();
+
+      const offeredId = String(
+        before.offeredCaregiverId || after.offeredCaregiverId || "",
+      ).trim();
+
+      const offeredIdsRaw =
+        before.offeredCaregiverIds || after.offeredCaregiverIds || [];
+      const offeredIds = Array.isArray(offeredIdsRaw)
+        ? offeredIdsRaw.map((v) => String(v || "").trim()).filter(Boolean)
+        : [];
+
+      const caregiverTargets = Array.from(
+        new Set([caregiverId, offeredId, ...offeredIds].filter(Boolean)),
+      ).slice(0, 25);
+
+      await Promise.all(
+        caregiverTargets.map((targetId) =>
+          sendTopicNotification({
+            topic: targetId,
+            title: "SOS Cancelled",
+            body: `Client marked safe. The SOS request for ${personName} has been cancelled.`,
+            data: {
+              type: "sos_cancelled",
+              sosId,
+              userId,
+              status: afterStatus,
+            },
+            regionLabel: "notifySosStatus",
+          }),
+        ),
+      );
+    }
 
     return null;
   });
@@ -3638,6 +5477,7 @@ exports.respondSosOffer = functions
           const caregiverName = String(
             caregiverData.name || caregiverData.fullName || "",
           ).trim();
+          const caregiverPhone = String(extractCaregiverPhone(caregiverData) || "").trim();
 
           const personId = String(current.personId || current.addressId || "").trim();
           const personName = String(
@@ -3683,6 +5523,11 @@ exports.respondSosOffer = functions
               assignedCaregiverId: caregiverId,
               status: "RESPONDER_ASSIGNED",
               responderId: caregiverId,
+              caregiverPhone,
+              lastResponderAction: "ACCEPTED",
+              lastResponderActionAt: new Date().toISOString(),
+              lastResponderName: caregiverName,
+              lastResponderPhone: caregiverPhone,
               offeredCaregiverId: admin.firestore.FieldValue.delete(),
               offeredCaregiverIds: admin.firestore.FieldValue.delete(),
               offerQueue: queue,
@@ -3715,6 +5560,7 @@ exports.respondSosOffer = functions
               userId: String(current.userId || "").trim(),
               caregiverId,
               caregiverName,
+              caregiverPhone,
               personId,
               personName,
               personAddress,
@@ -3749,6 +5595,7 @@ exports.respondSosOffer = functions
               bookingId: bookingRef.id,
               bookingStatus: "EMERGENCY_ALERT",
               caregiverName,
+              caregiverPhone,
               updatedAt: admin.firestore.FieldValue.serverTimestamp(),
             },
             { merge: true },
@@ -3816,10 +5663,29 @@ exports.respondSosOffer = functions
             timestamp: new Date().toISOString(),
             status: "DECLINED",
           }),
+          lastResponderAction: "DECLINED",
+          lastResponderActionAt: new Date().toISOString(),
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
         { merge: true },
       );
+
+      // Best-effort: attach caregiver name/phone for the decline message.
+      try {
+        const caregiverSnap = await db.collection("caregivers").doc(caregiverId).get();
+        const caregiverData = caregiverSnap.exists ? caregiverSnap.data() || {} : {};
+        const caregiverName = String(
+          caregiverData.name || caregiverData.fullName || "Caregiver",
+        ).trim();
+        const caregiverPhone = String(extractCaregiverPhone(caregiverData) || "").trim();
+        await sosRef.set(
+          {
+            lastResponderName: caregiverName,
+            lastResponderPhone: caregiverPhone,
+          },
+          { merge: true },
+        );
+      } catch (_) {}
 
       // If this SOS was offered to multiple caregivers at once (broadcast mode),
       // and everyone has declined/expired, finalize immediately so the client UI

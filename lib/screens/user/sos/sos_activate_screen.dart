@@ -27,14 +27,11 @@ int _alphaFromOpacity(double opacity) =>
     (opacity * 255).clamp(0.0, 255.0).round();
 
 enum _SosActivateMode { idle, calling, assigned }
+
 enum _SosMatchState { searching, busy }
 
 class _AddressSelectionKey {
-  const _AddressSelectionKey({
-    required this.address,
-    this.lat,
-    this.lng,
-  });
+  const _AddressSelectionKey({required this.address, this.lat, this.lng});
 
   final String address;
   final double? lat;
@@ -92,12 +89,9 @@ class _HomeAddressItem {
         map['city'] ??
         '';
     return _HomeAddressItem(
-      name:
-          isUser
-              ? 'You'
-              : ('$nameValue'.trim().isNotEmpty
-                  ? '$nameValue'.trim()
-                  : 'Person'),
+      name: isUser
+          ? 'You'
+          : ('$nameValue'.trim().isNotEmpty ? '$nameValue'.trim() : 'Person'),
       label: isUser ? '' : '$labelValue'.trim(),
       address: '$addressValue'.trim(),
       isUser: isUser,
@@ -299,7 +293,11 @@ class _HomeAddressCard extends StatelessWidget {
   Widget _buildPersonAvatar() {
     final url = item.photoUrl;
     const size = 24.0;
-    const icon = Icon(Icons.person_outline, size: 16, color: _pickerPrimaryBlue);
+    const icon = Icon(
+      Icons.person_outline,
+      size: 16,
+      color: _pickerPrimaryBlue,
+    );
 
     if (url == null || url.isEmpty) {
       return const SizedBox(
@@ -371,7 +369,9 @@ class _HomeAddressCard extends StatelessWidget {
                     vertical: 3,
                   ),
                   decoration: BoxDecoration(
-                    color: _pickerPrimaryBlue.withAlpha(_alphaFromOpacity(0.12)),
+                    color: _pickerPrimaryBlue.withAlpha(
+                      _alphaFromOpacity(0.12),
+                    ),
                     borderRadius: BorderRadius.circular(999),
                   ),
                   child: Text(
@@ -449,8 +449,9 @@ class SosActivateScreen extends StatefulWidget {
 
 class _SosActivateScreenState extends State<SosActivateScreen>
     with TickerProviderStateMixin {
-  final FirebaseFunctions _functions =
-      FirebaseFunctions.instanceFor(region: 'asia-southeast1');
+  final FirebaseFunctions _functions = FirebaseFunctions.instanceFor(
+    region: 'asia-southeast1',
+  );
   final FirebaseAuth _auth = FirebaseAuth.instance;
 
   AnimationController? _entryController;
@@ -469,7 +470,7 @@ class _SosActivateScreenState extends State<SosActivateScreen>
   bool _didAttemptResume = false;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _sosSubscription;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
-      _bookingDocSubscription;
+  _bookingDocSubscription;
   String? _bookingDocSubscriptionId;
   Timer? _acceptTimeoutTimer;
   Timer? _busyMessageTimer;
@@ -546,13 +547,10 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     try {
-      await FirebaseFirestore.instance.collection('users').doc(user.uid).set(
-        {
-          'activeSosId': sosId,
-          'activeSosUpdatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+        'activeSosId': sosId,
+        'activeSosUpdatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
     } catch (_) {}
   }
 
@@ -560,13 +558,10 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     try {
-      await FirebaseFirestore.instance.collection('users').doc(user.uid).set(
-        {
-          'activeSosId': FieldValue.delete(),
-          'activeSosUpdatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+        'activeSosId': FieldValue.delete(),
+        'activeSosUpdatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
     } catch (_) {}
   }
 
@@ -575,7 +570,8 @@ class _SosActivateScreenState extends State<SosActivateScreen>
         (value?.toString() ?? '').toUpperCase().trim();
 
     final status = norm(data['status']);
-    final isFinalStatus = status == 'RESOLVED' ||
+    final isFinalStatus =
+        status == 'RESOLVED' ||
         status == 'COMPLETED' ||
         status == 'CANCELLED' ||
         status == 'TIMEOUT' ||
@@ -627,35 +623,37 @@ class _SosActivateScreenState extends State<SosActivateScreen>
         .doc(normalizedBookingId)
         .snapshots()
         .listen((snap) async {
-      if (!mounted) return;
-      if (!snap.exists) return;
-      final data = snap.data();
-      if (data == null) return;
+          if (!mounted) return;
+          if (!snap.exists) return;
+          final data = snap.data();
+          if (data == null) return;
 
-      final bookingStatus =
-          (data['status'] as String?)?.toUpperCase().trim() ?? '';
-      if (!_isFinalBookingStatus(bookingStatus)) return;
+          final bookingStatus =
+              (data['status'] as String?)?.toUpperCase().trim() ?? '';
+          if (!_isFinalBookingStatus(bookingStatus)) return;
 
-      // Always reset SOS UI based on booking completion/cancellation.
-      _cancelSosWaiters();
-      _resetToIdle();
+          // Always reset SOS UI based on booking completion/cancellation.
+          _cancelSosWaiters();
+          _resetToIdle();
 
-      // Best-effort: mirror booking final status back into sos doc so other
-      // SOS views stay consistent even if sos.status wasn't updated.
-      try {
-        final normalizedSosId = sosId.trim();
-        if (normalizedSosId.isEmpty) return;
-        await FirebaseFirestore.instance.collection('sos').doc(normalizedSosId).set(
-          {
-            'status': bookingStatus == 'COMPLETED' ? 'COMPLETED' : 'CANCELLED',
-            'statusUpdatedAt': FieldValue.serverTimestamp(),
-            if (bookingStatus == 'COMPLETED')
-              'completedAt': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
-      } catch (_) {}
-    });
+          // Best-effort: mirror booking final status back into sos doc so other
+          // SOS views stay consistent even if sos.status wasn't updated.
+          try {
+            final normalizedSosId = sosId.trim();
+            if (normalizedSosId.isEmpty) return;
+            await FirebaseFirestore.instance
+                .collection('sos')
+                .doc(normalizedSosId)
+                .set({
+                  'status': bookingStatus == 'COMPLETED'
+                      ? 'COMPLETED'
+                      : 'CANCELLED',
+                  'statusUpdatedAt': FieldValue.serverTimestamp(),
+                  if (bookingStatus == 'COMPLETED')
+                    'completedAt': FieldValue.serverTimestamp(),
+                }, SetOptions(merge: true));
+          } catch (_) {}
+        });
   }
 
   void _resetToIdle() {
@@ -700,7 +698,8 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     if (_activeSosId == sosId) return;
 
     final isTabActive =
-        (widget.tabIndexListenable?.value ?? widget.tabIndex) == widget.tabIndex;
+        (widget.tabIndexListenable?.value ?? widget.tabIndex) ==
+        widget.tabIndex;
     if (!isTabActive) {
       _pendingResumeSosId = sosId;
       return;
@@ -754,10 +753,9 @@ class _SosActivateScreenState extends State<SosActivateScreen>
         return;
       }
 
-      final meta =
-          (data['addressMeta'] is Map<String, dynamic>)
-              ? (data['addressMeta'] as Map<String, dynamic>)
-              : const <String, dynamic>{};
+      final meta = (data['addressMeta'] is Map<String, dynamic>)
+          ? (data['addressMeta'] as Map<String, dynamic>)
+          : const <String, dynamic>{};
       final address = (data['address'] as String?)?.trim() ?? '';
       final lat = _toDouble(meta['lat'] ?? meta['latitude'] ?? data['userLat']);
       final lng = _toDouble(
@@ -784,8 +782,9 @@ class _SosActivateScreenState extends State<SosActivateScreen>
 
       _acceptTimeoutTimer?.cancel();
       final createdAt = data['createdAt'] as Timestamp?;
-      final elapsed =
-          createdAt == null ? Duration.zero : DateTime.now().difference(createdAt.toDate());
+      final elapsed = createdAt == null
+          ? Duration.zero
+          : DateTime.now().difference(createdAt.toDate());
       final remaining = const Duration(minutes: 2) - elapsed;
       final delay = remaining.isNegative ? Duration.zero : remaining;
       _acceptTimeoutTimer = Timer(delay, () async {
@@ -794,15 +793,12 @@ class _SosActivateScreenState extends State<SosActivateScreen>
         if (current == null || current != sosId) return;
         _cancelSosWaiters();
         try {
-          await FirebaseFirestore.instance.collection('sos').doc(sosId).set(
-            {
-              'status': 'TIMEOUT',
-              'timeoutAt': FieldValue.serverTimestamp(),
-              'offeredCaregiverId': FieldValue.delete(),
-              'offeredCaregiverIds': FieldValue.delete(),
-            },
-            SetOptions(merge: true),
-          );
+          await FirebaseFirestore.instance.collection('sos').doc(sosId).set({
+            'status': 'TIMEOUT',
+            'timeoutAt': FieldValue.serverTimestamp(),
+            'offeredCaregiverId': FieldValue.delete(),
+            'offeredCaregiverIds': FieldValue.delete(),
+          }, SetOptions(merge: true));
         } catch (_) {}
         _showBusyMessageThenReset();
       });
@@ -824,10 +820,12 @@ class _SosActivateScreenState extends State<SosActivateScreen>
           }
           final data = doc.data();
           if (data == null) return;
-          final status = (data['status'] as String?)?.toUpperCase().trim() ?? '';
+          final status =
+              (data['status'] as String?)?.toUpperCase().trim() ?? '';
           final caregiverId = (data['caregiverId'] as String?)?.trim() ?? '';
           final bookingId = (data['bookingId'] as String?)?.trim() ?? '';
-          final caregiverName = (data['caregiverName'] as String?)?.trim() ?? '';
+          final caregiverName =
+              (data['caregiverName'] as String?)?.trim() ?? '';
           if (bookingId.isNotEmpty) {
             _attachBookingWatcher(sosId: sosId, bookingId: bookingId);
           }
@@ -864,13 +862,14 @@ class _SosActivateScreenState extends State<SosActivateScreen>
                 MaterialPageRoute(
                   builder: (_) => TrackCaregiverScreen(
                     bookingId: bookingId,
-                    caregiverName:
-                        caregiverName.isNotEmpty ? caregiverName : 'Caregiver',
+                    caregiverName: caregiverName.isNotEmpty
+                        ? caregiverName
+                        : 'Caregiver',
                     caregiverId: caregiverId,
                     sosId: sosId,
                     forceSosSheetStyle: true,
-                    personId: (data['personId'] as String?)?.trim().isNotEmpty ==
-                            true
+                    personId:
+                        (data['personId'] as String?)?.trim().isNotEmpty == true
                         ? (data['personId'] as String).trim()
                         : null,
                     showStatusUpdateButton: false,
@@ -1022,18 +1021,18 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     final rawAddresses = data['addresses'];
     if (rawAddresses is List) {
       list.addAll(
-        rawAddresses
-            .whereType<Map<String, dynamic>>()
-            .map((entry) => Map<String, dynamic>.from(entry)),
+        rawAddresses.whereType<Map<String, dynamic>>().map(
+          (entry) => Map<String, dynamic>.from(entry),
+        ),
       );
     }
 
     final rawAddress = data['address'];
     if (rawAddress is List) {
       list.addAll(
-        rawAddress
-            .whereType<Map<String, dynamic>>()
-            .map((entry) => Map<String, dynamic>.from(entry)),
+        rawAddress.whereType<Map<String, dynamic>>().map(
+          (entry) => Map<String, dynamic>.from(entry),
+        ),
       );
     } else if (rawAddress is Map) {
       list.add(Map<String, dynamic>.from(rawAddress));
@@ -1042,9 +1041,9 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     final rawPersonAddress = data['personAddress'];
     if (rawPersonAddress is List) {
       list.addAll(
-        rawPersonAddress
-            .whereType<Map<String, dynamic>>()
-            .map((entry) => Map<String, dynamic>.from(entry)),
+        rawPersonAddress.whereType<Map<String, dynamic>>().map(
+          (entry) => Map<String, dynamic>.from(entry),
+        ),
       );
     } else if (rawPersonAddress is Map) {
       list.add(Map<String, dynamic>.from(rawPersonAddress));
@@ -1078,9 +1077,11 @@ class _SosActivateScreenState extends State<SosActivateScreen>
 
   void _applyAddressSelectionKey(_AddressSelectionKey key) {
     final idx =
-        _findAddressIndexFromKey(_homeAddresses, key) ?? _selectedHomeAddressIndex;
-    final safeIndex =
-        _homeAddresses.isEmpty ? 0 : idx.clamp(0, _homeAddresses.length - 1);
+        _findAddressIndexFromKey(_homeAddresses, key) ??
+        _selectedHomeAddressIndex;
+    final safeIndex = _homeAddresses.isEmpty
+        ? 0
+        : idx.clamp(0, _homeAddresses.length - 1);
 
     setState(() {
       _selectionKey = key;
@@ -1094,38 +1095,37 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     final firestoreData = doc.data();
     final authName = _auth.currentUser?.displayName?.trim();
     final docName = firestoreData?['name']?.toString().trim();
-    final displayName =
-        docName?.isNotEmpty == true
-            ? docName!
-            : (authName?.isNotEmpty == true
-                ? authName!
-                : (_auth.currentUser?.email ?? 'User'));
+    final displayName = docName?.isNotEmpty == true
+        ? docName!
+        : (authName?.isNotEmpty == true
+              ? authName!
+              : (_auth.currentUser?.email ?? 'User'));
     final photoUrl = (firestoreData?['photoUrl'] as String?)?.trim();
     final fallbackPhoto = _auth.currentUser?.photoURL?.trim();
     final phone = (firestoreData?['phone'] as String?)?.trim();
     final addresses = _extractAddressList(firestoreData);
 
     final resolvedAddresses = <_HomeAddressItem>[];
-    final userDefaultAddress = firestoreData?['defaultAddress']?.toString().trim();
+    final userDefaultAddress = firestoreData?['defaultAddress']
+        ?.toString()
+        .trim();
     final userLat =
-        _safeDouble(firestoreData?['lat']) ?? _safeDouble(firestoreData?['latitude']);
+        _safeDouble(firestoreData?['lat']) ??
+        _safeDouble(firestoreData?['latitude']);
     final userLng =
         _safeDouble(firestoreData?['long']) ??
         _safeDouble(firestoreData?['lng']) ??
         _safeDouble(firestoreData?['longitude']);
     if (userDefaultAddress != null && userDefaultAddress.isNotEmpty) {
       resolvedAddresses.add(
-        _HomeAddressItem.fromMap(
-          <String, dynamic>{
-            'name': displayName,
-            'label': '',
-            'addressLine': userDefaultAddress,
-            'lat': userLat,
-            'lng': userLng,
-            'photoUrl': photoUrl?.isNotEmpty == true ? photoUrl : fallbackPhoto,
-          },
-          isUser: true,
-        ),
+        _HomeAddressItem.fromMap(<String, dynamic>{
+          'name': displayName,
+          'label': '',
+          'addressLine': userDefaultAddress,
+          'lat': userLat,
+          'lng': userLng,
+          'photoUrl': photoUrl?.isNotEmpty == true ? photoUrl : fallbackPhoto,
+        }, isUser: true),
       );
     } else if (_homeAddresses.isNotEmpty && _homeAddresses.first.isUser) {
       resolvedAddresses.add(_homeAddresses.first);
@@ -1145,10 +1145,13 @@ class _SosActivateScreenState extends State<SosActivateScreen>
       nextSelectedIndex = (youIndex == -1) ? 0 : youIndex;
     } else {
       final key = _selectionKey;
-      final mapped =
-          key == null ? null : _findAddressIndexFromKey(resolvedAddresses, key);
-      nextSelectedIndex =
-          (mapped ?? _selectedHomeAddressIndex).clamp(0, resolvedAddresses.length - 1);
+      final mapped = key == null
+          ? null
+          : _findAddressIndexFromKey(resolvedAddresses, key);
+      nextSelectedIndex = (mapped ?? _selectedHomeAddressIndex).clamp(
+        0,
+        resolvedAddresses.length - 1,
+      );
     }
 
     setState(() {
@@ -1180,9 +1183,9 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     if (!mounted) return;
     if (_mode != _SosActivateMode.idle) return;
     if (_homeAddresses.isEmpty) {
-      Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => const ProfileAddressesScreen()),
-      );
+      Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const ProfileAddressesScreen()));
       return;
     }
 
@@ -1237,19 +1240,22 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     if (_homeAddresses.isEmpty) return _userAddressRecord(snapshot);
     final idx = _selectedHomeAddressIndex.clamp(0, _homeAddresses.length - 1);
     final item = _homeAddresses[idx];
-    final primary =
-        item.isUser
-            ? '${_userDisplayName.trim().isNotEmpty ? _userDisplayName.trim() : 'You'} | You'
-            : (item.label.trim().isNotEmpty
-                ? '${item.name} | ${item.label.trim()}'
-                : item.name);
+    final primary = item.isUser
+        ? '${_userDisplayName.trim().isNotEmpty ? _userDisplayName.trim() : 'You'} | You'
+        : (item.label.trim().isNotEmpty
+              ? '${item.name} | ${item.label.trim()}'
+              : item.name);
     final display = _AddressDisplayEntry(
       primary: primary,
-      secondary: item.address.isNotEmpty ? item.address : 'Location unavailable',
+      secondary: item.address.isNotEmpty
+          ? item.address
+          : 'Location unavailable',
     );
     final recordData = <String, dynamic>{
       'name': item.isUser
-          ? (_userDisplayName.trim().isNotEmpty ? _userDisplayName.trim() : 'You')
+          ? (_userDisplayName.trim().isNotEmpty
+                ? _userDisplayName.trim()
+                : 'You')
           : item.name,
       'label': item.label,
       'address': item.address,
@@ -1291,17 +1297,17 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     _cancelSosWaiters();
     try {
       final user = FirebaseAuth.instance.currentUser;
-      final snapshot =
-          user == null
-              ? null
-              : await FirebaseFirestore.instance
-                  .collection('users')
-                  .doc(user.uid)
-                  .get();
+      final snapshot = user == null
+          ? null
+          : await FirebaseFirestore.instance
+                .collection('users')
+                .doc(user.uid)
+                .get();
       final record = _selectedAddressRecord(snapshot);
       final sosId = await _createSosRequest(record);
       await _setActiveSosPointer(sosId);
       _sendEmergencySmsNotifications(sosId);
+      _sendEmergencyWhatsAppNotifications(sosId);
       if (!mounted) return;
       setState(() => _activeSosId = sosId);
       _listenForSosAssignment(sosId);
@@ -1314,15 +1320,12 @@ class _SosActivateScreenState extends State<SosActivateScreen>
         if (current == null || current != sosId) return;
         _cancelSosWaiters();
         try {
-          await FirebaseFirestore.instance.collection('sos').doc(sosId).set(
-            {
-              'status': 'TIMEOUT',
-              'timeoutAt': FieldValue.serverTimestamp(),
-              'offeredCaregiverId': FieldValue.delete(),
-              'offeredCaregiverIds': FieldValue.delete(),
-            },
-            SetOptions(merge: true),
-          );
+          await FirebaseFirestore.instance.collection('sos').doc(sosId).set({
+            'status': 'TIMEOUT',
+            'timeoutAt': FieldValue.serverTimestamp(),
+            'offeredCaregiverId': FieldValue.delete(),
+            'offeredCaregiverIds': FieldValue.delete(),
+          }, SetOptions(merge: true));
         } catch (_) {}
         _showBusyMessageThenReset();
       });
@@ -1338,34 +1341,39 @@ class _SosActivateScreenState extends State<SosActivateScreen>
             'userLng': userLng,
           });
           if (!mounted) return;
-          if (_mode != _SosActivateMode.calling || _activeSosId != sosId) return;
+          if (_mode != _SosActivateMode.calling || _activeSosId != sosId) {
+            return;
+          }
 
-           final data = result.data;
-           final caregiverId =
-               data is Map ? (data['caregiverId']?.toString().trim() ?? '') : '';
-           if (caregiverId.isNotEmpty) {
-             // Back-compat: if function returns direct assignment.
-             // The realtime listener will handle navigation/state updates.
-           }
-          } on FirebaseFunctionsException catch (error) {
-            if (!mounted) return;
-            debugPrint('matchSosCaregiver failed: ${error.code} ${error.message}');
-            _cancelSosWaiters();
-           _showBusyMessageThenReset();
-         } catch (_) {
-           _cancelSosWaiters();
-           _showBusyMessageThenReset();
-         }
-       }
-     } catch (e) {
-       if (!mounted) return;
-       debugPrint('Unable to raise SOS: $e');
-       _cancelSosWaiters();
-       _resetToIdle();
-     } finally {
-       if (mounted) setState(() => _isTriggering = false);
-     }
-   }
+          final data = result.data;
+          final caregiverId = data is Map
+              ? (data['caregiverId']?.toString().trim() ?? '')
+              : '';
+          if (caregiverId.isNotEmpty) {
+            // Back-compat: if function returns direct assignment.
+            // The realtime listener will handle navigation/state updates.
+          }
+        } on FirebaseFunctionsException catch (error) {
+          if (!mounted) return;
+          debugPrint(
+            'matchSosCaregiver failed: ${error.code} ${error.message}',
+          );
+          _cancelSosWaiters();
+          _showBusyMessageThenReset();
+        } catch (_) {
+          _cancelSosWaiters();
+          _showBusyMessageThenReset();
+        }
+      }
+    } catch (e) {
+      if (!mounted) return;
+      debugPrint('Unable to raise SOS: $e');
+      _cancelSosWaiters();
+      _resetToIdle();
+    } finally {
+      if (mounted) setState(() => _isTriggering = false);
+    }
+  }
 
   void _sendEmergencySmsNotifications(String sosId) {
     final trimmed = sosId.trim();
@@ -1379,13 +1387,43 @@ class _SosActivateScreenState extends State<SosActivateScreen>
       // ignore: discarded_futures
       () async {
         try {
-          await callable.call(<String, dynamic>{'sosId': trimmed});
+          final result = await callable.call(<String, dynamic>{
+            'sosId': trimmed,
+          });
+          debugPrint('sendSosSmsToEmergencyContacts result: ${result.data}');
         } catch (e) {
           debugPrint('sendSosSmsToEmergencyContacts failed: $e');
         }
       }();
     } catch (e) {
       debugPrint('sendSosSmsToEmergencyContacts setup failed: $e');
+    }
+  }
+
+  void _sendEmergencyWhatsAppNotifications(String sosId) {
+    final trimmed = sosId.trim();
+    if (trimmed.isEmpty) return;
+    try {
+      final callable = _functions.httpsCallable(
+        'sendSosWhatsAppToEmergencyContacts',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 25)),
+      );
+      // Fire-and-forget: SOS flow should continue even if WhatsApp fails.
+      // ignore: discarded_futures
+      () async {
+        try {
+          final result = await callable.call(<String, dynamic>{
+            'sosId': trimmed,
+          });
+          debugPrint(
+            'sendSosWhatsAppToEmergencyContacts result: ${result.data}',
+          );
+        } catch (e) {
+          debugPrint('sendSosWhatsAppToEmergencyContacts failed: $e');
+        }
+      }();
+    } catch (e) {
+      debugPrint('sendSosWhatsAppToEmergencyContacts setup failed: $e');
     }
   }
 
@@ -1397,8 +1435,8 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     final now = DateTime.now();
     const reason = 'Emergency SOS';
     const serviceLabel = 'Emergency Alert';
-    final selectedName = (record.data['name']?.toString().trim().isNotEmpty ==
-            true)
+    final selectedName =
+        (record.data['name']?.toString().trim().isNotEmpty == true)
         ? record.data['name'].toString().trim()
         : 'You';
     final selectedLabel = record.data['label']?.toString().trim();
@@ -1441,7 +1479,7 @@ class _SosActivateScreenState extends State<SosActivateScreen>
       'reason': reason,
       'status': 'SEARCHING',
       'bookingId': '',
-      'bookingStatus': '',
+      'bookingStatus': 'EMERGENCY_ALERT',
       'caregiverId': '',
       'caregiverName': '',
       'personId': personId,
@@ -1499,38 +1537,34 @@ class _SosActivateScreenState extends State<SosActivateScreen>
     _setAddressPickerVisible(true);
     if (sosId == null || sosId.isEmpty) return;
     try {
-      await FirebaseFirestore.instance.collection('sos').doc(sosId).set(
-        {
-          'status': 'RESOLVED',
-          'resolvedAt': FieldValue.serverTimestamp(),
-          'offeredCaregiverId': FieldValue.delete(),
-          'offeredCaregiverIds': FieldValue.delete(),
-          'tracking': FieldValue.arrayUnion([
-            {
-              'label': 'Marked safe',
-              'description': 'User reported safe from SOS screen.',
-              'timestamp': DateTime.now().toIso8601String(),
-              'status': 'RESOLVED',
-            },
-          ]),
-        },
-        SetOptions(merge: true),
-      );
+      await FirebaseFirestore.instance.collection('sos').doc(sosId).set({
+        'status': 'RESOLVED',
+        'resolvedAt': FieldValue.serverTimestamp(),
+        'offeredCaregiverId': FieldValue.delete(),
+        'offeredCaregiverIds': FieldValue.delete(),
+        'tracking': FieldValue.arrayUnion([
+          {
+            'label': 'Marked safe',
+            'description': 'User reported safe from SOS screen.',
+            'timestamp': DateTime.now().toIso8601String(),
+            'status': 'RESOLVED',
+          },
+        ]),
+      }, SetOptions(merge: true));
       await _clearActiveSosPointer();
-      final snap =
-          await FirebaseFirestore.instance.collection('sos').doc(sosId).get();
+      final snap = await FirebaseFirestore.instance
+          .collection('sos')
+          .doc(sosId)
+          .get();
       final caregiverId = (snap.data()?['caregiverId'] as String?)?.trim();
       if (caregiverId != null && caregiverId.isNotEmpty) {
         await FirebaseFirestore.instance
             .collection('caregivers')
             .doc(caregiverId)
-            .set(
-              {
-                'activeSosId': FieldValue.delete(),
-                'activeSosUpdatedAt': FieldValue.serverTimestamp(),
-              },
-              SetOptions(merge: true),
-            );
+            .set({
+              'activeSosId': FieldValue.delete(),
+              'activeSosUpdatedAt': FieldValue.serverTimestamp(),
+            }, SetOptions(merge: true));
       }
     } catch (_) {
       // ignore
@@ -1586,10 +1620,7 @@ class _SosActivateScreenState extends State<SosActivateScreen>
           ),
           child: Center(
             child: _isTriggering
-                ? CircularProgressIndicator(
-                    color: accent,
-                    strokeWidth: 3,
-                  )
+                ? CircularProgressIndicator(color: accent, strokeWidth: 3)
                 : Icon(
                     Icons.power_settings_new_rounded,
                     color: accent,
@@ -1704,8 +1735,7 @@ class _SosActivateScreenState extends State<SosActivateScreen>
   Widget _buildCallingHeroSection(BuildContext context) {
     final targetName = () {
       if (_homeAddresses.isEmpty) return 'You';
-      final idx =
-          _selectedHomeAddressIndex.clamp(0, _homeAddresses.length - 1);
+      final idx = _selectedHomeAddressIndex.clamp(0, _homeAddresses.length - 1);
       final item = _homeAddresses[idx];
       if (item.isUser) return 'You';
       final name = item.name.trim();
@@ -1823,7 +1853,10 @@ class _SosActivateScreenState extends State<SosActivateScreen>
       return const SizedBox.shrink();
     }
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: FirebaseFirestore.instance.collection('sos').doc(sosId).snapshots(),
+      stream: FirebaseFirestore.instance
+          .collection('sos')
+          .doc(sosId)
+          .snapshots(),
       builder: (context, snapshot) {
         if (!snapshot.hasData || !snapshot.data!.exists) {
           return const Center(child: CircularProgressIndicator());
@@ -1840,12 +1873,16 @@ class _SosActivateScreenState extends State<SosActivateScreen>
         final bookingId = (data['bookingId'] as String?)?.trim() ?? '';
         final caregiverId = (data['caregiverId'] as String?)?.trim() ?? '';
         final caregiverName =
-            (data['caregiverName'] as String?)?.trim() ?? _assignedCaregiverName ?? 'Caregiver';
+            (data['caregiverName'] as String?)?.trim() ??
+            _assignedCaregiverName ??
+            'Caregiver';
         final personId = (data['personId'] as String?)?.trim() ?? '';
-        final personName = (data['personName'] as String?)?.trim() ??
+        final personName =
+            (data['personName'] as String?)?.trim() ??
             (data['selectedPersonName'] as String?)?.trim() ??
             'Selected person';
-        final personAddress = (data['personAddress'] as String?)?.trim() ??
+        final personAddress =
+            (data['personAddress'] as String?)?.trim() ??
             (data['address'] as String?)?.trim() ??
             'Address unavailable';
         final selectedPersonLabel =
@@ -1854,16 +1891,16 @@ class _SosActivateScreenState extends State<SosActivateScreen>
         final addressMeta = (addressMetaRaw is Map)
             ? Map<String, dynamic>.from(addressMetaRaw)
             : const <String, dynamic>{};
-        final personPhotoUrl = (addressMeta['photoUrl'] as String?)?.trim() ?? '';
+        final personPhotoUrl =
+            (addressMeta['photoUrl'] as String?)?.trim() ?? '';
         final personPhone =
             (addressMeta['phone']?.toString().trim().isNotEmpty == true)
-                ? addressMeta['phone'].toString().trim()
-                : (addressMeta['phoneNumber']?.toString().trim().isNotEmpty ==
-                        true)
-                    ? addressMeta['phoneNumber'].toString().trim()
-                    : (data['personPhone']?.toString().trim().isNotEmpty == true)
-                        ? data['personPhone'].toString().trim()
-                        : '';
+            ? addressMeta['phone'].toString().trim()
+            : (addressMeta['phoneNumber']?.toString().trim().isNotEmpty == true)
+            ? addressMeta['phoneNumber'].toString().trim()
+            : (data['personPhone']?.toString().trim().isNotEmpty == true)
+            ? data['personPhone'].toString().trim()
+            : '';
 
         return SingleChildScrollView(
           padding: EdgeInsets.zero,
@@ -1874,7 +1911,9 @@ class _SosActivateScreenState extends State<SosActivateScreen>
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
+                  border: Border.all(
+                    color: Colors.black.withValues(alpha: 0.08),
+                  ),
                   boxShadow: [
                     BoxShadow(
                       color: Colors.black.withValues(alpha: 0.08),
@@ -1942,14 +1981,17 @@ class _SosActivateScreenState extends State<SosActivateScreen>
                           final caregiverData = caregiverSnap.data?.data();
                           final avatar =
                               (caregiverData?['photoUrl'] as String?)?.trim() ??
-                                  '';
-                          final phone = (caregiverData?['phone'] as String?)?.trim() ??
-                              (caregiverData?['phoneNumber'] as String?)?.trim() ??
+                              '';
+                          final phone =
+                              (caregiverData?['phone'] as String?)?.trim() ??
+                              (caregiverData?['phoneNumber'] as String?)
+                                  ?.trim() ??
                               '';
                           final caregiverAddress =
-                              (caregiverData?['defaultAddress'] as String?)?.trim() ??
-                                  (caregiverData?['address'] as String?)?.trim() ??
-                                  '';
+                              (caregiverData?['defaultAddress'] as String?)
+                                  ?.trim() ??
+                              (caregiverData?['address'] as String?)?.trim() ??
+                              '';
 
                           return Container(
                             decoration: BoxDecoration(
@@ -1967,14 +2009,17 @@ class _SosActivateScreenState extends State<SosActivateScreen>
                                   child: SizedBox(
                                     width: 46,
                                     height: 46,
-                                    child:
-                                        SafeNetworkImage(avatar, fit: BoxFit.cover),
+                                    child: SafeNetworkImage(
+                                      avatar,
+                                      fit: BoxFit.cover,
+                                    ),
                                   ),
                                 ),
                                 const SizedBox(width: 12),
                                 Expanded(
                                   child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       Text(
                                         caregiverName.isNotEmpty
@@ -2123,14 +2168,16 @@ class _SosActivateScreenState extends State<SosActivateScreen>
                       children: [
                         Expanded(
                           child: ElevatedButton(
-                            onPressed: (bookingId.isEmpty || caregiverId.isEmpty)
+                            onPressed:
+                                (bookingId.isEmpty || caregiverId.isEmpty)
                                 ? null
                                 : () {
                                     Navigator.of(context).push(
                                       MaterialPageRoute(
                                         builder: (_) => TrackCaregiverScreen(
                                           bookingId: bookingId,
-                                          caregiverName: caregiverName.isNotEmpty
+                                          caregiverName:
+                                              caregiverName.isNotEmpty
                                               ? caregiverName
                                               : 'Caregiver',
                                           caregiverId: caregiverId,
@@ -2149,12 +2196,14 @@ class _SosActivateScreenState extends State<SosActivateScreen>
                               backgroundColor: _pickerPrimaryBlue,
                               foregroundColor: Colors.white,
                               shape: const RoundedRectangleBorder(
-                                borderRadius:
-                                    BorderRadius.all(Radius.circular(22)),
+                                borderRadius: BorderRadius.all(
+                                  Radius.circular(22),
+                                ),
                               ),
                               minimumSize: const Size(0, 34),
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 16),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                              ),
                               shadowColor: Colors.black.withValues(alpha: 38),
                             ),
                             child: const Row(
@@ -2189,8 +2238,8 @@ class _SosActivateScreenState extends State<SosActivateScreen>
                                       MaterialPageRoute(
                                         builder: (_) =>
                                             ActivityBookingDetailsScreen(
-                                          bookingId: bookingId,
-                                        ),
+                                              bookingId: bookingId,
+                                            ),
                                       ),
                                     );
                                   },
@@ -2201,12 +2250,14 @@ class _SosActivateScreenState extends State<SosActivateScreen>
                                 color: Colors.black.withValues(alpha: 0.12),
                               ),
                               shape: const RoundedRectangleBorder(
-                                borderRadius:
-                                    BorderRadius.all(Radius.circular(22)),
+                                borderRadius: BorderRadius.all(
+                                  Radius.circular(22),
+                                ),
                               ),
                               minimumSize: const Size(0, 34),
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 16),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                              ),
                             ),
                             child: const Row(
                               mainAxisSize: MainAxisSize.min,
@@ -2267,7 +2318,9 @@ class _SosActivateScreenState extends State<SosActivateScreen>
                 children: [
                   Center(
                     child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: _contentMaxWidth),
+                      constraints: const BoxConstraints(
+                        maxWidth: _contentMaxWidth,
+                      ),
                       child: Padding(
                         padding: const EdgeInsets.fromLTRB(
                           kScreenHorizontalPaddingValue,
@@ -2287,10 +2340,13 @@ class _SosActivateScreenState extends State<SosActivateScreen>
                                     const SizedBox(height: 10),
                                     Text(
                                       'Broadcasting SOS...',
-                                      style: theme.textTheme.bodySmall?.copyWith(
-                                        color: Colors.black.withValues(alpha: 0.55),
-                                        fontWeight: FontWeight.w700,
-                                      ),
+                                      style: theme.textTheme.bodySmall
+                                          ?.copyWith(
+                                            color: Colors.black.withValues(
+                                              alpha: 0.55,
+                                            ),
+                                            fontWeight: FontWeight.w700,
+                                          ),
                                     ),
                                   ],
                                 ],

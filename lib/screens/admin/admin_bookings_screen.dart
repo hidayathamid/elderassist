@@ -21,8 +21,7 @@ import '../user/activity/activity_tracking_helpers.dart' show normalizeString;
 import '../../utils/service_preferences.dart'
     show extractServiceLabelFromFirestore, extractServicePreferencesList;
 import '../caregiver/profile/profile_availability_shared.dart'
-    show
-        availabilityPickerBuilder;
+    show availabilityPickerBuilder;
 import '../user/activity/activity_screen.dart'
     show activityBackgroundColor, activityButtonYellow;
 import 'admin_ui.dart';
@@ -45,11 +44,6 @@ const TextStyle _documentTitleStyle = TextStyle(
   color: _profileDarkText,
 );
 const TextStyle _documentFileStyle = TextStyle(
-  fontSize: 12,
-  fontWeight: FontWeight.w500,
-  color: _profileDarkText60,
-);
-const TextStyle _documentMetaStyle = TextStyle(
   fontSize: 12,
   fontWeight: FontWeight.w500,
   color: _profileDarkText60,
@@ -467,20 +461,6 @@ class _AdminBookingsDashboardState extends State<_AdminBookingsDashboard> {
                 ),
               ),
             ),
-          Positioned.fill(
-            child: IgnorePointer(
-              ignoring: true,
-              child: AnimatedOpacity(
-                duration: const Duration(milliseconds: 160),
-                curve: Curves.easeOut,
-                opacity: _modalSheetScrimVisible ? 1 : 0,
-                child: ColoredBox(
-                  color: Colors.black.withAlpha(_alphaFromOpacity(0.54)),
-                  child: SizedBox.expand(),
-                ),
-              ),
-            ),
-          ),
           NotificationListener<DraggableScrollableNotification>(
             onNotification: (notification) {
               final next = notification.extent;
@@ -591,6 +571,20 @@ class _AdminBookingsDashboardState extends State<_AdminBookingsDashboard> {
                   ),
                 );
               },
+            ),
+          ),
+          Positioned.fill(
+            child: IgnorePointer(
+              ignoring: true,
+              child: AnimatedOpacity(
+                duration: const Duration(milliseconds: 160),
+                curve: Curves.easeOut,
+                opacity: _modalSheetScrimVisible ? 1 : 0,
+                child: ColoredBox(
+                  color: Colors.black.withAlpha(_alphaFromOpacity(0.54)),
+                  child: SizedBox.expand(),
+                ),
+              ),
             ),
           ),
         ],
@@ -1447,9 +1441,13 @@ class _BookingDocCard extends StatelessWidget {
     if (normalized.isEmpty) return 'Unknown';
     if (normalized == 'SCHEDULED') return 'Scheduled';
     if (normalized == 'ASSIGNED') return 'Assigned';
-    if (normalized == 'ONGOING' || normalized == 'IN_PROGRESS') return 'Ongoing';
+    if (normalized == 'ONGOING' || normalized == 'IN_PROGRESS') {
+      return 'Ongoing';
+    }
     if (normalized == 'COMPLETED') return 'Completed';
-    if (normalized == 'CANCELLED' || normalized == 'CANCELED') return 'Cancelled';
+    if (normalized == 'CANCELLED' || normalized == 'CANCELED') {
+      return 'Cancelled';
+    }
     if (normalized == 'FAILED') return 'Failed';
     return raw.trim();
   }
@@ -1602,39 +1600,17 @@ class _BookingDocCard extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: UiTokens.s10),
-                  Row(
-                    children: [
-                      Text(
-                        'Booking ID',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w800,
-                          color: Colors.black.withValues(alpha: 0.50),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          bookingId.trim().isNotEmpty ? bookingId.trim() : '-',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w800,
-                            color: _profileDarkText,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
+                  Divider(height: 1, thickness: 1, color: Color(0x0F000000)),
+                  _InfoRow(
+                    label: 'Booking ID',
+                    value: bookingId.trim().isNotEmpty ? bookingId.trim() : '-',
                   ),
-                  const SizedBox(height: UiTokens.s6),
-                  Text('Date: $date', style: _documentMetaStyle),
-                  const SizedBox(height: UiTokens.s2),
-                  Text('Payment: $paymentMethod', style: _documentMetaStyle),
-                  const SizedBox(height: UiTokens.s2),
-                  Text(
-                    'Service price: $servicePriceLabel',
-                    style: _documentMetaStyle,
+                  _InfoRow(label: 'Date', value: date),
+                  _InfoRow(label: 'Payment', value: paymentMethod),
+                  _InfoRow(
+                    label: 'Service price',
+                    value: servicePriceLabel,
+                    showBorder: false,
                   ),
                 ],
               );
@@ -1684,6 +1660,70 @@ class _BookingDocCard extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({
+    required this.label,
+    required this.value,
+    this.showBorder = true,
+  });
+
+  final String label;
+  final String value;
+  final bool showBorder;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: showBorder
+              ? Border(
+                  bottom: BorderSide(
+                    color: Colors.black.withValues(alpha: 0.06),
+                  ),
+                )
+              : null,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 92,
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.black.withValues(alpha: 0.50),
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  value.trim().isEmpty ? 'Unavailable' : value.trim(),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: _profileDarkText,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -2691,31 +2731,71 @@ class _AdminBookingDetailsTabsState extends State<_AdminBookingDetailsTabs> {
     Map<String, dynamic> booking,
     Map<String, dynamic>? user,
   ) {
+    final targetPersonId =
+        normalizeString(booking['personId']) ??
+        normalizeString(booking['addressId']) ??
+        '';
     final rawName =
         normalizeString(booking['personName']) ??
         normalizeString(user?['defaultPerson']) ??
         'Selected person';
-    final rawLabel =
-        normalizeString(booking['personLabel']) ?? 'Care recipient';
-    final rawPhone =
+
+    final rawFamily = user?['address'];
+    final family = <Map<String, dynamic>>[
+      if (rawFamily is List)
+        for (final entry in rawFamily)
+          if (entry is Map) Map<String, dynamic>.from(entry),
+    ];
+    Map<String, dynamic> selectedPersonEntry = const <String, dynamic>{};
+    if (family.isNotEmpty) {
+      if (targetPersonId.trim().isNotEmpty) {
+        for (final entry in family) {
+          if (normalizeString(entry['id']) == targetPersonId.trim()) {
+            selectedPersonEntry = entry;
+            break;
+          }
+        }
+      }
+      if (selectedPersonEntry.isEmpty && rawName.trim().isNotEmpty) {
+        final rawLower = rawName.trim().toLowerCase();
+        for (final entry in family) {
+          final name = normalizeString(entry['name']) ?? '';
+          if (name.trim().isNotEmpty && name.trim().toLowerCase() == rawLower) {
+            selectedPersonEntry = entry;
+            break;
+          }
+        }
+      }
+    }
+
+    final resolvedName =
+        normalizeString(selectedPersonEntry['name']) ?? rawName;
+    final resolvedLabel =
+        normalizeString(booking['personLabel']) ??
+        normalizeString(selectedPersonEntry['label']) ??
+        'Care recipient';
+    final resolvedPhone =
+        normalizeString(selectedPersonEntry['phone']) ??
         normalizeString(booking['personPhone']) ??
         normalizeString(booking['phone']) ??
         normalizeString(user?['phone']) ??
         '-';
-    final addressText =
+    final resolvedAddress =
+        normalizeString(selectedPersonEntry['address']) ??
         normalizeString(booking['personAddress']) ??
         normalizeString(booking['address']) ??
         normalizeString(user?['defaultAddress']) ??
         'Location not provided';
     final photoUrl =
+        normalizeString(selectedPersonEntry['photoUrl']) ??
         normalizeString(booking['personPhotoUrl']) ??
         normalizeString(booking['personPhoto']);
 
     return (
-      name: rawName,
-      label: rawLabel,
-      address: addressText,
-      phone: rawPhone,
+      name: resolvedName,
+      label: resolvedLabel,
+      address: resolvedAddress,
+      phone: resolvedPhone,
       photoUrl: (photoUrl?.trim().isNotEmpty == true) ? photoUrl!.trim() : null,
     );
   }
@@ -3009,6 +3089,14 @@ class _AdminBookingDetailsTabsState extends State<_AdminBookingDetailsTabs> {
         normalizeString(user?['name']) ??
         normalizeString(booking['userName']) ??
         'Client';
+    final ownerPhotoUrl =
+        (normalizeString(user?['profile_photo'])?.trim().isNotEmpty == true
+        ? normalizeString(user?['profile_photo'])!.trim()
+        : (normalizeString(user?['photoUrl'])?.trim().isNotEmpty == true
+              ? normalizeString(user?['photoUrl'])!.trim()
+              : (normalizeString(user?['imageUrl'])?.trim().isNotEmpty == true
+                    ? normalizeString(user?['imageUrl'])!.trim()
+                    : null)));
     final ownerPhone =
         normalizeString(user?['phone']) ??
         normalizeString(booking['userPhone']) ??
@@ -3031,6 +3119,8 @@ class _AdminBookingDetailsTabsState extends State<_AdminBookingDetailsTabs> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _buildSectionHeader(title: 'Client details'),
+        const SizedBox(height: 4),
+        _centerAvatar(ownerName, ownerPhotoUrl),
         _buildTabContent([
           _buildInfoRow(
             icon: Icons.person,
@@ -3606,8 +3696,9 @@ class _AdminBookingEditSheetState extends State<_AdminBookingEditSheet> {
           color: Colors.black.withValues(alpha: 0.55),
         ),
         alignLabelWithHint: alignLabelWithHint,
-        floatingLabelBehavior:
-            floatingLabelAlways ? FloatingLabelBehavior.always : null,
+        floatingLabelBehavior: floatingLabelAlways
+            ? FloatingLabelBehavior.always
+            : null,
         hintText: hintText,
         hintStyle: const TextStyle(
           fontSize: 12,
@@ -3795,7 +3886,7 @@ class _AdminBookingEditSheetState extends State<_AdminBookingEditSheet> {
                   Row(
                     children: [
                       Expanded(
-                      child: TextFormField(
+                        child: TextFormField(
                           controller: _dateCtrl,
                           readOnly: true,
                           showCursor: false,

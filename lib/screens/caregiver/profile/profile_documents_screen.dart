@@ -232,9 +232,7 @@ class _ProfileDocumentsScreenState extends State<ProfileDocumentsScreen> {
           const SizedBox(height: 2),
           _AddDocumentCard(onTap: () => _navigateToEdit()),
           const SizedBox(height: 12),
-          if (sorted.isEmpty) ...[
-            _buildDocumentsEmptyState(),
-          ],
+          if (sorted.isEmpty) ...[_buildDocumentsEmptyState()],
           for (final doc in sorted) ...[
             Padding(
               padding: const EdgeInsets.only(bottom: 12),
@@ -298,7 +296,8 @@ class _ProfileDocumentsScreenState extends State<ProfileDocumentsScreen> {
     return _buildCenteredEmptyMessage(
       icon: Icons.description_outlined,
       title: 'No documents yet',
-      subtitle: 'Upload ID cards or certifications to share your qualifications.',
+      subtitle:
+          'Upload ID cards or certifications to share your qualifications.',
     );
   }
 
@@ -390,7 +389,10 @@ class _AddDocumentCard extends StatelessWidget {
         decoration: BoxDecoration(
           color: _accentGold,
           borderRadius: BorderRadius.circular(UiTokens.r16),
-          border: Border.all(color: _accentGold.withValues(alpha: 0.55), width: 1.1),
+          border: Border.all(
+            color: _accentGold.withValues(alpha: 0.55),
+            width: 1.1,
+          ),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -513,14 +515,16 @@ class _DocumentCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: UiTokens.s8),
-              Expanded(
-                child: _DocumentActionButton(
-                  icon: Icons.edit_outlined,
-                  label: 'Edit',
-                  onTap: onEdit,
+              if (!isVerified) ...[
+                Expanded(
+                  child: _DocumentActionButton(
+                    icon: Icons.edit_outlined,
+                    label: 'Edit',
+                    onTap: onEdit,
+                  ),
                 ),
-              ),
-              const SizedBox(width: UiTokens.s8),
+                const SizedBox(width: UiTokens.s8),
+              ],
               InkWell(
                 onTap: onDelete,
                 borderRadius: BorderRadius.circular(12),

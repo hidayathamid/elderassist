@@ -4541,35 +4541,43 @@ class _KeyValueTable extends StatelessWidget {
         children: List.generate(rows.length, (index) {
           final row = rows[index];
           final isLast = index == rows.length - 1;
-          return Padding(
-            padding: EdgeInsets.only(bottom: isLast ? 0 : 10),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SizedBox(
-                  width: 118,
-                  child: Text(
-                    row.label,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      color: _profileDarkText.withValues(alpha: 0.70),
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    width: 118,
+                    child: Text(
+                      row.label,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: _profileDarkText.withValues(alpha: 0.70),
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    row.value.trim().isEmpty ? 'Unavailable' : row.value,
-                    style: const TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      color: _profileDarkText,
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      row.value.trim().isEmpty ? 'Unavailable' : row.value,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: _profileDarkText,
+                      ),
                     ),
                   ),
+                ],
+              ),
+              if (!isLast)
+                Divider(
+                  height: 14,
+                  thickness: 1,
+                  color: Colors.black.withValues(alpha: 0.06),
                 ),
-              ],
-            ),
+            ],
           );
         }),
       ),

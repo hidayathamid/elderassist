@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
+import '../../utils/service_preferences.dart';
 import '../../widgets/default_profile_avatar.dart';
 import '../user/activity/activity_screen.dart' show activityButtonYellow;
 
@@ -69,9 +70,10 @@ class AdminSosDetailsSheet extends StatefulWidget {
 
 class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
   static const labels = <String>[
+    'SOS details',
     'Caregiver details',
     'Client details',
-    'SOS details',
+    'Emergency contact',
   ];
 
   int _selectedTabIndex = 0;
@@ -157,7 +159,9 @@ class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
         ),
         child: DefaultProfileAvatar(
           radius: radius,
-          photoUrl: (photoUrl?.trim().isNotEmpty == true) ? photoUrl!.trim() : null,
+          photoUrl: (photoUrl?.trim().isNotEmpty == true)
+              ? photoUrl!.trim()
+              : null,
           label: label,
         ),
       ),
@@ -230,7 +234,10 @@ class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
                   duration: const Duration(milliseconds: 160),
                   curve: Curves.easeOutCubic,
                   width: 124,
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 5,
+                  ),
                   decoration: BoxDecoration(
                     color: selected ? _accentGold : Colors.white,
                     borderRadius: BorderRadius.circular(999),
@@ -273,6 +280,154 @@ class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
     );
   }
 
+  Widget _buildUnavailablePlaceholder({
+    required String message,
+    String explanation = "It'll show up as soon as it becomes available.",
+    bool centerVertically = false,
+  }) {
+    final core = ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.bolt_rounded, size: 32, color: _accentGreen),
+            const SizedBox(height: 10),
+            Text(
+              message,
+              style: const TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 15,
+                color: _profileDarkText,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              explanation,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final centered = Center(child: core);
+    if (!centerVertically) return centered;
+
+    final height = (MediaQuery.sizeOf(context).height * 0.35).clamp(
+      260.0,
+      420.0,
+    );
+    return SizedBox(height: height, child: centered);
+  }
+
+  List<Map<String, dynamic>> _extractEmergencyContacts(
+    Map<String, dynamic>? data,
+  ) {
+    if (data == null) return const [];
+    final raw = data['emergencyContacts'];
+    if (raw is List) {
+      return raw
+          .whereType<Map>()
+          .map((entry) => Map<String, dynamic>.from(entry))
+          .toList(growable: false);
+    }
+    return const [];
+  }
+
+  ({String name, String label, String address, String phone, String? photoUrl})
+  _resolvePersonDisplay(Map<String, dynamic> sos, Map<String, dynamic>? user) {
+    final targetPersonId = _text(sos['personId']).isNotEmpty
+        ? _text(sos['personId'])
+        : _text(sos['addressId']);
+
+    final rawName = _text(sos['personName']).isNotEmpty
+        ? _text(sos['personName'])
+        : (_text(sos['selectedPersonName']).isNotEmpty
+              ? _text(sos['selectedPersonName'])
+              : 'Selected person');
+    final rawLabel = _text(sos['selectedPersonLabel']).isNotEmpty
+        ? _text(sos['selectedPersonLabel'])
+        : 'Care recipient';
+
+    final addressMetaRaw = sos['addressMeta'];
+    final addressMeta = (addressMetaRaw is Map)
+        ? Map<String, dynamic>.from(addressMetaRaw)
+        : const <String, dynamic>{};
+
+    final rawFamily = user?['address'];
+    final family = <Map<String, dynamic>>[
+      if (rawFamily is List)
+        for (final entry in rawFamily)
+          if (entry is Map) Map<String, dynamic>.from(entry),
+    ];
+
+    Map<String, dynamic> selectedPersonEntry = const <String, dynamic>{};
+    if (family.isNotEmpty && targetPersonId.trim().isNotEmpty) {
+      for (final entry in family) {
+        if (_text(entry['id']) == targetPersonId) {
+          selectedPersonEntry = entry;
+          break;
+        }
+      }
+    }
+    if (selectedPersonEntry.isEmpty &&
+        family.isNotEmpty &&
+        rawName.isNotEmpty) {
+      final rawLower = rawName.toLowerCase();
+      for (final entry in family) {
+        if (_text(entry['name']).toLowerCase() == rawLower) {
+          selectedPersonEntry = entry;
+          break;
+        }
+      }
+    }
+
+    final resolvedName = _text(selectedPersonEntry['name']).isNotEmpty
+        ? _text(selectedPersonEntry['name'])
+        : rawName;
+    final resolvedLabel = _text(selectedPersonEntry['label']).isNotEmpty
+        ? _text(selectedPersonEntry['label'])
+        : rawLabel;
+    final resolvedPhone = _text(selectedPersonEntry['phone']).isNotEmpty
+        ? _text(selectedPersonEntry['phone'])
+        : ((addressMeta['phone']?.toString().trim().isNotEmpty == true)
+              ? addressMeta['phone'].toString().trim()
+              : (addressMeta['phoneNumber']?.toString().trim().isNotEmpty ==
+                    true)
+              ? addressMeta['phoneNumber'].toString().trim()
+              : (_text(sos['personPhone']).isNotEmpty)
+              ? _text(sos['personPhone'])
+              : (_text(sos['personContact']).isNotEmpty)
+              ? _text(sos['personContact'])
+              : '-');
+    final resolvedAddress = _text(selectedPersonEntry['address']).isNotEmpty
+        ? _text(selectedPersonEntry['address'])
+        : (_text(sos['personAddress']).isNotEmpty
+              ? _text(sos['personAddress'])
+              : (_text(sos['address']).isNotEmpty
+                    ? _text(sos['address'])
+                    : (_text(user?['defaultAddress']).isNotEmpty
+                          ? _text(user?['defaultAddress'])
+                          : _text(user?['address']))));
+    final photoUrl = _text(selectedPersonEntry['photoUrl']).isNotEmpty
+        ? _text(selectedPersonEntry['photoUrl'])
+        : _text(addressMeta['photoUrl']);
+
+    return (
+      name: resolvedName,
+      label: resolvedLabel,
+      address: resolvedAddress.trim().isNotEmpty
+          ? resolvedAddress.trim()
+          : 'Location not provided',
+      phone: resolvedPhone.trim().isNotEmpty ? resolvedPhone.trim() : '-',
+      photoUrl: photoUrl.trim().isNotEmpty ? photoUrl.trim() : null,
+    );
+  }
+
   Widget _buildCaregiverTab(Map<String, dynamic> sos) {
     final caregiverId = _text(sos['caregiverId']);
     final caregiverName = _text(sos['caregiverName']);
@@ -280,12 +435,22 @@ class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
         ? null
         : FirebaseFirestore.instance.collection('caregivers').doc(caregiverId);
 
+    if (caregiverId.isEmpty && caregiverName.isEmpty) {
+      return _buildUnavailablePlaceholder(
+        message: 'Caregiver unavailable',
+        explanation: 'This SOS does not have a caregiver assigned.',
+        centerVertically: true,
+      );
+    }
+
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: caregiverRef?.snapshots(),
       builder: (context, snap) {
         final caregiver = snap.data?.data() ?? const <String, dynamic>{};
         final name = _valueOrUnavailable(
-          _text(caregiver['name']).isNotEmpty ? _text(caregiver['name']) : caregiverName,
+          _text(caregiver['name']).isNotEmpty
+              ? _text(caregiver['name'])
+              : caregiverName,
         );
         final phone = _valueOrUnavailable(
           _text(caregiver['phone']).isNotEmpty
@@ -295,35 +460,66 @@ class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
         final address = _valueOrUnavailable(
           _text(caregiver['defaultAddress']).isNotEmpty
               ? _text(caregiver['defaultAddress'])
-              : _text(caregiver['address']),
+              : (_text(caregiver['address']).isNotEmpty
+                    ? _text(caregiver['address'])
+                    : _text(caregiver['area'])),
         );
-        final service = _valueOrUnavailable(_text(sos['service']));
+        final bioRaw = _text(caregiver['bio']);
+        final prefs = extractServicePreferencesList(
+          caregiver['servicePreferences'] ?? caregiver['services'],
+        );
+        final serviceFallback = _text(caregiver['service']);
+        final service = prefs.isNotEmpty
+            ? prefs.join(', ')
+            : (serviceFallback.isNotEmpty
+                  ? serviceFallback
+                  : _valueOrUnavailable(_text(sos['service'])));
         final photoUrl = _text(caregiver['profile_photo']).isNotEmpty
             ? _text(caregiver['profile_photo'])
             : _text(caregiver['photoUrl']).isNotEmpty
-                  ? _text(caregiver['photoUrl'])
-                  : _text(caregiver['imageUrl']);
+            ? _text(caregiver['photoUrl'])
+            : _text(caregiver['imageUrl']);
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _buildSectionHeader(title: 'Caregiver'),
+            _buildSectionHeader(title: 'Caregiver details'),
             const SizedBox(height: 4),
             _centerAvatar(name, photoUrl.isNotEmpty ? photoUrl : null),
             _buildTabContent([
-              _buildInfoRow(icon: Icons.person, title: 'Caregiver name', value: name),
+              if (caregiverId.isNotEmpty)
+                _buildInfoRow(
+                  icon: Icons.badge_outlined,
+                  title: 'Caregiver ID',
+                  value: caregiverId,
+                ),
+              _buildInfoRow(
+                icon: Icons.person,
+                title: 'Caregiver name',
+                value: name,
+              ),
               _buildInfoRow(
                 icon: Icons.medical_services_outlined,
                 title: 'Services',
                 value: service,
               ),
-              _buildInfoRow(icon: Icons.phone_android, title: 'Contact', value: phone),
+              _buildInfoRow(
+                icon: Icons.phone_android,
+                title: 'Contact',
+                value: phone,
+              ),
               _buildInfoRow(
                 icon: Icons.home,
                 title: 'Address',
                 value: address,
-                showBorder: false,
+                showBorder: bioRaw.trim().isNotEmpty,
               ),
+              if (bioRaw.trim().isNotEmpty)
+                _buildInfoContentRow(
+                  icon: Icons.info_outline,
+                  title: 'Bio',
+                  value: bioRaw.trim(),
+                ),
             ]),
           ],
         );
@@ -342,36 +538,63 @@ class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
       stream: userRef?.snapshots(),
       builder: (context, snap) {
         final user = snap.data?.data() ?? const <String, dynamic>{};
-        final name = _valueOrUnavailable(
+        final ownerName = _valueOrUnavailable(
           _text(user['name']).isNotEmpty ? _text(user['name']) : userName,
         );
-        final phone = _valueOrUnavailable(_text(user['phone']));
-        final address = _valueOrUnavailable(
-          _text(user['defaultAddress']).isNotEmpty
-              ? _text(user['defaultAddress'])
-              : _text(user['address']),
+        final ownerPhone = _valueOrUnavailable(
+          _text(user['phone']).isNotEmpty
+              ? _text(user['phone'])
+              : _text(sos['userPhone']),
         );
-        final photoUrl = _text(user['profile_photo']).isNotEmpty
+        final ownerPhotoUrl = _text(user['profile_photo']).isNotEmpty
             ? _text(user['profile_photo'])
-            : _text(user['photoUrl']).isNotEmpty
+            : (_text(user['photoUrl']).isNotEmpty
                   ? _text(user['photoUrl'])
-                  : _text(user['imageUrl']);
+                  : _text(user['imageUrl']));
+
+        final personDisplay = _resolvePersonDisplay(sos, user);
+        final notes = _text(sos['personNotes']).isNotEmpty
+            ? _text(sos['personNotes'])
+            : _text(sos['notes']);
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _buildSectionHeader(title: 'Client'),
+            _buildSectionHeader(title: 'Client details'),
             const SizedBox(height: 4),
-            _centerAvatar(name, photoUrl.isNotEmpty ? photoUrl : null),
+            _centerAvatar(
+              ownerName,
+              ownerPhotoUrl.isNotEmpty ? ownerPhotoUrl : null,
+            ),
             _buildTabContent([
-              _buildInfoRow(icon: Icons.person, title: 'Client name', value: name),
-              _buildInfoRow(icon: Icons.phone_android, title: 'Contact', value: phone),
+              _buildInfoRow(
+                icon: Icons.person,
+                title: 'Client name',
+                value: ownerName,
+              ),
+              _buildInfoRow(
+                icon: Icons.phone_android,
+                title: 'Client contact',
+                value: ownerPhone,
+              ),
               _buildInfoRow(
                 icon: Icons.home,
-                title: 'Address',
-                value: address,
-                showBorder: false,
+                title: 'Care location',
+                value: _valueOrUnavailable(personDisplay.address),
               ),
+              _buildInfoRow(
+                icon: Icons.accessibility_new_rounded,
+                title: 'Primary person',
+                value:
+                    '${_valueOrUnavailable(personDisplay.name)} (${personDisplay.label.trim().isEmpty ? '—' : personDisplay.label.trim()})',
+                showBorder: notes.trim().isNotEmpty,
+              ),
+              if (notes.trim().isNotEmpty)
+                _buildInfoContentRow(
+                  icon: Icons.sticky_note_2_outlined,
+                  title: 'Notes',
+                  value: notes.trim(),
+                ),
             ]),
           ],
         );
@@ -381,44 +604,299 @@ class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
 
   Widget _buildSosTab(Map<String, dynamic> sos) {
     final sosId = widget.sosId;
+    final userId = _text(sos['userId']);
+    final userNameHint = _text(sos['userName']);
+    final userRef = userId.isEmpty
+        ? null
+        : FirebaseFirestore.instance.collection('users').doc(userId);
+
+    final caregiverId = _text(sos['caregiverId']);
+    final caregiverNameHint = _text(sos['caregiverName']);
+    final caregiverRef = caregiverId.isEmpty
+        ? null
+        : FirebaseFirestore.instance.collection('caregivers').doc(caregiverId);
+
     final status = _valueOrUnavailable(_text(sos['status']));
     final createdAt = _timeLabel(sos['createdAt']);
     final reason = _valueOrUnavailable(_text(sos['reason']));
     final address = _valueOrUnavailable(_text(sos['address']));
     final bookingId = _text(sos['bookingId']);
-    final selectedPersonName = _valueOrUnavailable(_text(sos['selectedPersonName']));
+    final service = _valueOrUnavailable(_text(sos['service']));
+    final date = _text(sos['date']);
+    final time = _text(sos['time']);
+    final notes = _text(sos['personNotes']).isNotEmpty
+        ? _text(sos['personNotes'])
+        : _text(sos['notes']);
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildSectionHeader(title: 'SOS details'),
-        _buildTabContent([
-          _buildInfoRow(icon: Icons.sos_outlined, title: 'SOS ID', value: sosId),
-          _buildInfoRow(icon: Icons.flag_outlined, title: 'Status', value: status),
-          _buildInfoRow(icon: Icons.access_time, title: 'Created at', value: createdAt),
-          _buildInfoRow(icon: Icons.report_outlined, title: 'Reason', value: reason),
-          _buildInfoRow(icon: Icons.home, title: 'Address', value: address),
-          _buildInfoRow(
-            icon: Icons.person,
-            title: 'Selected person',
-            value: selectedPersonName,
-            showBorder: bookingId.isNotEmpty,
-          ),
-          if (bookingId.isNotEmpty)
-            _buildInfoContentRow(
-              icon: Icons.receipt_long_outlined,
-              title: 'Booking ID',
-              value: bookingId,
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: userRef?.snapshots(),
+      builder: (context, userSnap) {
+        final user = userSnap.data?.data();
+        final ownerName = _valueOrUnavailable(
+          _text(user?['name']).isNotEmpty ? _text(user?['name']) : userNameHint,
+        );
+        final ownerPhone = _valueOrUnavailable(
+          _text(user?['phone']).isNotEmpty
+              ? _text(user?['phone'])
+              : _text(sos['userPhone']),
+        );
+
+        final personDisplay = _resolvePersonDisplay(sos, user);
+
+        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: caregiverRef?.snapshots(),
+          builder: (context, caregiverSnap) {
+            final caregiver = caregiverSnap.data?.data();
+
+            final caregiverName = _valueOrUnavailable(
+              _text(caregiver?['name']).isNotEmpty
+                  ? _text(caregiver?['name'])
+                  : caregiverNameHint,
+            );
+            final caregiverPhotoUrl =
+                _text(caregiver?['profile_photo']).isNotEmpty
+                ? _text(caregiver?['profile_photo'])
+                : (_text(caregiver?['photoUrl']).isNotEmpty
+                      ? _text(caregiver?['photoUrl'])
+                      : _text(caregiver?['imageUrl']));
+            final caregiverPhone = _valueOrUnavailable(
+              _text(caregiver?['phone']).isNotEmpty
+                  ? _text(caregiver?['phone'])
+                  : _text(caregiver?['phoneNumber']),
+            );
+            final caregiverAddress = _valueOrUnavailable(
+              _text(caregiver?['defaultAddress']).isNotEmpty
+                  ? _text(caregiver?['defaultAddress'])
+                  : (_text(caregiver?['address']).isNotEmpty
+                        ? _text(caregiver?['address'])
+                        : _text(caregiver?['area'])),
+            );
+            final caregiverPrefs = extractServicePreferencesList(
+              caregiver?['servicePreferences'] ?? caregiver?['services'],
+            );
+            final caregiverServiceFallback = _text(caregiver?['service']);
+            final caregiverServicesValue = caregiverPrefs.isNotEmpty
+                ? caregiverPrefs.join(', ')
+                : (caregiverServiceFallback.trim().isNotEmpty
+                      ? caregiverServiceFallback.trim()
+                      : service);
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _buildSectionHeader(title: 'Caregiver'),
+                const SizedBox(height: 4),
+                _centerAvatar(
+                  caregiverName.isNotEmpty ? caregiverName : 'Caregiver',
+                  caregiverPhotoUrl.isNotEmpty ? caregiverPhotoUrl : null,
+                ),
+                _buildTabContent([
+                  _buildInfoRow(
+                    icon: Icons.person,
+                    title: 'Caregiver name',
+                    value: caregiverName,
+                  ),
+                  _buildInfoRow(
+                    icon: Icons.medical_services_outlined,
+                    title: 'Services',
+                    value: caregiverServicesValue,
+                  ),
+                  _buildInfoRow(
+                    icon: Icons.phone_android,
+                    title: 'Contact',
+                    value: caregiverPhone,
+                  ),
+                  _buildInfoRow(
+                    icon: Icons.home,
+                    title: 'Address',
+                    value: caregiverAddress,
+                    showBorder: false,
+                  ),
+                ]),
+                const SizedBox(height: 14),
+                _buildSectionHeader(title: 'Selected person'),
+                const SizedBox(height: 4),
+                _centerAvatar(
+                  personDisplay.name.isNotEmpty
+                      ? personDisplay.name
+                      : 'Selected person',
+                  personDisplay.photoUrl,
+                ),
+                _buildTabContent([
+                  _buildInfoRow(
+                    icon: Icons.person,
+                    title: 'Name',
+                    value: _valueOrUnavailable(personDisplay.name),
+                  ),
+                  _buildInfoRow(
+                    icon: Icons.phone_android,
+                    title: 'Contact',
+                    value: _valueOrUnavailable(personDisplay.phone),
+                  ),
+                  _buildInfoRow(
+                    icon: Icons.home,
+                    title: 'Location',
+                    value: _valueOrUnavailable(personDisplay.address),
+                    showBorder: false,
+                  ),
+                ]),
+                const SizedBox(height: 14),
+                _buildSectionHeader(
+                  title: 'SOS details',
+                  hint: 'Live details pulled from the SOS record.',
+                ),
+                _buildTabContent([
+                  _buildInfoRow(
+                    icon: Icons.sos_outlined,
+                    title: 'SOS ID',
+                    value: sosId,
+                  ),
+                  _buildInfoRow(
+                    icon: Icons.flag_outlined,
+                    title: 'Status',
+                    value: status,
+                  ),
+                  _buildInfoRow(
+                    icon: Icons.access_time,
+                    title: 'Created at',
+                    value: createdAt,
+                  ),
+                  _buildInfoRow(
+                    icon: Icons.report_outlined,
+                    title: 'Reason',
+                    value: reason,
+                  ),
+                  _buildInfoRow(
+                    icon: Icons.home,
+                    title: 'Address',
+                    value: address,
+                  ),
+                  _buildInfoRow(
+                    icon: Icons.medical_services_outlined,
+                    title: 'Service',
+                    value: service,
+                  ),
+                  if (date.trim().isNotEmpty)
+                    _buildInfoRow(
+                      icon: Icons.calendar_month,
+                      title: 'Date',
+                      value: date.trim(),
+                    ),
+                  if (time.trim().isNotEmpty)
+                    _buildInfoRow(
+                      icon: Icons.access_time,
+                      title: 'Time',
+                      value: time.trim(),
+                    ),
+                  _buildInfoRow(
+                    icon: Icons.person,
+                    title: 'Requested by',
+                    value: ownerName,
+                  ),
+                  _buildInfoRow(
+                    icon: Icons.phone_android,
+                    title: 'Owner contact',
+                    value: ownerPhone,
+                    showBorder: notes.trim().isNotEmpty || bookingId.isNotEmpty,
+                  ),
+                  if (notes.trim().isNotEmpty)
+                    _buildInfoContentRow(
+                      icon: Icons.sticky_note_2_outlined,
+                      title: 'Notes',
+                      value: notes.trim(),
+                    ),
+                  if (bookingId.isNotEmpty)
+                    _buildInfoContentRow(
+                      icon: Icons.receipt_long_outlined,
+                      title: 'Booking ID',
+                      value: bookingId,
+                    ),
+                ]),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildEmergencyContactsTab(Map<String, dynamic> sos) {
+    final userId = _text(sos['userId']);
+    final userRef = userId.isEmpty
+        ? null
+        : FirebaseFirestore.instance.collection('users').doc(userId);
+
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: userRef?.snapshots(),
+      builder: (context, snap) {
+        final user = snap.data?.data();
+        final contacts = _extractEmergencyContacts(user);
+        if (contacts.isEmpty) {
+          return _buildUnavailablePlaceholder(
+            message: 'Emergency contacts unavailable',
+            explanation: 'Client has not added any emergency contacts yet.',
+            centerVertically: true,
+          );
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildSectionHeader(
+              title: 'Emergency contact',
+              hint: 'Contacts provided by the client.',
             ),
-        ]),
-      ],
+            for (var i = 0; i < contacts.length; i++) ...[
+              const SizedBox(height: 4),
+              _centerAvatar(
+                _text(contacts[i]['name']).isNotEmpty
+                    ? _text(contacts[i]['name'])
+                    : 'Emergency contact',
+                _text(contacts[i]['photoUrl']).isNotEmpty
+                    ? _text(contacts[i]['photoUrl'])
+                    : null,
+              ),
+              _buildTabContent([
+                _buildInfoRow(
+                  icon: Icons.person,
+                  title: 'Name',
+                  value: _text(contacts[i]['name']).isNotEmpty
+                      ? _text(contacts[i]['name'])
+                      : 'Emergency contact',
+                ),
+                _buildInfoRow(
+                  icon: Icons.family_restroom_rounded,
+                  title: 'Relationship',
+                  value: _text(contacts[i]['relationship']).isNotEmpty
+                      ? _text(contacts[i]['relationship'])
+                      : 'Relationship not set',
+                ),
+                Builder(
+                  builder: (context) {
+                    final phone = _text(contacts[i]['phone']);
+                    return _buildInfoRow(
+                      icon: Icons.phone_android,
+                      title: 'Contact',
+                      value: phone.isNotEmpty ? phone : 'Phone not available',
+                      showBorder: false,
+                    );
+                  },
+                ),
+              ]),
+              if (i != contacts.length - 1) const SizedBox(height: 12),
+            ],
+          ],
+        );
+      },
     );
   }
 
   @override
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
-    final sosRef = FirebaseFirestore.instance.collection('sos').doc(widget.sosId);
+    final sosRef = FirebaseFirestore.instance
+        .collection('sos')
+        .doc(widget.sosId);
 
     return Padding(
       padding: EdgeInsets.only(bottom: bottomInset),
@@ -430,7 +908,9 @@ class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
           return Container(
             decoration: BoxDecoration(
               color: Colors.white,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(26),
+              ),
               border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
               boxShadow: [
                 BoxShadow(
@@ -448,9 +928,10 @@ class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
                   final sos = snap.data?.data() ?? const <String, dynamic>{};
                   Widget tabContent() {
                     final idx = _selectedTabIndex.clamp(0, labels.length - 1);
-                    if (idx == 0) return _buildCaregiverTab(sos);
-                    if (idx == 1) return _buildClientTab(sos);
-                    return _buildSosTab(sos);
+                    if (idx == 0) return _buildSosTab(sos);
+                    if (idx == 1) return _buildCaregiverTab(sos);
+                    if (idx == 2) return _buildClientTab(sos);
+                    return _buildEmergencyContactsTab(sos);
                   }
 
                   return ListView(
@@ -555,7 +1036,9 @@ class _AdminSosEditSheetState extends State<AdminSosEditSheet> {
           .get();
       final data = snap.data() ?? const <String, dynamic>{};
       _caregiverId = _text(data['caregiverId']);
-      _statusCtrl.text = _text(data['status']).isNotEmpty ? _text(data['status']) : 'ACTIVE';
+      _statusCtrl.text = _text(data['status']).isNotEmpty
+          ? _text(data['status'])
+          : 'ACTIVE';
       _reasonCtrl.text = _text(data['reason']);
       _addressCtrl.text = _text(data['address']);
       _selectedPersonCtrl.text = _text(data['selectedPersonName']);
@@ -577,7 +1060,8 @@ class _AdminSosEditSheetState extends State<AdminSosEditSheet> {
   void _openStatusMenu() {
     _closeStatusMenu();
     final overlay = Overlay.of(context);
-    final box = _statusFieldKey.currentContext?.findRenderObject() as RenderBox?;
+    final box =
+        _statusFieldKey.currentContext?.findRenderObject() as RenderBox?;
     if (box == null) return;
     final size = box.size;
 
@@ -603,7 +1087,10 @@ class _AdminSosEditSheetState extends State<AdminSosEditSheet> {
                         maxWidth: size.width,
                       ),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 6,
+                          horizontal: 6,
+                        ),
                         decoration: BoxDecoration(
                           color: Colors.white,
                           borderRadius: BorderRadius.circular(16),
@@ -624,7 +1111,10 @@ class _AdminSosEditSheetState extends State<AdminSosEditSheet> {
                                   onTap: () => _selectStatus(option),
                                   borderRadius: BorderRadius.circular(12),
                                   child: Padding(
-                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 10,
+                                    ),
                                     child: Row(
                                       children: [
                                         Container(
@@ -683,13 +1173,16 @@ class _AdminSosEditSheetState extends State<AdminSosEditSheet> {
     if (!ok) return;
     setState(() => _saving = true);
     try {
-      await FirebaseFirestore.instance.collection('sos').doc(widget.sosId).update({
-        'status': _statusCtrl.text.trim(),
-        'reason': _reasonCtrl.text.trim(),
-        'selectedPersonName': _selectedPersonCtrl.text.trim(),
-        'address': _addressCtrl.text.trim(),
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
+      await FirebaseFirestore.instance
+          .collection('sos')
+          .doc(widget.sosId)
+          .update({
+            'status': _statusCtrl.text.trim(),
+            'reason': _reasonCtrl.text.trim(),
+            'selectedPersonName': _selectedPersonCtrl.text.trim(),
+            'address': _addressCtrl.text.trim(),
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
       if (!mounted) return;
       Navigator.of(context).pop();
     } catch (_) {
@@ -702,7 +1195,9 @@ class _AdminSosEditSheetState extends State<AdminSosEditSheet> {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
     final caregiverRef = _caregiverId.trim().isEmpty
         ? null
-        : FirebaseFirestore.instance.collection('caregivers').doc(_caregiverId.trim());
+        : FirebaseFirestore.instance
+              .collection('caregivers')
+              .doc(_caregiverId.trim());
 
     InputDecoration inputDecoration({
       required String labelText,
@@ -717,7 +1212,10 @@ class _AdminSosEditSheetState extends State<AdminSosEditSheet> {
         ),
         filled: true,
         fillColor: Colors.white,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 14,
+          vertical: 10,
+        ),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(16),
           borderSide: BorderSide(color: Colors.grey[300]!),
@@ -783,7 +1281,9 @@ class _AdminSosEditSheetState extends State<AdminSosEditSheet> {
                         ),
                       ),
                       IconButton(
-                        onPressed: _saving ? null : () => Navigator.of(context).pop(),
+                        onPressed: _saving
+                            ? null
+                            : () => Navigator.of(context).pop(),
                         icon: const Icon(Icons.close_rounded, size: 20),
                         splashRadius: 18,
                       ),
@@ -804,7 +1304,8 @@ class _AdminSosEditSheetState extends State<AdminSosEditSheet> {
                             (caregiverData?['name'] as String?)?.trim() ??
                             _caregiverId.trim();
                         final caregiverPhoto =
-                            (caregiverData?['profile_photo'] as String?)?.trim() ??
+                            (caregiverData?['profile_photo'] as String?)
+                                ?.trim() ??
                             (caregiverData?['photoUrl'] as String?)?.trim();
 
                         final displayName = caregiverName.isNotEmpty

@@ -32,6 +32,7 @@ const List<CaregiverJob> _previewUpcomingJobs = [
     userId: 'preview-user',
     personName: 'Aisha Rahman',
     personId: 'preview-person-1',
+    addressId: '',
     scheduledDate: '18 Dec 2025',
     time: '09:00',
     status: 'ASSIGNED',
@@ -50,6 +51,7 @@ const List<CaregiverJob> _previewUpcomingJobs = [
     userId: 'preview-user',
     personName: 'Kamal Subramaniam',
     personId: 'preview-person-2',
+    addressId: '',
     scheduledDate: '21 Dec 2025',
     time: '14:00',
     status: 'PENDING',
@@ -71,6 +73,7 @@ const List<CaregiverJob> _previewHistoryJobs = [
     userId: 'preview-user',
     personName: 'Nurul Amani',
     personId: 'preview-person-3',
+    addressId: '',
     scheduledDate: '07 Dec 2025',
     time: '10:00',
     status: 'COMPLETED',
@@ -89,6 +92,7 @@ const List<CaregiverJob> _previewHistoryJobs = [
     userId: 'preview-user',
     personName: 'Ahmad Faizal',
     personId: 'preview-person-4',
+    addressId: '',
     scheduledDate: '02 Dec 2025',
     time: '16:00',
     status: 'CANCELLED',
@@ -110,6 +114,7 @@ const List<CaregiverJob> _previewActiveJobs = [
     userId: 'preview-user',
     personName: 'Ahmad (Father)',
     personId: 'preview-person-5',
+    addressId: '',
     scheduledDate: 'Today',
     time: '08:00',
     status: 'ASSIGNED',
@@ -651,22 +656,18 @@ class CaregiverJobsScreenState extends State<CaregiverJobsScreen>
     final bookingRef = FirebaseFirestore.instance
         .collection('bookings')
         .doc(job.bookingId);
-    batch.set(
-      bookingRef,
-      {'hiddenForCaregiver': true},
-      SetOptions(merge: true),
-    );
+    batch.set(bookingRef, {
+      'hiddenForCaregiver': true,
+    }, SetOptions(merge: true));
     if (job.caregiverId.isNotEmpty) {
       final caregiverRef = FirebaseFirestore.instance
           .collection('caregivers')
           .doc(job.caregiverId)
           .collection('assignedBookings')
           .doc(job.bookingId);
-      batch.set(
-        caregiverRef,
-        {'hiddenForCaregiver': true},
-        SetOptions(merge: true),
-      );
+      batch.set(caregiverRef, {
+        'hiddenForCaregiver': true,
+      }, SetOptions(merge: true));
     }
     await batch.commit();
   }

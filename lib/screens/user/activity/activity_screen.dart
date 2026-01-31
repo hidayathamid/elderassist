@@ -246,10 +246,24 @@ class _ActivityScreenState extends State<ActivityScreen>
       id: docId,
       caregiverId: (data['caregiverId'] as String?) ?? '',
       caregiverName: (data['caregiverName'] as String?) ?? '',
-      personId: (data['personId'] as String?) ?? '',
-      addressId: (data['addressId'] as String?) ?? '',
-      personName: (data['personName'] as String?) ?? 'Family member',
-      personAddress: (data['personAddress'] as String?) ?? '',
+      personId:
+          (data['personId'] as String?) ??
+          (data['selectedPersonId'] as String?) ??
+          '',
+      addressId:
+          (data['addressId'] as String?) ??
+          (data['selectedAddressId'] as String?) ??
+          (data['addressID'] as String?) ??
+          (data['addressId'] as String?) ??
+          '',
+      personName:
+          (data['personName'] as String?) ??
+          (data['selectedPersonName'] as String?) ??
+          'Family member',
+      personAddress:
+          (data['personAddress'] as String?) ??
+          (data['address'] as String?) ??
+          '',
       service: serviceLabel.isNotEmpty ? serviceLabel : 'Home care',
       date: date,
       time: time,
@@ -1725,7 +1739,10 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
           widget.booking.id,
           widget.booking.addressId,
         ) ??
-        _primaryAddressMap(data);
+        ((widget.booking.personId.trim().isEmpty &&
+                    widget.booking.addressId.trim().isEmpty)
+                ? _primaryAddressMap(data)
+                : null);
     final rawName =
         _stringValue(selectedEntry?['name']) ??
         (data['name'] as String?)?.trim() ??
@@ -1762,7 +1779,6 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
       conditions: const [],
       photoUrl:
           (selectedEntry?['photoUrl'] as String?) ??
-          (data['photoUrl'] as String?) ??
           '',
       label: (rawLabel != null && rawLabel.trim().isNotEmpty)
           ? rawLabel.trim()
@@ -1782,7 +1798,10 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
           widget.booking.id,
           widget.booking.addressId,
         ) ??
-        _primaryAddressMap(widget.userData);
+        ((widget.booking.personId.trim().isEmpty &&
+                    widget.booking.addressId.trim().isEmpty)
+                ? _primaryAddressMap(widget.userData)
+                : null);
     final label =
         _stringValue(selectedEntry?['label']) ??
         _stringValue(selectedEntry?['forWho']);
@@ -1828,26 +1847,28 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
   ) {
     final entries = _addressEntries(data);
     if (addressId.trim().isNotEmpty) {
+      final target = addressId.trim();
       for (final entry in entries) {
         final entryId = entry['id']?.toString();
-        if (entryId != null && entryId == addressId) {
-          return entry;
-        }
+        if (entryId != null && entryId == target) return entry;
+        final entryAddressId = entry['addressId']?.toString();
+        if (entryAddressId != null && entryAddressId == target) return entry;
       }
     }
     if (personId.trim().isNotEmpty) {
+      final target = personId.trim();
       for (final entry in entries) {
         final entryId = entry['id']?.toString();
-        if (entryId != null && entryId == personId) {
-          return entry;
-        }
+        if (entryId != null && entryId == target) return entry;
+        final entryPersonId = entry['personId']?.toString();
+        if (entryPersonId != null && entryPersonId == target) return entry;
       }
-    } else if (bookingId.trim().isNotEmpty) {
+    }
+    if (bookingId.trim().isNotEmpty) {
+      final target = bookingId.trim();
       for (final entry in entries) {
         final entryBookingId = entry['bookingId']?.toString();
-        if (entryBookingId != null && entryBookingId == bookingId) {
-          return entry;
-        }
+        if (entryBookingId != null && entryBookingId == target) return entry;
       }
     }
     return null;
@@ -2105,12 +2126,12 @@ class _ActivityBookingCardState extends State<ActivityBookingCard> {
     final caregiverPhoto = hasPhoto ? rawPhoto! : null;
     final specialization = (caregiverData['specialization'] as String?) ?? '';
     final personProfile = _buildPersonProfile();
-    final personName = widget.booking.personName.isNotEmpty
-        ? widget.booking.personName
-        : personProfile.name;
-    final personAddress = widget.booking.personAddress.isNotEmpty
-        ? widget.booking.personAddress
-        : personProfile.address;
+    final personName = personProfile.name.trim().isNotEmpty
+        ? personProfile.name.trim()
+        : widget.booking.personName;
+    final personAddress = personProfile.address.trim().isNotEmpty
+        ? personProfile.address.trim()
+        : widget.booking.personAddress;
     final personLabel = personProfile.label;
 
     return Container(

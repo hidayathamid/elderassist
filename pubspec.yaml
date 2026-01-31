@@ -54,6 +54,7 @@ dependencies:
   flutter_polyline_points: ^2.0.0
   app_links: ^6.4.1
   firebase_messaging: ^15.2.10
+  flutter_local_notifications: ^17.2.2
   crop_your_image: ^1.0.7
   cupertino_icons: ^1.0.8
   flutter_dotenv: ^6.0.0

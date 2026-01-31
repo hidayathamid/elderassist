@@ -1229,6 +1229,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
                       Expanded(
                         child: Text(
                           location,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             fontSize: 11,
                             fontWeight: FontWeight.w600,
@@ -1249,6 +1251,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
                       Expanded(
                         child: Text(
                           defaultAddress!,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             fontSize: 11,
                             fontWeight: FontWeight.w600,
@@ -1366,6 +1370,8 @@ class _BookingSummaryScreenState extends State<BookingSummaryScreen>
                           Expanded(
                             child: Text(
                               addressText,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w600,

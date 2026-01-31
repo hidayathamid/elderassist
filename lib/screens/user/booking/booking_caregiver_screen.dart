@@ -30,7 +30,7 @@ const double _maxSearchDistanceKm = 15.0;
 
 const Color _bookingAppBarText = Color(0xFF1B1D29);
 const Color _caregiverMatchAccent = Color(0xFF00A8A7);
-const Color _categoryIndicatorColor = Color(0xFFF4F5F7);
+const Color _categoryIndicatorColor = Color(0xFFF4B63D);
 const double _categorySegmentRadius = 26.0;
 const Color _serviceTagBlue = Color(0xFF00A8A7);
 const Color _pageBackground = Color(0xFFF7F8FA);
@@ -117,7 +117,7 @@ class BookingCaregiverScreen extends StatefulWidget {
 
 class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     with TickerProviderStateMixin {
-  static const bool _enablePanelDragGesture = false;
+  static const bool _enablePanelDragGesture = true;
   static const double _minSheetSize = 0.40;
   static const double _maxSheetSize = 0.85;
   static const SpringDescription _panelSpring = SpringDescription(
@@ -3681,11 +3681,15 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
             ),
           ],
         ),
-        child: InkWell(
-          onTap: () => _openCaregiverDetails(
-            caregiver,
-            sourceCategory: tileCategory,
-          ),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            _updateRouteAndMap(
+              caregiver,
+              sourceCategory: tileCategory,
+              centerTileAfterCollapse: true,
+            );
+          },
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             child: Row(
@@ -3700,158 +3704,173 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                 ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Align(
-                    alignment: Alignment.center,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Row(
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(10),
+                      onTap: () => _openCaregiverDetails(
+                        caregiver,
+                        sourceCategory: tileCategory,
+                      ),
+                      child: Align(
+                        alignment: Alignment.center,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Expanded(
-                              child: Text(
-                                caregiver.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 13,
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    caregiver.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ),
+                                if (isRecommendation) ...[
+                                  const SizedBox(width: 8),
+                                  _RecommendationClassChip(
+                                    classLevel: caregiver.recommendationClass,
+                                  ),
+                                ],
+                              ],
+                            ),
+                            const SizedBox(height: 3),
+                            Row(
+                              mainAxisAlignment:
+                                  tileCategory ==
+                                          CaregiverCategory.recommendation
+                                      ? MainAxisAlignment.start
+                                      : MainAxisAlignment.center,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.star,
+                                  size: 14,
+                                  color: Color(0xFFF4B63D),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  caregiver.rating.toStringAsFixed(1),
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 11,
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                const Icon(
+                                  Icons.timer,
+                                  size: 14,
+                                  color: Color(0xFFF4B63D),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'Est. ${(max(caregiver.distanceKm, 0.6) / 0.6).ceil()} mins',
+                                  style: const TextStyle(
+                                    color: Colors.black87,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                const Icon(
+                                  Icons.place,
+                                  size: 14,
+                                  color: Color(0xFFF4B63D),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${caregiver.distanceKm.toStringAsFixed(1)} km',
+                                  style: const TextStyle(
+                                    color: Colors.black87,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            SizedBox(
+                              height: 20,
+                              child: ListView(
+                                scrollDirection: Axis.horizontal,
+                                children: _serviceChips(
+                                  servicesDisplay,
+                                  prefsLower: prefsLower,
+                                  isRecommendation: isRecommendation,
+                                  matchCount: caregiver.matchCount,
                                 ),
                               ),
                             ),
-                            if (isRecommendation) ...[
-                              const SizedBox(width: 8),
-                              _RecommendationClassChip(
-                                classLevel: caregiver.recommendationClass,
+                            if (isRecommendation && reasons.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              Center(
+                                child: SizedBox(
+                                  height: 26,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.center,
+                                    children: [
+                                      Expanded(
+                                        child: SingleChildScrollView(
+                                          scrollDirection: Axis.horizontal,
+                                          physics:
+                                              const BouncingScrollPhysics(),
+                                          child: Row(
+                                            mainAxisAlignment:
+                                                tileCategory ==
+                                                        CaregiverCategory
+                                                            .recommendation
+                                                    ? MainAxisAlignment.start
+                                                    : MainAxisAlignment.center,
+                                            children: reasons
+                                                .map(
+                                                  (reason) => Padding(
+                                                    padding:
+                                                        const EdgeInsets.only(
+                                                      right: 4,
+                                                    ),
+                                                    child: ServiceTagChip(
+                                                      label: reason,
+                                                      backgroundColor:
+                                                          _serviceTagBlue
+                                                              .withAlpha(46),
+                                                      foregroundColor:
+                                                          _serviceTagBlue,
+                                                      borderColor:
+                                                          _serviceTagBlue,
+                                                    ),
+                                                  ),
+                                                )
+                                                .toList(),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ),
                             ],
-                          ],
-                        ),
-                        const SizedBox(height: 3),
-                        Row(
-                          mainAxisAlignment:
-                              tileCategory == CaregiverCategory.recommendation
-                              ? MainAxisAlignment.start
-                              : MainAxisAlignment.center,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(
-                              Icons.star,
-                              size: 14,
-                              color: Color(0xFFF4B63D),
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              caregiver.rating.toStringAsFixed(1),
-                              style: const TextStyle(
+                            const SizedBox(height: 6),
+                            const Text(
+                              'Tap to view caregiver details',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 10,
                                 fontWeight: FontWeight.w600,
-                                fontSize: 11,
-                                color: Colors.black87,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            const Icon(
-                              Icons.timer,
-                              size: 14,
-                              color: Color(0xFFF4B63D),
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              'Est. ${(max(caregiver.distanceKm, 0.6) / 0.6).ceil()} mins',
-                              style: const TextStyle(
-                                color: Colors.black87,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            const Icon(
-                              Icons.place,
-                              size: 14,
-                              color: Color(0xFFF4B63D),
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              '${caregiver.distanceKm.toStringAsFixed(1)} km',
-                              style: const TextStyle(
-                                color: Colors.black87,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
+                                color: Colors.black54,
                               ),
                             ),
                           ],
                         ),
-                        const SizedBox(height: 4),
-                        SizedBox(
-                          height: 20,
-                          child: ListView(
-                            scrollDirection: Axis.horizontal,
-                            children: _serviceChips(
-                              servicesDisplay,
-                              prefsLower: prefsLower,
-                              isRecommendation: isRecommendation,
-                              matchCount: caregiver.matchCount,
-                            ),
-                          ),
-                        ),
-                        if (isRecommendation && reasons.isNotEmpty) ...[
-                          const SizedBox(height: 6),
-                          Center(
-                            child: SizedBox(
-                              height: 26,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.center,
-                                children: [
-                                  Expanded(
-                                    child: SingleChildScrollView(
-                                      scrollDirection: Axis.horizontal,
-                                      physics: const BouncingScrollPhysics(),
-                                      child: Row(
-                                        mainAxisAlignment:
-                                            tileCategory ==
-                                                CaregiverCategory.recommendation
-                                            ? MainAxisAlignment.start
-                                            : MainAxisAlignment.center,
-                                        children: reasons
-                                            .map(
-                                              (reason) => Padding(
-                                                padding: const EdgeInsets.only(
-                                                  right: 4,
-                                                ),
-                                                child: ServiceTagChip(
-                                                  label: reason,
-                                                  backgroundColor:
-                                                      _serviceTagBlue.withAlpha(
-                                                        46,
-                                                      ),
-                                                  foregroundColor:
-                                                      _serviceTagBlue,
-                                                  borderColor: _serviceTagBlue,
-                                                ),
-                                              ),
-                                            )
-                                            .toList(),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                        const SizedBox(height: 6),
-                        const Text(
-                          'Tap to view caregiver details',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.black54,
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
@@ -3925,6 +3944,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     CaregiverCategory? sourceCategory,
     bool fromSnap = false,
     bool ignoreThrottle = false,
+    bool centerTileAfterCollapse = false,
   }) async {
     if (caregiver is! CaregiverOption) {
       if (caregiver != null) {
@@ -3946,12 +3966,12 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     if (shouldThrottle) {
       _lastTap = now;
     }
-    setState(() {
-      _selectedCaregiver = caregiver;
-      final cat = sourceCategory ?? CaregiverCategory.forYou;
-      _activeCategory = cat;
-      _selectedCategory = cat;
-    });
+     final cat = sourceCategory ?? CaregiverCategory.forYou;
+     setState(() {
+       _selectedCaregiver = caregiver;
+       _activeCategory = cat;
+       _selectedCategory = cat;
+     });
 
     // Smooth snapping: update markers immediately, then debounce the heavy
     // route + camera fitting so the map can "catch up" even if snapping fast.
@@ -4061,10 +4081,39 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     await _updateSelectedMarkers();
     if (!mounted || requestSeq != _routeRequestSeq) return;
     await _fitMapToPins(_currentLatLng, caregiverLoc, routePoints: points);
-    if (_panelController.value > 0.01) {
-      _animatePanelTo(0);
-    }
-    await _updateSelectedMarkers();
+     final bool shouldCollapsePanel = _panelController.value > 0.01;
+     TickerFuture? panelCollapseFuture;
+     if (shouldCollapsePanel) {
+       panelCollapseFuture = _animatePanelTo(0);
+     }
+     if (centerTileAfterCollapse && panelCollapseFuture != null) {
+       try {
+         await panelCollapseFuture;
+       } catch (_) {}
+       if (mounted) {
+         _ensureTileCentered(caregiver.id, cat);
+       }
+     }
+     await _updateSelectedMarkers();
+   }
+
+  void _ensureTileCentered(
+    String caregiverId,
+    CaregiverCategory category, {
+    double alignment = 0.42,
+  }) {
+    if (_isProgrammaticScroll) return;
+    final ctx = _tileKeyFor(caregiverId, category).currentContext;
+    if (ctx == null || !ctx.mounted) return;
+    _isProgrammaticScroll = true;
+    Scrollable.ensureVisible(
+      ctx,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOut,
+      alignment: alignment,
+    ).whenComplete(() {
+      _isProgrammaticScroll = false;
+    });
   }
 
   Future<void> _fitMapToPins(

@@ -685,14 +685,8 @@ class _CaregiverApplicationCard extends StatelessWidget {
     final displayName = entry.name.isNotEmpty
         ? entry.name
         : (entry.uid.isNotEmpty ? entry.uid : 'Caregiver');
-    final subtitleParts = <String>[];
-    if (entry.email.isNotEmpty) subtitleParts.add(entry.email);
-    if (entry.phone.isNotEmpty) subtitleParts.add(entry.phone);
-    final subtitle = subtitleParts.join(' • ');
     final appliedAt = entry.createdAt?.toDate();
-    final appliedLabel = appliedAt == null
-        ? 'Applied: -'
-        : 'Applied: ${_dateFormat.format(appliedAt)}';
+    final appliedValue = appliedAt == null ? '-' : _dateFormat.format(appliedAt);
 
     final borderColor = Colors.grey.shade300;
     return Container(
@@ -781,45 +775,33 @@ class _CaregiverApplicationCard extends StatelessWidget {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 4),
-                    if (subtitle.isNotEmpty)
-                      Text(
-                        subtitle,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.black.withValues(alpha: 0.55),
-                        ),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    const SizedBox(height: 2),
-                    Text(
-                      appliedLabel,
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.black.withValues(alpha: 0.55),
-                      ),
-                    ),
                   ],
                 ),
               ),
             ],
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: UiTokens.s12),
-            child: Align(
-              alignment: Alignment.center,
-              child: FractionallySizedBox(
-                widthFactor: 0.85,
-                child: Container(
-                  height: 1.2,
-                  color: Colors.black.withAlpha(20),
-                ),
-              ),
+          const SizedBox(height: 10),
+          const Divider(height: 1, thickness: 1, color: Color(0x14000000)),
+          const SizedBox(height: 2),
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            decoration: const BoxDecoration(
+              border: Border(bottom: BorderSide(color: Color(0x14000000))),
             ),
+            child: _InfoRow(label: 'Email', value: entry.email),
           ),
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            decoration: const BoxDecoration(
+              border: Border(bottom: BorderSide(color: Color(0x14000000))),
+            ),
+            child: _InfoRow(label: 'Phone', value: entry.phone),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: _InfoRow(label: 'Applied', value: appliedValue),
+          ),
+          const Divider(height: 24, thickness: 1, color: Color(0x14000000)),
           Row(
             children: [
               Expanded(
@@ -1783,83 +1765,125 @@ class _CaregiverVerificationDetailsSheet extends StatelessWidget {
                       ],
                     ),
                     const SizedBox(height: 10),
-                    _cardShell(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            DefaultProfileAvatar(
-                              radius: 22,
-                              photoUrl: null,
-                              label: displayName,
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    displayName,
-                                    style: const TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w900,
-                                      color: _profileDarkText,
-                                    ),
-                                  ),
-                                  if (subtitle.isNotEmpty) ...[
-                                    const SizedBox(height: 6),
-                                    Text(
-                                      subtitle,
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w700,
-                                        color: Colors.black.withValues(alpha: 0.55),
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 14),
+                    if (false) ...[
                     _sectionTitle('Application'),
                     _cardShell(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                        child: Column(
-                          children: [
-                            _InfoRow(label: 'User ID', value: uid),
-                            const SizedBox(height: 8),
-                            _InfoRow(
-                              label: 'Status',
-                              value: verified ? 'Verified' : 'Unverified',
+                      child: Column(
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                DefaultProfileAvatar(
+                                  radius: 22,
+                                  photoUrl: null,
+                                  label: displayName,
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        displayName,
+                                        style: const TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w900,
+                                          color: _profileDarkText,
+                                        ),
+                                      ),
+                                      if (subtitle.isNotEmpty) ...[
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          subtitle,
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.black.withValues(
+                                              alpha: 0.55,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                              ],
                             ),
-                            const SizedBox(height: 8),
-                            _InfoRow(
-                              label: 'Applied at',
-                              value: createdAt == null
-                                  ? '-'
-                                  : _dateFormat.format(createdAt),
+                          ),
+                          Divider(
+                            height: 1,
+                            thickness: 1,
+                            color: Colors.black.withValues(alpha: 0.06),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 14),
+                            child: Column(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(vertical: 10),
+                                  decoration: BoxDecoration(
+                                    border: Border(
+                                      bottom: BorderSide(
+                                        color: Colors.black.withValues(alpha: 0.06),
+                                      ),
+                                    ),
+                                  ),
+                                  child: _InfoRow(label: 'User ID', value: uid),
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(vertical: 10),
+                                  decoration: BoxDecoration(
+                                    border: Border(
+                                      bottom: BorderSide(
+                                        color: Colors.black.withValues(alpha: 0.06),
+                                      ),
+                                    ),
+                                  ),
+                                  child: _InfoRow(
+                                    label: 'Status',
+                                    value: verified ? 'Verified' : 'Unverified',
+                                  ),
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(vertical: 10),
+                                  decoration: BoxDecoration(
+                                    border: Border(
+                                      bottom: BorderSide(
+                                        color: Colors.black.withValues(alpha: 0.06),
+                                      ),
+                                    ),
+                                  ),
+                                  child: _InfoRow(
+                                    label: 'Applied at',
+                                    value: createdAt == null
+                                        ? '-'
+                                        : _dateFormat.format(createdAt),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 10),
+                                  child: _InfoRow(
+                                    label: 'Address',
+                                    value: address.isNotEmpty ? address : '-',
+                                  ),
+                                ),
+                              ],
                             ),
-                            const SizedBox(height: 8),
-                            _InfoRow(
-                              label: 'Address',
-                              value: address.isNotEmpty ? address : '-',
-                            ),
-                          ],
-                        ),
+                          ),
+                          const SizedBox(height: 2),
+                        ],
                       ),
                     ),
                     const SizedBox(height: 14),
+                    ],
                     _sectionTitle('Documents'),
                     _DocumentsCard(
                       stream: documentsStream,
                       caregiverId: uid,
                       canVerify: editable && !verified,
+                      wrapInCard: false,
                     ),
                   ],
                 );
@@ -2240,40 +2264,132 @@ class _CaregiverVerificationViewSheetState
                       return Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
+                          if (false) ...[
                           _sectionTitle('Application'),
                           _cardShell(
-                            child: Padding(
-                              padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                              child: Column(
-                                children: [
-                                  _InfoRow(label: 'User ID', value: uid),
-                                  const SizedBox(height: 8),
-                                  _InfoRow(
-                                    label: 'Status',
-                                    value: verified ? 'Verified' : 'Unverified',
+                            child: Column(
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.center,
+                                    children: [
+                                      DefaultProfileAvatar(
+                                        radius: 22,
+                                        photoUrl: null,
+                                        label: name.isNotEmpty
+                                            ? name
+                                            : (uid.isNotEmpty ? uid : 'Caregiver'),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              name.isNotEmpty
+                                                  ? name
+                                                  : (uid.isNotEmpty ? uid : 'Caregiver'),
+                                              style: const TextStyle(
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w900,
+                                                color: _profileDarkText,
+                                              ),
+                                            ),
+                                            if (email.isNotEmpty || phone.isNotEmpty) ...[
+                                              const SizedBox(height: 6),
+                                              Text(
+                                                [
+                                                  if (email.isNotEmpty) email,
+                                                  if (phone.isNotEmpty) phone,
+                                                ].join(' â€¢ '),
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.w700,
+                                                  color: Colors.black.withValues(
+                                                    alpha: 0.55,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                  const SizedBox(height: 8),
-                                  _InfoRow(
-                                    label: 'Applied at',
-                                    value: createdAt == null
-                                        ? '-'
-                                        : _dateFormat.format(createdAt),
+                                ),
+                                Divider(
+                                  height: 1,
+                                  thickness: 1,
+                                  color: Colors.black.withValues(alpha: 0.06),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                                  child: Column(
+                                    children: [
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(vertical: 10),
+                                        decoration: BoxDecoration(
+                                          border: Border(
+                                            bottom: BorderSide(
+                                              color: Colors.black.withValues(alpha: 0.06),
+                                            ),
+                                          ),
+                                        ),
+                                        child: _InfoRow(label: 'User ID', value: uid),
+                                      ),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(vertical: 10),
+                                        decoration: BoxDecoration(
+                                          border: Border(
+                                            bottom: BorderSide(
+                                              color: Colors.black.withValues(alpha: 0.06),
+                                            ),
+                                          ),
+                                        ),
+                                        child: _InfoRow(
+                                          label: 'Status',
+                                          value: verified ? 'Verified' : 'Unverified',
+                                        ),
+                                      ),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(vertical: 10),
+                                        decoration: BoxDecoration(
+                                          border: Border(
+                                            bottom: BorderSide(
+                                              color: Colors.black.withValues(alpha: 0.06),
+                                            ),
+                                          ),
+                                        ),
+                                        child: _InfoRow(
+                                          label: 'Applied at',
+                                          value: createdAt == null
+                                              ? '-'
+                                              : _dateFormat.format(createdAt),
+                                        ),
+                                      ),
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(vertical: 10),
+                                        child: _InfoRow(
+                                          label: 'Address',
+                                          value: address.isNotEmpty ? address : '-',
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                  const SizedBox(height: 8),
-                                  _InfoRow(
-                                    label: 'Address',
-                                    value: address.isNotEmpty ? address : '-',
-                                  ),
-                                ],
-                              ),
+                                ),
+                                const SizedBox(height: 2),
+                              ],
                             ),
                           ),
                           const SizedBox(height: 14),
+                          ],
                           _sectionTitle('Documents'),
                           _DocumentsCard(
                             stream: documentsStream,
                             caregiverId: uid,
                             canVerify: false,
+                            wrapInCard: false,
                           ),
                         ],
                       );
@@ -2437,6 +2553,27 @@ class _CaregiverVerificationEditSheetState
         final caregiverSnap = await caregiverRef.get();
         final caregiverData = caregiverSnap.data();
 
+        final approvedDocs = await db
+            .collection('documents')
+            .where('caregiverId', isEqualTo: trimmed)
+            .where('status', isEqualTo: true)
+            .get();
+        if (approvedDocs.docs.isNotEmpty) {
+          final batch = db.batch();
+          for (final doc in approvedDocs.docs) {
+            batch.set(
+              doc.reference,
+              {
+                'status': false,
+                'verifiedAt': FieldValue.delete(),
+                'updatedAt': FieldValue.serverTimestamp(),
+              },
+              SetOptions(merge: true),
+            );
+          }
+          await batch.commit();
+        }
+
         final userPayload = <String, dynamic>{
           'role': 'user',
           'name':
@@ -2486,7 +2623,7 @@ class _CaregiverVerificationEditSheetState
           content: Text(
             nextVerified
                 ? 'Caregiver verified. Documents marked as verified.'
-                : 'Caregiver marked as unverified.',
+                : 'Caregiver marked as unverified. Documents marked as unverified.',
           ),
         ),
       );
@@ -3275,13 +3412,16 @@ class _DocumentsCard extends StatelessWidget {
     required this.stream,
     required this.caregiverId,
     required this.canVerify,
+    this.wrapInCard = true,
   });
 
   final Stream<QuerySnapshot<Map<String, dynamic>>>? stream;
   final String caregiverId;
   final bool canVerify;
+  final bool wrapInCard;
 
   Widget _shell({required Widget child}) {
+    if (!wrapInCard) return child;
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
@@ -3551,7 +3691,9 @@ class _DocumentsCard extends StatelessWidget {
 
         return _shell(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            padding: wrapInCard
+                ? const EdgeInsets.fromLTRB(14, 12, 14, 12)
+                : EdgeInsets.zero,
             child: Column(
               children: [
                 for (final doc in orderedDocs) docItem(doc),
@@ -3672,20 +3814,32 @@ class _DocumentRow extends StatelessWidget {
               ),
             ],
           ),
-          if (fileName.isNotEmpty || updatedAt.isNotEmpty) ...[
-            const SizedBox(height: 6),
-            Text(
-              [
-                if (fileName.isNotEmpty) fileName,
-                if (updatedAt.isNotEmpty) 'Updated: $updatedAt',
-              ].join(' • '),
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                color: Colors.black.withValues(alpha: 0.55),
-              ),
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF7F8FA),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.black.withValues(alpha: 0.05)),
             ),
-          ],
+            child: Column(
+              children: [
+                _InfoRow(label: 'File name', value: fileName),
+                Divider(
+                  height: 14,
+                  thickness: 1,
+                  color: Colors.black.withValues(alpha: 0.06),
+                ),
+                _InfoRow(label: 'Updated at', value: updatedAt),
+                Divider(
+                  height: 14,
+                  thickness: 1,
+                  color: Colors.black.withValues(alpha: 0.06),
+                ),
+                _InfoRow(label: 'Status', value: statusLabel),
+              ],
+            ),
+          ),
           const SizedBox(height: 10),
           Row(
             children: [

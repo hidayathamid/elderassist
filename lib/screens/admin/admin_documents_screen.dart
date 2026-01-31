@@ -65,6 +65,50 @@ final DateFormat _docDateFormat = DateFormat('MMM d, yyyy');
 const TextStyle _dialogTitleStyle = TextStyle(fontWeight: FontWeight.w700);
 const TextStyle _dialogContentStyle = TextStyle(color: Colors.black87);
 
+String _string(dynamic value) => value?.toString().trim() ?? '';
+
+String _pickName(Map<String, dynamic>? data) {
+  if (data == null) return '';
+  final name = _string(data['name']);
+  if (name.isNotEmpty) return name;
+  final fullName = _string(data['fullName']);
+  if (fullName.isNotEmpty) return fullName;
+  final userName = _string(data['userName']);
+  if (userName.isNotEmpty) return userName;
+  final displayName = _string(data['displayName']);
+  if (displayName.isNotEmpty) return displayName;
+  return '';
+}
+
+String _pickPhotoUrl(Map<String, dynamic>? data) {
+  if (data == null) return '';
+  final profilePhoto = _string(data['profile_photo']);
+  if (profilePhoto.isNotEmpty) return profilePhoto;
+  final photoUrl = _string(data['photoUrl']);
+  if (photoUrl.isNotEmpty) return photoUrl;
+  return '';
+}
+
+Future<Map<String, dynamic>?> _loadCaregiverProfile(String caregiverId) async {
+  final uid = caregiverId.trim();
+  if (uid.isEmpty) return null;
+  final db = FirebaseFirestore.instance;
+
+  Future<Map<String, dynamic>?> tryCollection(String collection) async {
+    final snap = await db.collection(collection).doc(uid).get();
+    return snap.data();
+  }
+
+  final caregiver = await tryCollection('caregivers');
+  if (caregiver != null) return caregiver;
+
+  final waiting = await tryCollection('waitinglist');
+  if (waiting != null) return waiting;
+
+  final user = await tryCollection('users');
+  return user;
+}
+
 class AdminDocumentsScreen extends StatefulWidget {
   const AdminDocumentsScreen({super.key});
 
@@ -1132,16 +1176,12 @@ class _AdminDocumentCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final data = document.data() ?? {};
     final uploadedAt = (data['updatedAt'] as Timestamp?)?.toDate();
-    final dateLabel = uploadedAt != null
-        ? 'Uploaded: ${_docDateFormat.format(uploadedAt)}'
-        : 'Uploaded: unknown';
+    final uploadedLabel =
+        uploadedAt != null ? _docDateFormat.format(uploadedAt) : 'unknown';
     final docName = ((data['name'] as String?) ?? 'Document').trim();
     final fileLabel = ((data['fileName'] as String?) ?? 'PDF File').trim();
     final caregiverId = ((data['caregiverId'] as String?) ?? '').trim();
     final isVerified = data['status'] as bool? ?? false;
-    final caregiverRef = caregiverId.isEmpty
-        ? null
-        : FirebaseFirestore.instance.collection('caregivers').doc(caregiverId);
 
     final borderColor = Colors.grey.shade300;
     return Container(
@@ -1155,15 +1195,16 @@ class _AdminDocumentCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-            future: caregiverRef?.get(),
+          FutureBuilder<Map<String, dynamic>?>(
+            future: _loadCaregiverProfile(caregiverId),
             builder: (context, snapshot) {
-              final caregiverData = snapshot.data?.data();
-              final caregiverName =
-                  (caregiverData?['name'] as String?)?.trim() ?? caregiverId;
-              final caregiverPhoto =
-                  (caregiverData?['profile_photo'] as String?)?.trim() ??
-                  (caregiverData?['photoUrl'] as String?)?.trim();
+              final caregiverData = snapshot.data;
+              final caregiverName = _pickName(caregiverData);
+              final caregiverPhoto = _pickPhotoUrl(caregiverData);
+
+              final displayName =
+                  caregiverName.isNotEmpty ? caregiverName : 'Unavailable';
+              final documentName = docName.isNotEmpty ? docName : 'Document';
 
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1179,9 +1220,7 @@ class _AdminDocumentCard extends StatelessWidget {
                             photoUrl: caregiverPhoto?.isNotEmpty == true
                                 ? caregiverPhoto
                                 : null,
-                            label: caregiverName.isNotEmpty
-                                ? caregiverName
-                                : '?',
+                            label: displayName,
                           ),
                           Positioned(
                             top: -6,
@@ -1223,9 +1262,7 @@ class _AdminDocumentCard extends StatelessWidget {
                               children: [
                                 Expanded(
                                   child: Text(
-                                    caregiverName.isNotEmpty
-                                        ? caregiverName
-                                        : 'Caregiver',
+                                    displayName,
                                     style: _documentTitleStyle,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
@@ -1291,7 +1328,7 @@ class _AdminDocumentCard extends StatelessWidget {
                             ),
                             const SizedBox(height: UiTokens.s4),
                             Text(
-                              docName,
+                              documentName,
                               style: _documentFileStyle,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -1302,39 +1339,15 @@ class _AdminDocumentCard extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: UiTokens.s10),
-                  Row(
-                    children: [
-                      Text(
-                        'Document ID',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w800,
-                          color: Colors.black.withValues(alpha: 0.50),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          document.id,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w800,
-                            color: _profileDarkText,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
+                  _InfoRow(label: 'Document ID', value: document.id),
+                  _InfoRow(label: 'Name', value: caregiverName),
+                  _InfoRow(label: 'Document', value: documentName),
+                  _InfoRow(label: 'File', value: fileLabel),
+                  _InfoRow(
+                    label: 'Uploaded',
+                    value: uploadedLabel,
+                    showBorder: false,
                   ),
-                  const SizedBox(height: UiTokens.s6),
-                  Text(fileLabel, style: _documentMetaStyle),
-                  const SizedBox(height: UiTokens.s2),
-                  Text(dateLabel, style: _documentMetaStyle),
-                  if (caregiverId.isNotEmpty) ...[
-                    const SizedBox(height: UiTokens.s2),
-                    Text(caregiverId, style: _documentMetaStyle),
-                  ],
                 ],
               );
             },
@@ -1390,6 +1403,70 @@ class _AdminDocumentCard extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({
+    required this.label,
+    required this.value,
+    this.showBorder = true,
+  });
+
+  final String label;
+  final String value;
+  final bool showBorder;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: showBorder
+              ? Border(
+                  bottom: BorderSide(
+                    color: Colors.black.withValues(alpha: 0.06),
+                  ),
+                )
+              : null,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 92,
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.black.withValues(alpha: 0.50),
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  value.trim().isEmpty ? 'Unavailable' : value.trim(),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: _profileDarkText,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1688,9 +1765,6 @@ class _AdminDocumentEditSheetState extends State<_AdminDocumentEditSheet> {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
     final data = widget.document.data() ?? const <String, dynamic>{};
     final caregiverId = ((data['caregiverId'] as String?) ?? '').trim();
-    final caregiverRef = caregiverId.isEmpty
-        ? null
-        : FirebaseFirestore.instance.collection('caregivers').doc(caregiverId);
 
     return Padding(
       padding: EdgeInsets.only(bottom: bottomInset),
@@ -1750,17 +1824,14 @@ class _AdminDocumentEditSheetState extends State<_AdminDocumentEditSheet> {
                     ],
                   ),
                   const SizedBox(height: 12),
-                  FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-                    future: caregiverRef?.get(),
+                  FutureBuilder<Map<String, dynamic>?>(
+                    future: _loadCaregiverProfile(caregiverId),
                     builder: (context, snapshot) {
-                      final caregiverData = snapshot.data?.data();
-                      final caregiverName =
-                          (caregiverData?['name'] as String?)?.trim() ??
-                          caregiverId;
-                      final caregiverPhoto =
-                          (caregiverData?['profile_photo'] as String?)
-                              ?.trim() ??
-                          (caregiverData?['photoUrl'] as String?)?.trim();
+                      final caregiverData = snapshot.data;
+                      final caregiverName = _pickName(caregiverData);
+                      final caregiverPhoto = _pickPhotoUrl(caregiverData);
+                      final displayName =
+                          caregiverName.isNotEmpty ? caregiverName : 'Unavailable';
 
                       return Column(
                         children: [
@@ -1769,15 +1840,11 @@ class _AdminDocumentEditSheetState extends State<_AdminDocumentEditSheet> {
                             photoUrl: caregiverPhoto?.isNotEmpty == true
                                 ? caregiverPhoto
                                 : null,
-                            label: caregiverName.isNotEmpty
-                                ? caregiverName
-                                : '?',
+                            label: displayName.isNotEmpty ? displayName : '?',
                           ),
                           const SizedBox(height: 10),
                           Text(
-                            caregiverName.isNotEmpty
-                                ? caregiverName
-                                : 'Caregiver',
+                            displayName,
                             style: const TextStyle(
                               fontWeight: FontWeight.w800,
                               fontSize: 15,
@@ -1785,18 +1852,6 @@ class _AdminDocumentEditSheetState extends State<_AdminDocumentEditSheet> {
                             ),
                             textAlign: TextAlign.center,
                           ),
-                          if (caregiverId.isNotEmpty) ...[
-                            const SizedBox(height: 2),
-                            Text(
-                              caregiverId,
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                                color: Colors.black.withValues(alpha: 0.55),
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ],
                         ],
                       );
                     },

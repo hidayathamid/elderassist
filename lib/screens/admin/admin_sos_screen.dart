@@ -48,11 +48,6 @@ const TextStyle _sosFileStyle = TextStyle(
   fontWeight: FontWeight.w500,
   color: _profileDarkText60,
 );
-const TextStyle _sosMetaStyle = TextStyle(
-  fontSize: 12,
-  fontWeight: FontWeight.w500,
-  color: _profileDarkText60,
-);
 const TextStyle _actionLabelStyle = TextStyle(
   fontSize: 12,
   fontWeight: FontWeight.w600,
@@ -1297,13 +1292,6 @@ class _AdminSosCard extends StatelessWidget {
                             ),
                           ],
                         ),
-                        const SizedBox(height: UiTokens.s4),
-                              Text(
-                                fileLabel,
-                                style: _sosFileStyle,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
                             ],
                           ),
                         ),
@@ -1312,53 +1300,23 @@ class _AdminSosCard extends StatelessWidget {
                 },
               ),
               const SizedBox(height: UiTokens.s10),
-              Row(
-                children: [
-                  Text(
-                    'SOS ID',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.black.withValues(alpha: 0.50),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      entry.id,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w800,
-                        color: _profileDarkText,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
+              Container(
+                height: 1.2,
+                color: Colors.black.withValues(alpha: 0.06),
               ),
-              const SizedBox(height: UiTokens.s6),
-              Text('Status: ${entry.status}', style: _sosMetaStyle),
-              if (address.isNotEmpty) ...[
-                const SizedBox(height: UiTokens.s2),
-                Text(
-                  address,
-                  style: _sosMetaStyle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-              if (bookingId.isNotEmpty) ...[
-                const SizedBox(height: UiTokens.s2),
-                Text(
-                  'Booking: $bookingId',
-                  style: _sosMetaStyle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-              const SizedBox(height: UiTokens.s2),
-              Text(dateLabel, style: _sosMetaStyle),
+              if (fileLabel.trim().isNotEmpty)
+                _SosCardInfoRow(label: 'Alert', value: fileLabel.trim()),
+              _SosCardInfoRow(label: 'SOS ID', value: entry.id),
+              _SosCardInfoRow(label: 'Status', value: entry.status),
+              if (address.isNotEmpty)
+                _SosCardInfoRow(label: 'Address', value: address),
+              if (bookingId.isNotEmpty)
+                _SosCardInfoRow(label: 'Booking ID', value: bookingId),
+              _SosCardInfoRow(
+                label: 'Date',
+                value: dateLabel,
+                showBorder: false,
+              ),
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: UiTokens.s12),
                 child: Align(
@@ -2049,6 +2007,70 @@ class _InfoRow extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _SosCardInfoRow extends StatelessWidget {
+  const _SosCardInfoRow({
+    required this.label,
+    required this.value,
+    this.showBorder = true,
+  });
+
+  final String label;
+  final String value;
+  final bool showBorder;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: showBorder
+              ? Border(
+                  bottom: BorderSide(
+                    color: Colors.black.withValues(alpha: 0.06),
+                  ),
+                )
+              : null,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 92,
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.black.withValues(alpha: 0.50),
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  value.trim().isEmpty ? 'Unavailable' : value.trim(),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: _profileDarkText,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

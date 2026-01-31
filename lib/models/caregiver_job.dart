@@ -8,6 +8,7 @@ class CaregiverJob {
     required this.bookingId,
     required this.userId,
     required this.personId,
+    required this.addressId,
     required this.personName,
     required this.scheduledDate,
     required this.status,
@@ -29,6 +30,7 @@ class CaregiverJob {
   final String bookingId;
   final String userId;
   final String personId;
+  final String addressId;
   final String personName;
   final String scheduledDate;
   final String status;
@@ -71,6 +73,11 @@ class CaregiverJob {
       bookingId: doc.id,
       userId: (data['userId'] as String?) ?? '',
       personId: (data['personId'] as String?) ?? '',
+      addressId:
+          (data['addressId'] as String?) ??
+          (data['selectedAddressId'] as String?) ??
+          (data['addressID'] as String?) ??
+          '',
       personName: (data['personName'] as String?) ?? 'Client',
       scheduledDate:
           (data['date'] as String?) ?? (data['scheduledDate'] as String?) ?? '',
@@ -79,7 +86,8 @@ class CaregiverJob {
           (data['servicePrice'] as Object?)?.toString() ??
           (data['price'] as Object?)?.toString() ??
           'RM 0',
-      notes: (data['personNotes'] as String?) ?? (data['notes'] as String?) ?? '',
+      notes:
+          (data['personNotes'] as String?) ?? (data['notes'] as String?) ?? '',
       caregiverId:
           (data['caregiverId'] as String?) ??
           doc.reference.parent.parent?.id ??
@@ -131,7 +139,7 @@ class CaregiverJob {
 }
 
 String? resolvePersonLabel(Map<String, dynamic>? data, CaregiverJob job) {
-  final match = _findAddressEntry(data, job);
+  final match = _findAddressEntry(data, job) ?? _primaryAddressMap(data);
   final rawLabel =
       _stringValue(match?['label']) ??
       _stringValue(match?['forWho']) ??
@@ -140,37 +148,42 @@ String? resolvePersonLabel(Map<String, dynamic>? data, CaregiverJob job) {
 }
 
 String? resolvePersonName(Map<String, dynamic>? data, CaregiverJob job) {
-  final match = _findAddressEntry(data, job);
+  // Align with ActivityScreen's person selection:
+  // prefer selected entry name, then user's main name, then booking snapshot.
+  final match = _findAddressEntry(data, job) ?? _primaryAddressMap(data);
   final rawName =
-      _stringValue(match?['forWho']) ??
       _stringValue(match?['name']) ??
-      _stringValue(match?['title']) ??
-      _stringValue(match?['label']);
-  return rawName?.trim().isNotEmpty == true ? rawName!.trim() : null;
+      _stringValue(data?['name']) ??
+      job.personName;
+  final trimmed = rawName.trim();
+  return trimmed.isNotEmpty ? trimmed : null;
 }
 
 String? resolvePersonAddress(Map<String, dynamic>? data, CaregiverJob job) {
-  final match = _findAddressEntry(data, job);
+  // Align with ActivityScreen's person selection.
+  final match = _findAddressEntry(data, job) ?? _primaryAddressMap(data);
   final raw =
-      _stringValue(match?['addressLine']) ??
-      _stringValue(match?['address']) ??
-      _stringValue(match?['subtitle']) ??
-      _stringValue(match?['description']);
-  return raw?.trim().isNotEmpty == true ? raw!.trim() : null;
+      _stringValue(
+        match?['address'] ??
+            match?['addressLine'] ??
+            match?['location'] ??
+            match?['street'],
+      ) ??
+      job.personAddress;
+  final trimmed = raw.trim();
+  return trimmed.isNotEmpty ? trimmed : null;
 }
 
 String? resolvePersonPhotoUrl(Map<String, dynamic>? data, CaregiverJob job) {
-  final fromBooking = job.personPhotoUrl.trim();
-  if (fromBooking.isNotEmpty) return fromBooking;
-
-  final match = _findAddressEntry(data, job);
+  // Align with ActivityScreen's person photo selection:
+  // prefer selected entry photoUrl, then user's main photoUrl.
+  final match = _findAddressEntry(data, job) ?? _primaryAddressMap(data);
   final raw =
       _stringValue(match?['photoUrl']) ??
-      _stringValue(match?['avatarUrl']) ??
-      _stringValue(match?['imageUrl']) ??
-      _stringValue(match?['photo']) ??
-      _stringValue(match?['image']);
-  return raw?.trim().isNotEmpty == true ? raw!.trim() : null;
+      _stringValue(data?['photoUrl']) ??
+      '';
+  final trimmed = raw.trim();
+  return trimmed.isNotEmpty ? trimmed : null;
 }
 
 Map<String, dynamic>? _findAddressEntry(
@@ -181,55 +194,49 @@ Map<String, dynamic>? _findAddressEntry(
   if (entries.isEmpty) return null;
   final jobBookingId = job.bookingId;
   final jobPersonId = job.personId;
-  for (final entry in entries) {
-    final entryId = _stringValue(entry['id']);
-    if (entryId != null &&
-        (entryId == jobPersonId || entryId == jobBookingId)) {
-      return entry;
-    }
-    final entryBookingId = _stringValue(entry['bookingId']);
-    if (entryBookingId != null && entryBookingId == jobBookingId) {
-      return entry;
+  final jobAddressId = job.addressId;
+
+  // Important: match only by explicit identifiers to avoid showing an incorrect
+  // person photo/name (prefer missing over wrong).
+  if (jobAddressId.trim().isNotEmpty) {
+    final target = jobAddressId.trim();
+    for (final entry in entries) {
+      final entryId = _stringValue(entry['id']);
+      if (entryId != null && entryId == target) return entry;
+      final entryAddressId = _stringValue(entry['addressId']);
+      if (entryAddressId != null && entryAddressId == target) return entry;
     }
   }
 
-  String normalize(String value) =>
-      value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
-
-  final jobAddress = normalize(job.personAddress.isNotEmpty ? job.personAddress : job.location);
-  final jobPersonName = normalize(job.personName);
-
-  if (jobAddress.isNotEmpty) {
+  if (jobPersonId.trim().isNotEmpty) {
+    final target = jobPersonId.trim();
     for (final entry in entries) {
-      final entryAddress = normalize(
-        _stringValue(entry['addressLine']) ??
-            _stringValue(entry['address']) ??
-            _stringValue(entry['subtitle']) ??
-            _stringValue(entry['description']) ??
-            '',
-      );
-      if (entryAddress.isNotEmpty && entryAddress == jobAddress) {
-        return entry;
-      }
+      final entryId = _stringValue(entry['id']);
+      if (entryId != null && entryId == target) return entry;
+      final entryPersonId = _stringValue(entry['personId']);
+      if (entryPersonId != null && entryPersonId == target) return entry;
     }
   }
 
-  if (jobPersonName.isNotEmpty) {
+  if (jobBookingId.trim().isNotEmpty) {
+    final target = jobBookingId.trim();
     for (final entry in entries) {
-      final entryName = normalize(
-        _stringValue(entry['forWho']) ??
-            _stringValue(entry['name']) ??
-            _stringValue(entry['title']) ??
-            _stringValue(entry['label']) ??
-            '',
-      );
-      if (entryName.isNotEmpty && entryName == jobPersonName) {
-        return entry;
-      }
+      final entryBookingId = _stringValue(entry['bookingId']);
+      if (entryBookingId != null && entryBookingId == target) return entry;
     }
   }
 
   return null;
+}
+
+Map<String, dynamic>? _primaryAddressMap(Map<String, dynamic>? data) {
+  final entries = _addressEntries(data);
+  if (entries.isEmpty) return null;
+  final defaultEntry = entries.firstWhere(
+    (entry) => entry['isDefault'] == true,
+    orElse: () => entries.first,
+  );
+  return defaultEntry;
 }
 
 List<Map<String, dynamic>> _addressEntries(Map<String, dynamic>? data) {

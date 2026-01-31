@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -17,11 +18,14 @@ import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../../services/chat_service.dart';
 import '../../../utils/map_styles.dart';
 import '../../../utils/phone_caller.dart';
 import '../../../widgets/default_profile_avatar.dart';
+import '../../../widgets/safe_network_image.dart';
 import '../../caregiver/caregiver_root_screen.dart';
 import '../user_root_screen.dart';
 import 'activity_tracking_helpers.dart';
@@ -37,6 +41,9 @@ const Color _cardShadowColor = Color(0x1A000000);
 const double _mapPadding = 56;
 const double _mapMarkerSize = 60.0;
 const double _boundsExtraFactor = 0.35;
+const Duration _mapStateCacheTtl = Duration(minutes: 10);
+
+final Map<String, _TrackCaregiverMapCache> _trackCaregiverMapCache = {};
 
 BoxDecoration _premiumCardDecoration({double radius = 18}) {
   return BoxDecoration(
@@ -44,11 +51,7 @@ BoxDecoration _premiumCardDecoration({double radius = 18}) {
     borderRadius: BorderRadius.circular(radius),
     border: Border.all(color: _cardBorderColor),
     boxShadow: const [
-      BoxShadow(
-        color: _cardShadowColor,
-        blurRadius: 16,
-        offset: Offset(0, 8),
-      ),
+      BoxShadow(color: _cardShadowColor, blurRadius: 16, offset: Offset(0, 8)),
     ],
   );
 }
@@ -57,6 +60,42 @@ class _EmergencyAlertError implements Exception {
   const _EmergencyAlertError({required this.message});
 
   final String message;
+}
+
+class _TrackCaregiverMapCache {
+  const _TrackCaregiverMapCache({
+    required this.savedAt,
+    required this.caregiverPos,
+    required this.destinationPos,
+    required this.routePoints,
+    required this.alternativeRoutePoints,
+    required this.steps,
+    required this.etaSeconds,
+    required this.distanceMeters,
+    required this.activeStepIndex,
+    required this.caregiverId,
+    required this.caregiverLabel,
+    required this.caregiverPhotoUrl,
+    required this.destinationLabel,
+    required this.destinationPhotoUrl,
+  });
+
+  final DateTime savedAt;
+  final LatLng? caregiverPos;
+  final LatLng? destinationPos;
+  final List<LatLng> routePoints;
+  final List<List<LatLng>> alternativeRoutePoints;
+  final List<_DirectionsStep> steps;
+  final int? etaSeconds;
+  final int? distanceMeters;
+  final int activeStepIndex;
+  final String caregiverId;
+  final String caregiverLabel;
+  final String caregiverPhotoUrl;
+  final String destinationLabel;
+  final String destinationPhotoUrl;
+
+  bool get isExpired => DateTime.now().difference(savedAt) > _mapStateCacheTtl;
 }
 
 class TrackCaregiverScreen extends StatefulWidget {
@@ -103,6 +142,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
   static final FirebaseFunctions _functions = FirebaseFunctions.instanceFor(
     region: 'asia-southeast1',
   );
+  static const _uuid = Uuid();
 
   static const String _mapsApiKey = String.fromEnvironment(
     'AIzaSyDADYhy-AAeikw72w9jq22FnMDCVXRJark',
@@ -110,11 +150,19 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
   );
 
   GoogleMapController? _mapController;
+  final ImagePicker _picker = ImagePicker();
   final ValueNotifier<Set<Marker>> _markersNotifier = ValueNotifier(const {});
-  final ValueNotifier<Set<Polyline>> _polylinesNotifier =
-      ValueNotifier(const {});
+  final ValueNotifier<Set<Polyline>> _polylinesNotifier = ValueNotifier(
+    const {},
+  );
   Timer? _routeDebounce;
   Timer? _cameraDebounce;
+  DateTime? _lastNavigationCameraAt;
+  bool _userCameraLocked = false;
+  bool _programmaticCameraMove = false;
+  DateTime? _lastDirectionsFetchAt;
+  LatLng? _lastDirectionsFetchStart;
+  DateTime? _lastDirectionProgressAt;
   String _routeKey = '';
   int _routeSeq = 0;
   int? _routeEtaSeconds;
@@ -123,6 +171,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
   LatLng? _latestCaregiverPos;
   LatLng? _latestDestinationPos;
   List<LatLng> _latestRoutePoints = const <LatLng>[];
+  List<List<LatLng>> _latestAltRoutePoints = const <List<LatLng>>[];
+  List<_DirectionsStep> _latestRouteSteps = const <_DirectionsStep>[];
+  int _activeDirectionStepIndex = 0;
   String _mapUpdateScheduledKey = '';
   String _mapUpdateAppliedKey = '';
   String _markerAppliedKey = '';
@@ -143,6 +194,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
   Timer? _liveLocationTimer;
   String? _liveLocationCaregiverId;
   bool _liveLocationInFlight = false;
+  StreamSubscription<Position>? _caregiverPositionSub;
+  DateTime? _lastCaregiverLocationSentAt;
+  LatLng? _lastCaregiverLocationSentPos;
   bool _processingSosOffer = false;
   double? _viewportHeight;
   bool _navigatedToLinkedBooking = false;
@@ -152,7 +206,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
   double get _minSheetSize =>
       _useSosSheetStyle ? _minSheetSizeSos : _minSheetSizeDefault;
 
-  List<Map<String, dynamic>> _extractEmergencyContacts(Map<String, dynamic>? data) {
+  List<Map<String, dynamic>> _extractEmergencyContacts(
+    Map<String, dynamic>? data,
+  ) {
     if (data == null) return const [];
     final raw = data['emergencyContacts'];
     if (raw is List) {
@@ -163,10 +219,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     }
     return const [];
   }
+
   bool _navigationMode = false;
   LatLng? _lastNavigationPos;
-  Timer? _deviceMarkerTimer;
-  bool _deviceMarkerInFlight = false;
   String _liveMapCaregiverId = '';
   String? _liveMapCaregiverLabel;
   String? _liveMapCaregiverPhotoUrl;
@@ -185,6 +240,128 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
   final ScrollController _listController = ScrollController();
   double _lastDragDelta = 0;
   bool _hideFrontPanel = false;
+  String _currentAddressId = '';
+  bool _didAttemptCacheRestore = false;
+
+  String get _mapCacheKey {
+    final booking = widget.bookingId.trim();
+    final sos = (widget.sosId ?? '').trim();
+    final caregiverId = (widget.caregiverId ?? '').trim();
+    final personId = (widget.personId ?? '').trim();
+    final addressId = _currentAddressId.trim();
+    return '$booking|$sos|$caregiverId|$personId|$addressId';
+  }
+
+  void _restoreMapCache({required LatLng? expectedDestinationPos}) {
+    final cached = _trackCaregiverMapCache[_mapCacheKey];
+    if (cached == null || cached.isExpired) {
+      if (cached != null) _trackCaregiverMapCache.remove(_mapCacheKey);
+      return;
+    }
+
+    if (expectedDestinationPos != null && cached.destinationPos != null) {
+      double distance = 0;
+      try {
+        distance = Geolocator.distanceBetween(
+          expectedDestinationPos.latitude,
+          expectedDestinationPos.longitude,
+          cached.destinationPos!.latitude,
+          cached.destinationPos!.longitude,
+        );
+      } catch (_) {
+        distance = 0;
+      }
+      if (distance > 80) return;
+    }
+
+    _latestCaregiverPos = cached.caregiverPos;
+    _latestDestinationPos = cached.destinationPos;
+    _latestRoutePoints = cached.routePoints;
+    _latestAltRoutePoints = cached.alternativeRoutePoints;
+    _latestRouteSteps = cached.steps;
+    _routeEtaSeconds = cached.etaSeconds;
+    _routeDistanceMeters = cached.distanceMeters;
+    _activeDirectionStepIndex = cached.activeStepIndex;
+
+    _liveMapCaregiverId = cached.caregiverId;
+    _liveMapCaregiverLabel = cached.caregiverLabel;
+    _liveMapCaregiverPhotoUrl = cached.caregiverPhotoUrl.trim().isEmpty
+        ? null
+        : cached.caregiverPhotoUrl;
+    _liveMapDestinationPos = cached.destinationPos;
+    _liveMapDestinationLabel = cached.destinationLabel.trim().isEmpty
+        ? null
+        : cached.destinationLabel;
+    _liveMapDestinationPhotoUrl = cached.destinationPhotoUrl.trim().isEmpty
+        ? null
+        : cached.destinationPhotoUrl;
+
+    if (_latestRoutePoints.isNotEmpty) {
+      _polylinesNotifier.value = {
+        Polyline(
+          polylineId: const PolylineId('route'),
+          color: _routeColor,
+          width: 4,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+          geodesic: true,
+          points: _latestRoutePoints,
+        ),
+        for (var i = 0; i < _latestAltRoutePoints.length; i++)
+          Polyline(
+            polylineId: PolylineId('route_alt_$i'),
+            color: _routeColor.withValues(alpha: 0.30),
+            width: 3,
+            startCap: Cap.roundCap,
+            endCap: Cap.roundCap,
+            jointType: JointType.round,
+            geodesic: true,
+            patterns: [PatternItem.dash(16), PatternItem.gap(10)],
+            points: _latestAltRoutePoints[i],
+          ),
+      };
+    }
+
+    _updateMarkers(
+      caregiverPos: _latestCaregiverPos,
+      destinationPos: _latestDestinationPos,
+      caregiverId: _liveMapCaregiverId.isEmpty
+          ? widget.caregiverId
+          : _liveMapCaregiverId,
+      caregiverLabel: _liveMapCaregiverLabel?.trim().isNotEmpty == true
+          ? _liveMapCaregiverLabel
+          : widget.caregiverName,
+      caregiverPhotoUrl: _liveMapCaregiverPhotoUrl,
+      destinationLabel: _liveMapDestinationLabel,
+      destinationPhotoUrl: _liveMapDestinationPhotoUrl,
+    );
+  }
+
+  void _storeMapCache() {
+    final caregiverPos = _latestCaregiverPos;
+    final destinationPos = _liveMapDestinationPos ?? _latestDestinationPos;
+    if (caregiverPos == null && destinationPos == null) return;
+
+    _trackCaregiverMapCache[_mapCacheKey] = _TrackCaregiverMapCache(
+      savedAt: DateTime.now(),
+      caregiverPos: caregiverPos,
+      destinationPos: destinationPos,
+      routePoints: List<LatLng>.from(_latestRoutePoints),
+      alternativeRoutePoints: _latestAltRoutePoints
+          .map((route) => List<LatLng>.from(route))
+          .toList(growable: false),
+      steps: List<_DirectionsStep>.from(_latestRouteSteps),
+      etaSeconds: _routeEtaSeconds,
+      distanceMeters: _routeDistanceMeters,
+      activeStepIndex: _activeDirectionStepIndex,
+      caregiverId: (_liveMapCaregiverId).trim(),
+      caregiverLabel: (_liveMapCaregiverLabel ?? '').trim(),
+      caregiverPhotoUrl: (_liveMapCaregiverPhotoUrl ?? '').trim(),
+      destinationLabel: (_liveMapDestinationLabel ?? '').trim(),
+      destinationPhotoUrl: (_liveMapDestinationPhotoUrl ?? '').trim(),
+    );
+  }
 
   @override
   void initState() {
@@ -198,11 +375,12 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
 
   @override
   void dispose() {
+    _storeMapCache();
     _routeDebounce?.cancel();
     _cameraDebounce?.cancel();
     _placeDebounce?.cancel();
     _liveLocationTimer?.cancel();
-    _deviceMarkerTimer?.cancel();
+    _caregiverPositionSub?.cancel();
     _mapController?.dispose();
     _panelController.dispose();
     _listController.dispose();
@@ -283,7 +461,8 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     final lat2 = asin(
       sinLat1 * cosDist + cosLat1 * sinDist * cos(bearingRadians),
     );
-    final lon2 = lon1 +
+    final lon2 =
+        lon1 +
         atan2(
           sin(bearingRadians) * sinDist * cosLat1,
           cosDist - sinLat1 * sin(lat2),
@@ -296,24 +475,50 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     required LatLng? destinationPos,
   }) {
     if (_mapController == null) return;
+    if (_userCameraLocked) return;
     _cameraDebounce?.cancel();
     _cameraDebounce = Timer(const Duration(milliseconds: 140), () async {
       final controller = _mapController;
       if (controller == null || !mounted) return;
+      if (_userCameraLocked) return;
 
       final prev = _lastNavigationPos;
       _lastNavigationPos = caregiverPos;
+      if (prev != null) {
+        try {
+          final movedMeters = Geolocator.distanceBetween(
+            prev.latitude,
+            prev.longitude,
+            caregiverPos.latitude,
+            caregiverPos.longitude,
+          );
+          if (movedMeters < 3.0) return;
+        } catch (_) {
+          // ignore
+        }
+      }
+
+      final now = DateTime.now();
+      final lastAt = _lastNavigationCameraAt;
+      if (lastAt != null && now.difference(lastAt).inMilliseconds < 700) {
+        return;
+      }
+      _lastNavigationCameraAt = now;
+
       final bearing = (prev != null && prev != caregiverPos)
           ? _bearingDegrees(prev, caregiverPos)
           : (destinationPos != null
-              ? _bearingDegrees(caregiverPos, destinationPos)
-              : 0.0);
-      final double followOffsetMeters = widget.showActionFrontSheet ? 0.0 : -60.0;
+                ? _bearingDegrees(caregiverPos, destinationPos)
+                : 0.0);
+      final double followOffsetMeters = widget.showActionFrontSheet
+          ? 90.0
+          : -60.0;
       final target = followOffsetMeters == 0.0
           ? caregiverPos
           : _moveAlongBearing(caregiverPos, bearing, followOffsetMeters);
 
       try {
+        _programmaticCameraMove = true;
         await controller.animateCamera(
           CameraUpdate.newCameraPosition(
             CameraPosition(
@@ -326,6 +531,8 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
         );
       } catch (_) {
         // ignore camera failures
+      } finally {
+        _programmaticCameraMove = false;
       }
     });
   }
@@ -336,10 +543,12 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
   }) async {
     final controller = _mapController;
     if (controller == null) return;
+    if (_userCameraLocked) return;
     final bearing = destinationPos != null
         ? _bearingDegrees(caregiverPos, destinationPos)
         : 0.0;
     try {
+      _programmaticCameraMove = true;
       await controller.animateCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(
@@ -352,6 +561,8 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       );
     } catch (_) {
       // ignore camera failures
+    } finally {
+      _programmaticCameraMove = false;
     }
   }
 
@@ -403,10 +614,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     ].whereType<String>().where((part) => part.trim().isNotEmpty).join(', ');
   }
 
-  Future<void> _resolvePlaceName(
-    LatLng pos, {
-    required bool caregiver,
-  }) async {
+  Future<void> _resolvePlaceName(LatLng pos, {required bool caregiver}) async {
     final key = _placeKey(pos);
     final cached = _placeNameCache[key];
     if (cached != null) {
@@ -449,9 +657,11 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     required LatLng? destinationPos,
   }) {
     final caregiverKey = caregiverPos == null ? '' : _placeKey(caregiverPos);
-    final destinationKey =
-        destinationPos == null ? '' : _placeKey(destinationPos);
-    final combinedKey = '$caregiverKey|$destinationKey|${_navigationMode ? 'NAV' : 'IDLE'}';
+    final destinationKey = destinationPos == null
+        ? ''
+        : _placeKey(destinationPos);
+    final combinedKey =
+        '$caregiverKey|$destinationKey|${_navigationMode ? 'NAV' : 'IDLE'}';
     if (combinedKey == _placeUpdateKey) return;
     _placeUpdateKey = combinedKey;
 
@@ -542,7 +752,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       );
     } catch (e) {
       if (!mounted) return;
-      messenger.showSnackBar(SnackBar(content: Text('Unable to open chat: $e')));
+      messenger.showSnackBar(
+        SnackBar(content: Text('Unable to open chat: $e')),
+      );
     } finally {
       if (mounted) setState(() => _isChatting = false);
     }
@@ -595,6 +807,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
   static const String _stageProvideServices = 'PROVIDE_SERVICES';
   static const String _stageJobsDone = 'JOBS_DONE';
   static const String _stageCompleted = 'COMPLETED';
+  static const String _stageNotStarted = 'NOT_STARTED';
 
   String _deriveCaregiverSessionStage({
     required String statusNormalized,
@@ -605,13 +818,15 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     if (statusNormalized == 'COMPLETED') return _stageCompleted;
 
     if (stageNormalized.isEmpty) {
-      if (statusNormalized == 'ONGOING' || statusNormalized == 'HANDLE_CLIENT') {
-        return _stageJobsDone;
+      if (statusNormalized == 'ONGOING' ||
+          statusNormalized == 'HANDLE_CLIENT') {
+        return _stageStartSession;
       }
-      return _stageStartSession;
+      return _stageNotStarted;
     }
 
     switch (stageNormalized) {
+      case _stageNotStarted:
       case _stageStartSession:
       case _stageArrived:
       case _stageProvideServices:
@@ -619,7 +834,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       case _stageCompleted:
         return stageNormalized;
       default:
-        return _stageStartSession;
+        return _stageNotStarted;
     }
   }
 
@@ -629,7 +844,8 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     String? stageToSet,
     bool enabled,
     String currentStage,
-  }) _sessionActionForBooking({
+  })
+  _sessionActionForBooking({
     required Map<String, dynamic> booking,
     required String rawStatus,
   }) {
@@ -659,9 +875,17 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     }
 
     switch (derivedStage) {
-      case _stageStartSession:
+      case _stageNotStarted:
         return (
           label: 'Start session',
+          statusToSet: 'ONGOING',
+          stageToSet: _stageStartSession,
+          enabled: true,
+          currentStage: derivedStage,
+        );
+      case _stageStartSession:
+        return (
+          label: 'Arrived',
           statusToSet: 'ONGOING',
           stageToSet: _stageArrived,
           enabled: true,
@@ -669,7 +893,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
         );
       case _stageArrived:
         return (
-          label: 'Arrived',
+          label: 'Provide services',
           statusToSet: 'ONGOING',
           stageToSet: _stageProvideServices,
           enabled: true,
@@ -677,7 +901,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
         );
       case _stageProvideServices:
         return (
-          label: 'Provide services',
+          label: 'Jobs done',
           statusToSet: 'ONGOING',
           stageToSet: _stageJobsDone,
           enabled: true,
@@ -686,7 +910,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       case _stageJobsDone:
       default:
         return (
-          label: 'Jobs done',
+          label: 'Complete',
           statusToSet: 'COMPLETED',
           stageToSet: _stageCompleted,
           enabled: true,
@@ -705,6 +929,148 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     if (permission == LocationPermission.deniedForever) return false;
     return permission == LocationPermission.whileInUse ||
         permission == LocationPermission.always;
+  }
+
+  static String _stageDisplayLabel(String stage) {
+    final s = stage.trim().toUpperCase();
+    return switch (s) {
+      _stageStartSession => 'Start session',
+      _stageArrived => 'Arrived',
+      _stageProvideServices => 'Provide services',
+      _stageJobsDone => 'Jobs done',
+      _stageCompleted => 'Completed',
+      _ => s.replaceAll('_', ' ').trim().isEmpty ? 'Stage' : s.replaceAll('_', ' '),
+    };
+  }
+
+  String _formatSnapshotTime(DateTime dt) {
+    final tod = TimeOfDay.fromDateTime(dt).format(context);
+    return '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year} • $tod';
+  }
+
+  Future<void> _captureStagePhoto({
+    required String bookingId,
+    required String caregiverId,
+    required String stage,
+  }) async {
+    final trimmedBookingId = bookingId.trim();
+    final trimmedCaregiverId = caregiverId.trim();
+    if (trimmedBookingId.isEmpty || trimmedCaregiverId.isEmpty) return;
+
+    final viewerUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (viewerUid.trim().isEmpty || viewerUid.trim() != trimmedCaregiverId) {
+      return;
+    }
+
+    final XFile? result = await _picker.pickImage(source: ImageSource.camera);
+    if (result == null) return;
+
+    final bytes = await result.readAsBytes();
+    if (!mounted) return;
+
+    final id = _uuid.v4();
+    final normalizedStage = _normalizeStage(stage);
+    final storagePath =
+        'bookings/$trimmedBookingId/stage-photos/$normalizedStage/$id.jpg';
+    final ref = FirebaseStorage.instance.ref(storagePath);
+
+    try {
+      final task = ref.putData(
+        bytes,
+        SettableMetadata(contentType: 'image/jpeg'),
+      );
+      await task;
+      final url = await ref.getDownloadURL();
+      final bookingRef =
+          FirebaseFirestore.instance.collection('bookings').doc(trimmedBookingId);
+      final now = Timestamp.now();
+
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final snap = await tx.get(bookingRef);
+        final raw = (snap.data()?['stageSnapshots'] as List?) ?? const [];
+        final existing = raw
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList(growable: true);
+        existing.add({
+          'id': id,
+          'stage': normalizedStage,
+          'photoUrl': url,
+          'storagePath': storagePath,
+          'createdAt': now,
+        });
+        tx.set(
+          bookingRef,
+          {
+            'stageSnapshots': existing,
+            'updatedAt': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
+      });
+    } catch (e) {
+      debugPrint('captureStagePhoto failed booking=$trimmedBookingId stage=$normalizedStage error=$e');
+      await ref.delete().catchError((_) {});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            e is FirebaseException && (e.code).trim().isNotEmpty
+                ? 'Failed to upload stage photo (${e.code}).'
+                : 'Failed to upload stage photo.',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _deleteStageSnapshot({
+    required String bookingId,
+    required String snapshotId,
+  }) async {
+    final trimmedBookingId = bookingId.trim();
+    final trimmedSnapshotId = snapshotId.trim();
+    if (trimmedBookingId.isEmpty || trimmedSnapshotId.isEmpty) return;
+
+    final bookingRef =
+        FirebaseFirestore.instance.collection('bookings').doc(trimmedBookingId);
+    String storagePath = '';
+
+    try {
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final snap = await tx.get(bookingRef);
+        final raw = (snap.data()?['stageSnapshots'] as List?) ?? const [];
+        final existing = raw
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList(growable: true);
+        final next = <Map<String, dynamic>>[];
+        for (final e in existing) {
+          final id = (e['id']?.toString() ?? '').trim();
+          if (id == trimmedSnapshotId) {
+            storagePath = (e['storagePath']?.toString() ?? '').trim();
+            continue;
+          }
+          next.add(e);
+        }
+        tx.set(
+          bookingRef,
+          {
+            'stageSnapshots': next,
+            'updatedAt': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
+      });
+      if (storagePath.isNotEmpty) {
+        await FirebaseStorage.instance.ref(storagePath).delete().catchError((_) {});
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to delete stage photo.')),
+      );
+    }
   }
 
   Future<Position?> _getDevicePosition() async {
@@ -744,11 +1110,15 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                 message: 'Location permission is required for SOS.',
               );
             }
-            final functions = FirebaseFunctions.instanceFor(region: 'us-central1');
+            final functions = FirebaseFunctions.instanceFor(
+              region: 'us-central1',
+            );
             await functions.httpsCallable('handleSOSAlert').call({
               'lat': pos.latitude,
               'lng': pos.longitude,
-              'reason': reason.trim().isNotEmpty ? reason.trim() : 'Emergency alert',
+              'reason': reason.trim().isNotEmpty
+                  ? reason.trim()
+                  : 'Emergency alert',
               'notifyContactIds': ids.toList(growable: false),
               'bookingId': widget.bookingId,
             });
@@ -820,38 +1190,147 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
         .doc(caregiverId.trim())
         .get()
         .then((snap) async {
-      if (!snap.exists) return;
-      await snap.reference.set(
-        {
-          'lat': pos.latitude,
-          'lng': pos.longitude,
-          'location': GeoPoint(pos.latitude, pos.longitude),
-          'locationUpdatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
-    });
+          if (!snap.exists) return;
+          await snap.reference.set({
+            'lat': pos.latitude,
+            'lng': pos.longitude,
+            'location': GeoPoint(pos.latitude, pos.longitude),
+            'locationUpdatedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+        });
     _liveLocationInFlight = false;
     return latLng;
   }
 
-  void _startLiveLocationUpdates({required String caregiverId}) {
+  Future<void> _pushCaregiverLocationFromPosition({
+    required String caregiverId,
+    required Position pos,
+  }) async {
     if (caregiverId.trim().isEmpty) return;
-    if (_liveLocationTimer != null && _liveLocationCaregiverId == caregiverId) {
-      return;
+    if (_liveLocationInFlight) return;
+    _liveLocationInFlight = true;
+    try {
+      try {
+        final callable = _functions.httpsCallable('updateCaregiverLocation');
+        await callable.call({
+          'lat': pos.latitude,
+          'lng': pos.longitude,
+          'bookingId': widget.bookingId,
+        });
+        return;
+      } catch (_) {
+        // fallback: direct update so marker still moves even if function isn't deployed yet
+      }
+
+      final ref = FirebaseFirestore.instance
+          .collection('caregivers')
+          .doc(caregiverId.trim());
+      await ref.set({
+        'lat': pos.latitude,
+        'lng': pos.longitude,
+        'location': GeoPoint(pos.latitude, pos.longitude),
+        'locationUpdatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } finally {
+      _liveLocationInFlight = false;
     }
-    _liveLocationTimer?.cancel();
-    _liveLocationCaregiverId = caregiverId.trim();
-    unawaited(_pushCaregiverLocationOnce(caregiverId: caregiverId.trim()));
-    _liveLocationTimer = Timer.periodic(const Duration(minutes: 1), (_) async {
-      await _pushCaregiverLocationOnce(caregiverId: caregiverId.trim());
-    });
+  }
+
+  bool _shouldSendCaregiverLocation(LatLng pos) {
+    final now = DateTime.now();
+    final lastAt = _lastCaregiverLocationSentAt;
+    final lastPos = _lastCaregiverLocationSentPos;
+
+    if (lastAt == null || lastPos == null) return true;
+
+    final secondsSince = now.difference(lastAt).inSeconds;
+    if (secondsSince < 8) return false;
+
+    final movedMeters = Geolocator.distanceBetween(
+      lastPos.latitude,
+      lastPos.longitude,
+      pos.latitude,
+      pos.longitude,
+    );
+    return movedMeters >= 8;
+  }
+
+  Future<void> _startAccurateCaregiverLocationUpdates({
+    required String caregiverId,
+  }) async {
+    final id = caregiverId.trim();
+    if (id.isEmpty) return;
+    if (_caregiverPositionSub != null && _liveLocationCaregiverId == id) return;
+
+    await _caregiverPositionSub?.cancel();
+    _caregiverPositionSub = null;
+    _liveLocationCaregiverId = id;
+    _lastCaregiverLocationSentAt = null;
+    _lastCaregiverLocationSentPos = null;
+
+    final canLocate = await _ensureLocationPermission();
+    if (!canLocate || !mounted) return;
+
+    final stream = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 5,
+      ),
+    );
+
+    _caregiverPositionSub = stream.listen(
+      (pos) {
+        if (!mounted) return;
+        final caregiverPos = LatLng(pos.latitude, pos.longitude);
+        _latestCaregiverPos = caregiverPos;
+
+        if (_liveMapCaregiverId.isEmpty) {
+          _liveMapCaregiverId = _liveLocationCaregiverId ?? '';
+        }
+
+        final destinationPos = _liveMapDestinationPos ?? _latestDestinationPos;
+        _scheduleMapUpdate(
+          caregiverPos: caregiverPos,
+          destinationPos: destinationPos,
+          caregiverId: _liveMapCaregiverId,
+          caregiverLabel: _liveMapCaregiverLabel,
+          caregiverPhotoUrl: _liveMapCaregiverPhotoUrl,
+          destinationLabel: _liveMapDestinationLabel,
+          destinationPhotoUrl: _liveMapDestinationPhotoUrl,
+        );
+
+        if (_shouldSendCaregiverLocation(caregiverPos)) {
+          _lastCaregiverLocationSentAt = DateTime.now();
+          _lastCaregiverLocationSentPos = caregiverPos;
+          unawaited(
+            _pushCaregiverLocationFromPosition(caregiverId: id, pos: pos),
+          );
+        }
+      },
+      onError: (_) {
+        // Ignore: caller can retry when status changes.
+      },
+    );
+  }
+
+  void _stopAccurateCaregiverLocationUpdates() {
+    _caregiverPositionSub?.cancel();
+    _caregiverPositionSub = null;
+    _lastCaregiverLocationSentAt = null;
+    _lastCaregiverLocationSentPos = null;
+    _liveLocationCaregiverId = null;
+  }
+
+  void _startLiveLocationUpdates({required String caregiverId}) {
+    unawaited(
+      _startAccurateCaregiverLocationUpdates(caregiverId: caregiverId.trim()),
+    );
   }
 
   void _stopLiveLocationUpdates() {
     _liveLocationTimer?.cancel();
     _liveLocationTimer = null;
-    _liveLocationCaregiverId = null;
+    _stopAccurateCaregiverLocationUpdates();
   }
 
   void _syncLiveLocationForStatus({
@@ -859,76 +1338,27 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     required String caregiverId,
   }) {
     final normalized = _normalizeStatus(status);
-    final shouldNavigate = caregiverId.trim().isNotEmpty &&
+    final isDone = normalized == 'COMPLETED' || normalized.startsWith('CANCEL');
+    final currentUid = (FirebaseAuth.instance.currentUser?.uid ?? '').trim();
+    final isCaregiverAccount =
+        currentUid.isNotEmpty && currentUid == caregiverId.trim();
+    final shouldNavigate =
+        isCaregiverAccount &&
         (normalized == 'ONGOING' || normalized == 'HANDLE_CLIENT');
-    final shouldRun = widget.showActionFrontSheet && caregiverId.trim().isNotEmpty;
+    final shouldRun =
+        widget.showActionFrontSheet &&
+        isCaregiverAccount &&
+        !isDone &&
+        (normalized == 'ONGOING' || normalized == 'HANDLE_CLIENT');
     if (shouldNavigate != _navigationMode) {
       _navigationMode = shouldNavigate;
       if (!shouldNavigate) _lastNavigationPos = null;
     }
 
     if (shouldRun) {
-      _startDeviceMarkerUpdates();
-      if (shouldNavigate) {
-        _startLiveLocationUpdates(caregiverId: caregiverId.trim());
-      } else {
-        _stopLiveLocationUpdates();
-      }
+      _startLiveLocationUpdates(caregiverId: caregiverId.trim());
     } else {
       _stopLiveLocationUpdates();
-      _stopDeviceMarkerUpdates();
-    }
-  }
-
-  void _startDeviceMarkerUpdates() {
-    if (!widget.showActionFrontSheet) return;
-    if (_deviceMarkerTimer != null) return;
-    unawaited(_updateDeviceMarkerOnce());
-    _deviceMarkerTimer = Timer.periodic(
-      const Duration(minutes: 1),
-      (_) => unawaited(_updateDeviceMarkerOnce()),
-    );
-  }
-
-  void _stopDeviceMarkerUpdates() {
-    _deviceMarkerTimer?.cancel();
-    _deviceMarkerTimer = null;
-  }
-
-  Future<void> _updateDeviceMarkerOnce() async {
-    if (_deviceMarkerInFlight) return;
-    _deviceMarkerInFlight = true;
-    try {
-      final canLocate = await _ensureLocationPermission();
-      if (!canLocate || !mounted) return;
-      Position pos;
-      try {
-        pos = await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.low,
-          timeLimit: const Duration(seconds: 10),
-        );
-      } catch (_) {
-        return;
-      }
-      if (!mounted) return;
-
-      final caregiverPos = LatLng(pos.latitude, pos.longitude);
-      _latestCaregiverPos = caregiverPos;
-      final destinationPos = _liveMapDestinationPos ?? _latestDestinationPos;
-      if (_liveMapCaregiverId.isEmpty) {
-        _liveMapCaregiverId = _liveLocationCaregiverId ?? '';
-      }
-      _scheduleMapUpdate(
-        caregiverPos: caregiverPos,
-        destinationPos: destinationPos,
-        caregiverId: _liveMapCaregiverId,
-        caregiverLabel: _liveMapCaregiverLabel,
-        caregiverPhotoUrl: _liveMapCaregiverPhotoUrl,
-        destinationLabel: _liveMapDestinationLabel,
-        destinationPhotoUrl: _liveMapDestinationPhotoUrl,
-      );
-    } finally {
-      _deviceMarkerInFlight = false;
     }
   }
 
@@ -995,16 +1425,10 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       }
 
       if (sosId.isNotEmpty) {
-        await FirebaseFirestore.instance
-            .collection('sos')
-            .doc(sosId)
-            .set(
-          {
-            ...sessionUpdate,
-            'statusUpdatedAt': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
+        await FirebaseFirestore.instance.collection('sos').doc(sosId).set({
+          ...sessionUpdate,
+          'statusUpdatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
       }
 
       final normalizedStatus = status.trim().toUpperCase();
@@ -1023,7 +1447,8 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
   }
 
   String _clientOngoingStatusMessage(Map<String, dynamic> booking) {
-    final raw = normalizeString(booking['ongoingStatus']) ??
+    final raw =
+        normalizeString(booking['ongoingStatus']) ??
         normalizeString(booking['caregiverSessionStage']) ??
         '';
     final normalized = _normalizeStatus(raw);
@@ -1120,72 +1545,42 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       context: context,
       barrierDismissible: false,
       builder: (ctx) {
-        return Dialog(
-          insetPadding: const EdgeInsets.symmetric(horizontal: 22),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 52,
-                  height: 52,
-                  decoration: BoxDecoration(
-                    color: _routeColor.withValues(alpha: 0.22),
-                    shape: BoxShape.circle,
-                    border: Border.all(color: _routeColor.withValues(alpha: 0.35)),
-                  ),
-                  child: const Icon(
-                    Icons.check_rounded,
-                    color: Colors.black87,
-                    size: 28,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  title,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w900,
-                    color: _profileDarkText,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  message,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.black.withValues(alpha: 0.72),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                SizedBox(
-                  height: 40,
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: () => Navigator.of(ctx).pop(),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _routeColor,
-                      foregroundColor: Colors.black,
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      textStyle: const TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    child: const Text('View history'),
-                  ),
-                ),
-              ],
-            ),
+        return AlertDialog(
+          backgroundColor: _pageBackground,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
           ),
+          title: Text(
+            title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+          content: Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.black87),
+          ),
+          actionsAlignment: MainAxisAlignment.center,
+          actionsPadding: const EdgeInsets.only(bottom: 12),
+          actions: [
+            SizedBox(
+              width: 240,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _routeColor,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  textStyle: const TextStyle(fontWeight: FontWeight.w700),
+                  elevation: 0,
+                ),
+                child: const Text('View history'),
+              ),
+            ),
+          ],
         );
       },
     ).whenComplete(() => dialogOpen = false);
@@ -1343,6 +1738,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     required VoidCallback? onPressed,
     VoidCallback? onSecondaryPressed,
     required VoidCallback? onSosPressed,
+    VoidCallback? onCameraPressed,
   }) {
     final canPress = enabled && onPressed != null;
     final canSecondaryPress = enabled && onSecondaryPressed != null;
@@ -1356,12 +1752,14 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
             normalizedLabel == 'provide services' ||
             normalizedLabel == 'jobs done') &&
         (onPressed != null);
+    final canCameraPress = enabled && onCameraPressed != null;
 
     final subtitleParts = <String>[
       personLabel.trim(),
       serviceLabel.trim(),
     ].where((e) => e.isNotEmpty).toList();
     final subtitle = subtitleParts.join(' • ');
+    final isEmergency = serviceLabel.toLowerCase().contains('emergency');
 
     return Material(
       color: Colors.white,
@@ -1399,32 +1797,46 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        personName.trim().isNotEmpty
-                            ? personName.trim()
-                            : 'Selected person',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w900,
-                          color: _profileDarkText,
-                        ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              personName.trim().isNotEmpty
+                                  ? personName.trim()
+                                  : 'Selected person',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w900,
+                                color: _profileDarkText,
+                              ),
+                            ),
+                          ),
+                          if (isEmergency)
+                            _StatusChip(
+                              label: 'Emergency alert',
+                              dotColorOverride: Colors.red.shade700,
+                            ),
+                        ],
                       ),
-                      if (subtitle.isNotEmpty) ...[
-                        const SizedBox(height: 3),
-                        Text(
-                          subtitle,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.black.withValues(alpha: 0.54),
+                      if (!isCaregiverPov &&
+                          !isEmergency &&
+                          subtitle.trim().isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 3),
+                          child: Text(
+                            subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.black.withValues(alpha: 0.54),
+                            ),
                           ),
                         ),
-                      ],
-                      const SizedBox(height: 3),
+                      const SizedBox(height: 6),
                       Text(
                         personAddress.trim().isNotEmpty
                             ? personAddress.trim()
@@ -1450,7 +1862,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                     child: SizedBox(
                       height: 46,
                       child: OutlinedButton(
-                        onPressed: canSecondaryPress ? onSecondaryPressed : null,
+                        onPressed: canSecondaryPress
+                            ? onSecondaryPressed
+                            : null,
                         style: OutlinedButton.styleFrom(
                           side: BorderSide(
                             color: Colors.black12.withValues(alpha: 0.18),
@@ -1477,9 +1891,12 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                       child: ElevatedButton(
                         onPressed: canPress ? onPressed : null,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor:
-                              canPress ? _routeColor : const Color(0xFFCDD1D6),
-                          foregroundColor: canPress ? Colors.black : Colors.white70,
+                          backgroundColor: canPress
+                              ? _routeColor
+                              : const Color(0xFFCDD1D6),
+                          foregroundColor: canPress
+                              ? Colors.black
+                              : Colors.white70,
                           elevation: 0,
                           padding: const EdgeInsets.symmetric(vertical: 12),
                           shape: RoundedRectangleBorder(
@@ -1495,7 +1912,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                     ),
                   ),
                 ] else ...[
-                  if (!isCaregiverPov && onSosPressed != null && !isSessionSwipe) ...[
+                  if (!isCaregiverPov &&
+                      onSosPressed != null &&
+                      !isSessionSwipe) ...[
                     Expanded(
                       child: SizedBox(
                         height: 46,
@@ -1526,13 +1945,31 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                     child: SizedBox(
                       height: 46,
                       child: isSessionSwipe
-                          ? _SwipeToConfirmButton(
-                              key: ValueKey<String>('session-swipe-$buttonLabel'),
-                              label: buttonLabel,
-                              enabled: canPress,
-                              onConfirmed: onPressed,
-                              height: 46,
-                              accent: _routeColor,
+                          ? Row(
+                              children: [
+                                Expanded(
+                                  child: _SwipeToConfirmButton(
+                                    key: ValueKey<String>(
+                                      'session-swipe-$buttonLabel',
+                                    ),
+                                    label: buttonLabel,
+                                    enabled: canPress,
+                                    onConfirmed: onPressed,
+                                    height: 46,
+                                    accent: _routeColor,
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                _circleIconButton(
+                                  icon: Icons.photo_camera_rounded,
+                                  background:
+                                      _accentGreen.withValues(alpha: 0.12),
+                                  iconColor: _accentGreen,
+                                  onTap: canCameraPress
+                                      ? onCameraPressed
+                                      : null,
+                                ),
+                              ],
                             )
                           : ElevatedButton(
                               onPressed: canPress ? onPressed : null,
@@ -1540,11 +1977,13 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                 backgroundColor: canPress
                                     ? _routeColor
                                     : const Color(0xFFCDD1D6),
-                                foregroundColor:
-                                    canPress ? Colors.black : Colors.white70,
+                                foregroundColor: canPress
+                                    ? Colors.black
+                                    : Colors.white70,
                                 elevation: 0,
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 12),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                ),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(18),
                                 ),
@@ -1584,13 +2023,33 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     return const [];
   }
 
+  List<Map<String, dynamic>> _extractStageSnapshots(dynamic raw) {
+    if (raw is! List) return const [];
+    final items =
+        raw
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList(growable: false);
+    final sorted = [...items];
+    sorted.sort((a, b) {
+      final atA = a['createdAt'];
+      final atB = b['createdAt'];
+      final da = atA is Timestamp ? atA.toDate() : DateTime.fromMillisecondsSinceEpoch(0);
+      final db = atB is Timestamp ? atB.toDate() : DateTime.fromMillisecondsSinceEpoch(0);
+      return db.compareTo(da);
+    });
+    return sorted;
+  }
+
   Map<String, dynamic>? _pickAddressFromUserDoc({
     required Map<String, dynamic>? userData,
     required String addressId,
     required String personAddress,
   }) {
     if (userData == null) return null;
-    final addresses = _extractAddressList(userData['address'] ?? userData['addresses']);
+    final addresses = _extractAddressList(
+      userData['address'] ?? userData['addresses'],
+    );
     if (addresses.isEmpty) return null;
 
     if (addressId.trim().isNotEmpty) {
@@ -1602,11 +2061,14 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     final addressText = personAddress.trim().toLowerCase();
     if (addressText.isNotEmpty) {
       for (final entry in addresses) {
-        final line = (entry['address'] ?? entry['addressLine'] ?? entry['subtitle'])
-            ?.toString()
-            .trim()
-            .toLowerCase();
-        if (line != null && line.isNotEmpty && line == addressText) return entry;
+        final line =
+            (entry['address'] ?? entry['addressLine'] ?? entry['subtitle'])
+                ?.toString()
+                .trim()
+                .toLowerCase();
+        if (line != null && line.isNotEmpty && line == addressText) {
+          return entry;
+        }
       }
     }
 
@@ -1618,6 +2080,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
 
   Widget _trackingInfoSheet({
     required bool caregiverView,
+    required String bookingId,
     required String userId,
     required String caregiverId,
     required String personId,
@@ -1631,18 +2094,17 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     required String sessionStage,
     required String fallbackDestinationAddress,
     required String fallbackCaregiverAddress,
+    required List<Map<String, dynamic>> stageSnapshots,
   }) {
     final primaryName = caregiverView ? personName : caregiverName;
     final primaryPhotoUrl = caregiverView ? personPhotoUrl : caregiverPhotoUrl;
     final secondary = caregiverView ? 'Client' : 'Caregiver';
-    final startLocationRaw = (_caregiverPlaceName?.trim().isNotEmpty == true
-            ? _caregiverPlaceName!.trim()
-            : fallbackCaregiverAddress.trim())
-        .trim();
-    final endLocationRaw = (_destinationPlaceName?.trim().isNotEmpty == true
-            ? _destinationPlaceName!.trim()
-            : fallbackDestinationAddress.trim())
-        .trim();
+    final startLocationRaw =
+        (_caregiverPlaceName?.trim().isNotEmpty == true
+                ? _caregiverPlaceName!.trim()
+                : fallbackCaregiverAddress.trim())
+            .trim();
+    final endLocationRaw = fallbackDestinationAddress.trim();
     final startLocation = _splitPlaceLabel(startLocationRaw);
     final endLocation = _splitPlaceLabel(endLocationRaw);
 
@@ -1659,8 +2121,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
         _stageArrived ||
         _stageProvideServices ||
         _stageJobsDone ||
-        _stageCompleted =>
-          'Current session status',
+        _stageCompleted => 'Current session status',
         _ => 'Estimated Arrival Time',
       };
     }
@@ -1751,14 +2212,15 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                 onTap: !chatEnabled
                     ? null
                     : () => _startChat(
-                          userId: userId,
-                          caregiverId: caregiverId,
-                          otherUserId: caregiverView ? userId : caregiverId,
-                          otherUserName:
-                              caregiverView ? personName : caregiverName,
-                          personId: personId,
-                          hideCallAction: caregiverView,
-                        ),
+                        userId: userId,
+                        caregiverId: caregiverId,
+                        otherUserId: caregiverView ? userId : caregiverId,
+                        otherUserName: caregiverView
+                            ? personName
+                            : caregiverName,
+                        personId: personId,
+                        hideCallAction: caregiverView,
+                      ),
               ),
               const SizedBox(width: 10),
               _circleIconButton(
@@ -1776,10 +2238,178 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
               ? 'Current location'
               : startLocation.title,
           startSubtitle: startLocation.subtitle,
-          endTitle: endLocation.title.isEmpty ? 'Destination' : endLocation.title,
+          endTitle: endLocation.title.isEmpty
+              ? 'Destination'
+              : endLocation.title,
           endSubtitle: endLocation.subtitle,
         ),
+        if (stageSnapshots.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            decoration: _premiumCardDecoration(radius: 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: const [
+                    Icon(
+                      Icons.receipt_long_rounded,
+                      size: 18,
+                      color: _accentGreen,
+                    ),
+                    SizedBox(width: 8),
+                    Text(
+                      'Booking summary',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        color: _profileDarkText,
+                        letterSpacing: -0.2,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                for (final entry in stageSnapshots)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _StageSnapshotRow(
+                      entry: entry,
+                      stageLabel: _stageDisplayLabel(
+                        (entry['stage']?.toString() ?? '').trim(),
+                      ),
+                      timeLabel: () {
+                        final ts = entry['createdAt'];
+                        final dt = ts is Timestamp ? ts.toDate() : null;
+                        return dt == null ? '-' : _formatSnapshotTime(dt);
+                      }(),
+                      onDelete:
+                          (entry['id']?.toString() ?? '').trim().isEmpty ||
+                                  !caregiverView ||
+                                  bookingId.trim().isEmpty
+                              ? null
+                              : () => _deleteStageSnapshot(
+                                    bookingId: bookingId,
+                                    snapshotId:
+                                        (entry['id']?.toString() ?? '').trim(),
+                                  ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
       ],
+    );
+  }
+
+  static IconData _maneuverIcon(String maneuver) {
+    final value = maneuver.trim().toLowerCase();
+    if (value.contains('turn-left') || value == 'left') {
+      return Icons.turn_left_rounded;
+    }
+    if (value.contains('turn-right') || value == 'right') {
+      return Icons.turn_right_rounded;
+    }
+    if (value.contains('uturn') || value.contains('u-turn')) {
+      return Icons.u_turn_left_rounded;
+    }
+    if (value.contains('merge')) return Icons.merge_rounded;
+    if (value.contains('roundabout')) return Icons.roundabout_right_rounded;
+    if (value.contains('ramp')) return Icons.ramp_right_rounded;
+    if (value.contains('fork')) return Icons.call_split_rounded;
+    if (value.contains('straight')) return Icons.straight_rounded;
+    return Icons.navigation_rounded;
+  }
+
+  Widget _directionsBanner(List<_DirectionsStep> steps) {
+    if (steps.isEmpty) return const SizedBox.shrink();
+    final index = _activeDirectionStepIndex.clamp(0, steps.length - 1);
+    final step = steps[index];
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: _premiumCardDecoration(radius: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: const [
+              Icon(Icons.directions_rounded, size: 18, color: _accentGreen),
+              SizedBox(width: 8),
+              Text(
+                'Directions',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w800,
+                  color: _profileDarkText,
+                  letterSpacing: -0.2,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 30,
+                height: 30,
+                decoration: BoxDecoration(
+                  color: _accentGreen.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  _maneuverIcon(step.maneuver),
+                  color: _accentGreen,
+                  size: 18,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      step.instruction.trim().isEmpty
+                          ? 'Continue'
+                          : step.instruction.trim(),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12.8,
+                        fontWeight: FontWeight.w800,
+                        color: _profileDarkText,
+                        letterSpacing: -0.1,
+                        height: 1.2,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      [
+                        step.distanceText.trim(),
+                        step.durationText.trim(),
+                      ].where((e) => e.isNotEmpty).join(' • '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.black.withValues(alpha: 0.60),
+                        letterSpacing: -0.1,
+                        height: 1.1,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -1823,44 +2453,57 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
         height: 1.15,
       );
       return AnimatedSwitcher(
-        duration: const Duration(milliseconds: 220),
+        duration: const Duration(milliseconds: 160),
         switchInCurve: Curves.easeOutCubic,
         switchOutCurve: Curves.easeInCubic,
-        transitionBuilder: (child, animation) {
-          final offsetAnimation = Tween<Offset>(
-            begin: const Offset(0, 0.08),
-            end: Offset.zero,
-          ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOut));
-          return FadeTransition(
-            opacity: animation,
-            child: SlideTransition(position: offsetAnimation, child: child),
+        transitionBuilder: (child, animation) =>
+            FadeTransition(opacity: animation, child: child),
+        layoutBuilder: (currentChild, previousChildren) {
+          return Stack(
+            alignment: Alignment.topLeft,
+            children: <Widget>[
+              ...previousChildren,
+              if (currentChild != null) currentChild,
+            ],
           );
         },
-        child: Column(
+        child: SizedBox(
           key: key,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w800,
-                color: _profileDarkText,
+          height: 46,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                height: 16,
+                child: Align(
+                  alignment: Alignment.topLeft,
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                      color: _profileDarkText,
+                    ),
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(height: 2),
-            SizedBox(
-              height: 28,
-              child: Text(
-                trimmedSubtitle.isNotEmpty ? trimmedSubtitle : ' ',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: subtitleStyle,
+              const SizedBox(height: 2),
+              SizedBox(
+                height: 28,
+                child: Align(
+                  alignment: Alignment.topLeft,
+                  child: Text(
+                    trimmedSubtitle.isNotEmpty ? trimmedSubtitle : ' ',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: subtitleStyle,
+                  ),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       );
     }
@@ -1936,15 +2579,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     return LatLng(lat, lng);
   }
 
-  LatLng? _latLngFromBooking(Map<String, dynamic> booking) {
-    final dynamic directGeoPoint =
-        booking['location'] ??
-        booking['caregiverLocation'] ??
-        booking['userLocation'] ??
-        booking['destinationLocation'];
-    if (directGeoPoint is GeoPoint) {
-      return LatLng(directGeoPoint.latitude, directGeoPoint.longitude);
-    }
+  LatLng? _latLngFromBookingAddress(Map<String, dynamic> booking) {
     final dynamic address =
         booking['address'] ??
         booking['selectedAddress'] ??
@@ -1961,15 +2596,15 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     }
 
     final lat =
-        _toDouble(booking['lat']) ??
-        _toDouble(booking['latitude']) ??
         _toDouble(booking['personLat']) ??
-        _toDouble(booking['personLatitude']);
+        _toDouble(booking['personLatitude']) ??
+        _toDouble(booking['destinationLat']) ??
+        _toDouble(booking['destinationLatitude']);
     final lng =
-        _toDouble(booking['lng']) ??
-        _toDouble(booking['longitude']) ??
         _toDouble(booking['personLng']) ??
-        _toDouble(booking['personLongitude']);
+        _toDouble(booking['personLongitude']) ??
+        _toDouble(booking['destinationLng']) ??
+        _toDouble(booking['destinationLongitude']);
     if (lat == null || lng == null) return null;
     return LatLng(lat, lng);
   }
@@ -2051,39 +2686,167 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       destinationPhotoUrl: destinationPhotoUrl,
     );
     if (signature == _mapUpdateAppliedKey) {
-      _latestCaregiverPos = caregiverPos;
-      _latestDestinationPos = destinationPos;
+      _latestCaregiverPos = caregiverPos ?? _latestCaregiverPos;
+      _latestDestinationPos = destinationPos ?? _latestDestinationPos;
       return;
     }
     _mapUpdateAppliedKey = signature;
-    _latestCaregiverPos = caregiverPos;
-    _latestDestinationPos = destinationPos;
+    _latestCaregiverPos = caregiverPos ?? _latestCaregiverPos;
+    _latestDestinationPos = destinationPos ?? _latestDestinationPos;
 
     _updateMarkers(
-      caregiverPos: caregiverPos,
-      destinationPos: destinationPos,
+      caregiverPos: caregiverPos ?? _latestCaregiverPos,
+      destinationPos: destinationPos ?? _latestDestinationPos,
       caregiverId: caregiverId,
       caregiverLabel: caregiverLabel,
       caregiverPhotoUrl: caregiverPhotoUrl,
       destinationLabel: destinationLabel,
       destinationPhotoUrl: destinationPhotoUrl,
     );
-    if (_navigationMode && caregiverPos != null) {
+    final resolvedCaregiverPos = caregiverPos ?? _latestCaregiverPos;
+    final resolvedDestinationPos = destinationPos ?? _latestDestinationPos;
+
+    if (_navigationMode && resolvedCaregiverPos != null) {
       // POV navigation camera: follow caregiver marker and keep the map tilted.
       _scheduleNavigationCamera(
-        caregiverPos: caregiverPos,
-        destinationPos: destinationPos,
+        caregiverPos: resolvedCaregiverPos,
+        destinationPos: resolvedDestinationPos,
       );
     } else {
       _scheduleCameraFit(
-        caregiverPos: caregiverPos,
-        destinationPos: destinationPos,
+        caregiverPos: resolvedCaregiverPos,
+        destinationPos: resolvedDestinationPos,
       );
     }
+    if (resolvedCaregiverPos != null) {
+      _updateActiveDirectionStep(resolvedCaregiverPos);
+    }
     _scheduleRouteFetch(
-      caregiverPos: caregiverPos,
-      destinationPos: destinationPos,
+      caregiverPos: resolvedCaregiverPos,
+      destinationPos: resolvedDestinationPos,
     );
+  }
+
+  int _computeActiveDirectionIndex(
+    LatLng current,
+    List<_DirectionsStep> steps, {
+    required int startIndex,
+    double thresholdMeters = 35,
+  }) {
+    if (steps.isEmpty) return 0;
+
+    final segmentIndex = _closestDirectionsStepIndex(current, steps);
+    if (segmentIndex != null) return segmentIndex;
+
+    var index = startIndex.clamp(0, steps.length - 1);
+    while (index < steps.length) {
+      final end = steps[index].endLocation;
+      if (end == null) break;
+      double distance = 0;
+      try {
+        distance = Geolocator.distanceBetween(
+          current.latitude,
+          current.longitude,
+          end.latitude,
+          end.longitude,
+        );
+      } catch (_) {
+        distance = 0;
+      }
+      if (distance > thresholdMeters) break;
+      index += 1;
+    }
+    if (index >= steps.length) return steps.length - 1;
+    return index;
+  }
+
+  int? _closestDirectionsStepIndex(
+    LatLng current,
+    List<_DirectionsStep> steps,
+  ) {
+    var bestIndex = -1;
+    var bestDistance = double.infinity;
+    for (var i = 0; i < steps.length; i++) {
+      final start = steps[i].startLocation;
+      final end = steps[i].endLocation;
+      if (start == null || end == null) continue;
+      final distance = _distanceToSegmentMeters(current, start, end);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = i;
+      }
+    }
+    if (bestIndex < 0) return null;
+    return bestIndex;
+  }
+
+  static double _distanceToSegmentMeters(LatLng p, LatLng a, LatLng b) {
+    final lat0 = p.latitude * pi / 180.0;
+    final metersPerDegLat = 111320.0;
+    final metersPerDegLon = 111320.0 * cos(lat0).abs();
+
+    final ax = a.longitude * metersPerDegLon;
+    final ay = a.latitude * metersPerDegLat;
+    final bx = b.longitude * metersPerDegLon;
+    final by = b.latitude * metersPerDegLat;
+    final px = p.longitude * metersPerDegLon;
+    final py = p.latitude * metersPerDegLat;
+
+    final abx = bx - ax;
+    final aby = by - ay;
+    final apx = px - ax;
+    final apy = py - ay;
+    final abLen2 = abx * abx + aby * aby;
+    if (abLen2 <= 0.000001) {
+      final dx = px - ax;
+      final dy = py - ay;
+      return sqrt(dx * dx + dy * dy);
+    }
+    var t = (apx * abx + apy * aby) / abLen2;
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    final cx = ax + t * abx;
+    final cy = ay + t * aby;
+    final dx = px - cx;
+    final dy = py - cy;
+    return sqrt(dx * dx + dy * dy);
+  }
+
+  double _distanceToPolylineMeters(LatLng p, List<LatLng> points) {
+    if (points.length < 2) return double.infinity;
+    var best = double.infinity;
+    for (var i = 0; i < points.length - 1; i++) {
+      final d = _distanceToSegmentMeters(p, points[i], points[i + 1]);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
+  bool _isOffPrimaryRoute(LatLng caregiverPos) {
+    final points = _latestRoutePoints;
+    if (points.length < 2) return false;
+    final d = _distanceToPolylineMeters(caregiverPos, points);
+    return d > 70;
+  }
+
+  void _updateActiveDirectionStep(LatLng caregiverPos) {
+    if (_latestRouteSteps.isEmpty) return;
+    final now = DateTime.now();
+    final last = _lastDirectionProgressAt;
+    if (last != null &&
+        now.difference(last) < const Duration(milliseconds: 400)) {
+      return;
+    }
+    _lastDirectionProgressAt = now;
+
+    final nextIndex = _computeActiveDirectionIndex(
+      caregiverPos,
+      _latestRouteSteps,
+      startIndex: _activeDirectionStepIndex,
+    );
+    if (nextIndex == _activeDirectionStepIndex) return;
+    if (!mounted) return;
+    setState(() => _activeDirectionStepIndex = nextIndex);
   }
 
   void _updateMarkers({
@@ -2234,12 +2997,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       final Path clip = Path()..addOval(dst);
       canvas.save();
       canvas.clipPath(clip);
-      canvas.drawImageRect(
-        avatar,
-        src,
-        dst,
-        Paint(),
-      );
+      canvas.drawImageRect(avatar, src, dst, Paint());
       canvas.restore();
     }
 
@@ -2355,12 +3113,14 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     List<LatLng>? routePoints,
   }) async {
     if (_mapController == null) return;
+    if (_userCameraLocked) return;
     final LatLngBounds bounds = _boundsFromPoints(
       a,
       b,
       extraPoints: routePoints,
     );
     try {
+      _programmaticCameraMove = true;
       await _mapController!.animateCamera(
         CameraUpdate.newLatLngBounds(bounds, _mapPadding),
       );
@@ -2373,6 +3133,8 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       await _mapController!.animateCamera(
         CameraUpdate.newLatLng(_midpoint(a, b)),
       );
+    } finally {
+      _programmaticCameraMove = false;
     }
   }
 
@@ -2389,6 +3151,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
         return;
       }
       _pendingCameraUpdate = false;
+      if (_userCameraLocked) return;
       if (caregiverPos == null && destinationPos == null) return;
       if (caregiverPos != null && destinationPos != null) {
         await _fitMapToPins(
@@ -2398,9 +3161,11 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
         );
         return;
       }
+      _programmaticCameraMove = true;
       controller.animateCamera(
         CameraUpdate.newLatLng(caregiverPos ?? destinationPos!),
       );
+      _programmaticCameraMove = false;
     });
   }
 
@@ -2409,6 +3174,11 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     required LatLng? destinationPos,
   }) {
     if (caregiverPos == null || destinationPos == null) {
+      // Don't clear existing route/ETA when one side is temporarily missing
+      // (e.g. when the screen is reopened and live location hasn't streamed in).
+      if (caregiverPos != null || destinationPos != null) {
+        return;
+      }
       if (_polylinesNotifier.value.isNotEmpty) {
         _polylinesNotifier.value = const {};
       }
@@ -2419,6 +3189,12 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       if (_latestRoutePoints.isNotEmpty) {
         setState(() => _latestRoutePoints = const <LatLng>[]);
       }
+      if (_latestRouteSteps.isNotEmpty) {
+        setState(() {
+          _latestRouteSteps = const <_DirectionsStep>[];
+          _activeDirectionStepIndex = 0;
+        });
+      }
       return;
     }
 
@@ -2426,57 +3202,119 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     // move the marker. Fetching directions every ~20s can cause visible
     // "refresh" flicker in the UI.
     if (_navigationMode && _latestRoutePoints.isNotEmpty) {
-      return;
+      final offRoute = _isOffPrimaryRoute(caregiverPos);
+      final now = DateTime.now();
+      final lastFetch = _lastDirectionsFetchAt;
+      final lastStart = _lastDirectionsFetchStart;
+      var movedMeters = 0.0;
+      if (lastStart != null) {
+        try {
+          movedMeters = Geolocator.distanceBetween(
+            lastStart.latitude,
+            lastStart.longitude,
+            caregiverPos.latitude,
+            caregiverPos.longitude,
+          );
+        } catch (_) {
+          movedMeters = 0.0;
+        }
+      }
+
+      final recent =
+          lastFetch != null &&
+          now.difference(lastFetch) < const Duration(seconds: 45);
+      if (!offRoute && recent && movedMeters < 60) return;
     }
 
     final nextKey =
         '${caregiverPos.latitude.toStringAsFixed(5)},${caregiverPos.longitude.toStringAsFixed(5)}|${destinationPos.latitude.toStringAsFixed(5)},${destinationPos.longitude.toStringAsFixed(5)}';
-    if (nextKey == _routeKey) return;
+    final offRoute = _isOffPrimaryRoute(caregiverPos);
+    if (!offRoute && nextKey == _routeKey) return;
     _routeKey = nextKey;
     _routeDebounce?.cancel();
     _routeDebounce = Timer(const Duration(milliseconds: 220), () async {
       final seq = ++_routeSeq;
+      _lastDirectionsFetchAt = DateTime.now();
+      _lastDirectionsFetchStart = caregiverPos;
       final route = await _fetchDirectionsRoute(caregiverPos, destinationPos);
       if (!mounted) return;
       if (seq != _routeSeq) return;
 
       final points = route?.points ?? const <LatLng>[];
+      final alternativePoints =
+          route?.alternativeRoutePoints ?? const <List<LatLng>>[];
       final etaSeconds = route?.durationSeconds;
       final distanceMeters = route?.distanceMeters;
-        if (points.isEmpty) {
-          // Keep the existing polyline visible if we previously had one.
-          setState(() {
-            _routeEtaSeconds = etaSeconds ?? _routeEtaSeconds;
-            _routeDistanceMeters = distanceMeters ?? _routeDistanceMeters;
-            if (_latestRoutePoints.isEmpty) {
-              _polylinesNotifier.value = const {};
-              _latestRoutePoints = const <LatLng>[];
-            }
-          });
+      final steps = route?.steps ?? const <_DirectionsStep>[];
+      final nextDirectionIndex = steps.isNotEmpty
+          ? _computeActiveDirectionIndex(
+              caregiverPos,
+              steps,
+              startIndex: _activeDirectionStepIndex,
+            )
+          : 0;
+      if (points.isEmpty) {
+        // Keep the existing polyline visible if we previously had one.
+        setState(() {
+          _routeEtaSeconds = etaSeconds ?? _routeEtaSeconds;
+          _routeDistanceMeters = distanceMeters ?? _routeDistanceMeters;
+          if (steps.isNotEmpty) {
+            _latestRouteSteps = steps;
+            _activeDirectionStepIndex = nextDirectionIndex;
+          }
+          if (_latestRoutePoints.isEmpty) {
+            _polylinesNotifier.value = const {};
+            _latestRoutePoints = const <LatLng>[];
+            _latestAltRoutePoints = const <List<LatLng>>[];
+          }
+        });
         if (!_navigationMode) {
           await _fitMapToPins(caregiverPos, destinationPos);
         }
-          return;
-        }
+        return;
+      }
       final trimmedPoints = points.length > 120
           ? points.sublist(0, 120)
           : points;
       setState(() {
         _routeEtaSeconds = etaSeconds ?? _routeEtaSeconds;
         _routeDistanceMeters = distanceMeters ?? _routeDistanceMeters;
-        _latestRoutePoints = trimmedPoints;
-        _polylinesNotifier.value = {
-          Polyline(
-            polylineId: const PolylineId('route'),
-            color: _routeColor,
-            width: 4,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            jointType: JointType.round,
-            geodesic: true,
-            points: trimmedPoints,
-          ),
-        };
+        _latestRouteSteps = steps;
+        _activeDirectionStepIndex = nextDirectionIndex;
+        if (!_navigationMode || _latestRoutePoints.isEmpty || offRoute) {
+          _latestRoutePoints = trimmedPoints;
+          _latestAltRoutePoints = alternativePoints;
+          final polylines = <Polyline>{
+            Polyline(
+              polylineId: const PolylineId('route'),
+              color: _routeColor,
+              width: 4,
+              startCap: Cap.roundCap,
+              endCap: Cap.roundCap,
+              jointType: JointType.round,
+              geodesic: true,
+              points: trimmedPoints,
+            ),
+          };
+          for (var i = 0; i < alternativePoints.length; i++) {
+            final pts = alternativePoints[i];
+            if (pts.isEmpty) continue;
+            polylines.add(
+              Polyline(
+                polylineId: PolylineId('route_alt_$i'),
+                color: _routeColor.withValues(alpha: 0.34),
+                width: 3,
+                patterns: [PatternItem.dash(12), PatternItem.gap(10)],
+                startCap: Cap.roundCap,
+                endCap: Cap.roundCap,
+                jointType: JointType.round,
+                geodesic: true,
+                points: pts,
+              ),
+            );
+          }
+          _polylinesNotifier.value = polylines;
+        }
       });
       if (!_navigationMode) {
         await _fitMapToPins(
@@ -2517,6 +3355,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       final meters = fallbackDistanceMeters();
       return _DirectionsRouteResult(
         points: _buildCurvedRoutePoints(start, end),
+        steps: const <_DirectionsStep>[],
         durationSeconds: fallbackDurationSeconds(meters),
         distanceMeters: meters > 0 ? meters : null,
       );
@@ -2525,6 +3364,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       'origin': '${start.latitude},${start.longitude}',
       'destination': '${end.latitude},${end.longitude}',
       'mode': 'driving',
+      'alternatives': 'true',
       'key': apiKey,
     });
     try {
@@ -2559,6 +3399,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
         final meters = fallbackDistanceMeters();
         return _DirectionsRouteResult(
           points: _buildCurvedRoutePoints(start, end),
+          steps: const <_DirectionsStep>[],
           durationSeconds: fallbackDurationSeconds(meters),
           distanceMeters: meters > 0 ? meters : null,
         );
@@ -2568,6 +3409,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
         final meters = fallbackDistanceMeters();
         return _DirectionsRouteResult(
           points: _buildCurvedRoutePoints(start, end),
+          steps: const <_DirectionsStep>[],
           durationSeconds: fallbackDurationSeconds(meters),
           distanceMeters: meters > 0 ? meters : null,
         );
@@ -2580,6 +3422,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
 
       int? durationSeconds;
       int? distanceMeters;
+      var steps = const <_DirectionsStep>[];
       final legs = firstRoute['legs'];
       if (legs is List && legs.isNotEmpty) {
         final firstLeg = legs.first;
@@ -2590,6 +3433,55 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
           final distance = firstLeg['distance'];
           final distValue = (distance is Map) ? distance['value'] : null;
           if (distValue is num) distanceMeters = distValue.toInt();
+
+          final rawSteps = firstLeg['steps'];
+          if (rawSteps is List && rawSteps.isNotEmpty) {
+            final parsed = <_DirectionsStep>[];
+            for (final step in rawSteps) {
+              if (step is! Map) continue;
+              final html = step['html_instructions']?.toString() ?? '';
+              final instruction = _stripHtmlInstructions(html);
+              final stepDistance = step['distance'];
+              final distanceText = (stepDistance is Map)
+                  ? (stepDistance['text']?.toString() ?? '').trim()
+                  : '';
+              final stepDuration = step['duration'];
+              final durationText = (stepDuration is Map)
+                  ? (stepDuration['text']?.toString() ?? '').trim()
+                  : '';
+              final maneuver = (step['maneuver']?.toString() ?? '').trim();
+              LatLng? startLocation;
+              final rawStart = step['start_location'];
+              if (rawStart is Map) {
+                final rawLat = rawStart['lat'];
+                final rawLng = rawStart['lng'];
+                if (rawLat is num && rawLng is num) {
+                  startLocation = LatLng(rawLat.toDouble(), rawLng.toDouble());
+                }
+              }
+              LatLng? endLocation;
+              final rawEnd = step['end_location'];
+              if (rawEnd is Map) {
+                final rawLat = rawEnd['lat'];
+                final rawLng = rawEnd['lng'];
+                if (rawLat is num && rawLng is num) {
+                  endLocation = LatLng(rawLat.toDouble(), rawLng.toDouble());
+                }
+              }
+              if (instruction.trim().isEmpty) continue;
+              parsed.add(
+                _DirectionsStep(
+                  instruction: instruction.trim(),
+                  distanceText: distanceText,
+                  durationText: durationText,
+                  maneuver: maneuver,
+                  startLocation: startLocation,
+                  endLocation: endLocation,
+                ),
+              );
+            }
+            steps = parsed;
+          }
         }
       }
       if (distanceMeters == null || distanceMeters <= 0) {
@@ -2601,19 +3493,43 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
         durationSeconds = fallbackDurationSeconds(meters);
       }
 
+      List<LatLng> decodePolyline(String encoded) {
+        final decodedPoints = PolylinePoints().decodePolyline(encoded.trim());
+        return decodedPoints
+            .map((point) => LatLng(point.latitude, point.longitude))
+            .toList(growable: false);
+      }
+
+      final alternativeRoutePoints = <List<LatLng>>[];
+      if (routes.length > 1) {
+        for (var i = 1; i < routes.length; i++) {
+          final route = routes[i];
+          if (route is! Map) continue;
+          final altOverview = route['overview_polyline'];
+          final altEncoded = (altOverview is Map)
+              ? altOverview['points']?.toString()
+              : null;
+          if (altEncoded == null || altEncoded.trim().isEmpty) continue;
+          final altPoints = decodePolyline(altEncoded);
+          if (altPoints.isNotEmpty) alternativeRoutePoints.add(altPoints);
+          if (alternativeRoutePoints.length >= 2) break;
+        }
+      }
+
       if (polyline == null || polyline.trim().isEmpty) {
         return _DirectionsRouteResult(
           points: _buildCurvedRoutePoints(start, end),
+          alternativeRoutePoints: alternativeRoutePoints,
+          steps: steps,
           durationSeconds: durationSeconds,
           distanceMeters: distanceMeters,
         );
       }
-      final decodedPoints = PolylinePoints().decodePolyline(polyline.trim());
-      final points = decodedPoints
-          .map((point) => LatLng(point.latitude, point.longitude))
-          .toList(growable: false);
+      final points = decodePolyline(polyline);
       return _DirectionsRouteResult(
         points: points,
+        alternativeRoutePoints: alternativeRoutePoints,
+        steps: steps,
         durationSeconds: durationSeconds,
         distanceMeters: distanceMeters,
       );
@@ -2621,10 +3537,24 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       final meters = fallbackDistanceMeters();
       return _DirectionsRouteResult(
         points: _buildCurvedRoutePoints(start, end),
+        steps: const <_DirectionsStep>[],
         durationSeconds: fallbackDurationSeconds(meters),
         distanceMeters: meters > 0 ? meters : null,
       );
     }
+  }
+
+  static String _stripHtmlInstructions(String html) {
+    var text = html
+        .replaceAll(RegExp(r'<[^>]*>'), ' ')
+        .replaceAll('&nbsp;', ' ')
+        .replaceAll('&amp;', '&')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&#39;', "'")
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (text.isEmpty) return '';
+    return text;
   }
 
   List<LatLng> _buildCurvedRoutePoints(LatLng start, LatLng end) {
@@ -2658,424 +3588,520 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
         _viewportHeight = constraints.maxHeight;
 
         return PopScope(
-      canPop: interceptBack ? false : Navigator.of(context).canPop(),
-      onPopInvokedWithResult: (didPop, result) {
-        if (didPop) return;
-        unawaited(_goToHistoryHome(caregiverView: caregiverView));
-      },
-      child: Scaffold(
-      backgroundColor: _pageBackground,
-      extendBodyBehindAppBar: true,
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        centerTitle: true,
-        automaticallyImplyLeading: false,
-        flexibleSpace: ClipRect(
-          child: BackdropFilter(
-            filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.86),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.08),
-                    blurRadius: 8,
-                    offset: const Offset(0, 4),
+          canPop: interceptBack ? false : Navigator.of(context).canPop(),
+          onPopInvokedWithResult: (didPop, result) {
+            if (didPop) return;
+            unawaited(_goToHistoryHome(caregiverView: caregiverView));
+          },
+          child: Scaffold(
+            backgroundColor: _pageBackground,
+            extendBodyBehindAppBar: true,
+            appBar: AppBar(
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              centerTitle: true,
+              automaticallyImplyLeading: false,
+              flexibleSpace: ClipRect(
+                child: BackdropFilter(
+                  filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.86),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.08),
+                          blurRadius: 8,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
                   ),
-                ],
+                ),
+              ),
+              leading: widget.showBackButton
+                  ? IconButton(
+                      onPressed: () => unawaited(
+                        _handleBackPressed(caregiverView: caregiverView),
+                      ),
+                      icon: const Icon(
+                        Icons.arrow_back_ios_new_rounded,
+                        color: _profileDarkText,
+                        size: 20,
+                      ),
+                    )
+                  : null,
+              title: Text(
+                (widget.appBarTitle ?? 'Track caregiver').trim().isEmpty
+                    ? 'Track caregiver'
+                    : (widget.appBarTitle ?? 'Track caregiver').trim(),
+                style: const TextStyle(
+                  color: _profileDarkText,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 15.5,
+                  letterSpacing: -0.15,
+                ),
               ),
             ),
-          ),
-        ),
-        leading: widget.showBackButton
-            ? IconButton(
-                onPressed: () => unawaited(
-                  _handleBackPressed(caregiverView: caregiverView),
-                ),
-                icon: const Icon(
-                  Icons.arrow_back_ios_new_rounded,
-                  color: _profileDarkText,
-                  size: 20,
-                ),
-              )
-            : null,
-        title: Text(
-          (widget.appBarTitle ?? 'Track caregiver').trim().isEmpty
-              ? 'Track caregiver'
-              : (widget.appBarTitle ?? 'Track caregiver').trim(),
-          style: const TextStyle(
-            color: _profileDarkText,
-            fontWeight: FontWeight.w800,
-            fontSize: 15.5,
-            letterSpacing: -0.15,
-          ),
-        ),
-      ),
-      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-        stream: _isSosMode
-            ? FirebaseFirestore.instance
-                .collection('sos')
-                .doc((widget.sosId ?? '').trim())
-                .snapshots()
-            : FirebaseFirestore.instance
-                .collection('bookings')
-                .doc(widget.bookingId)
-                .snapshots(),
-        builder: (context, snapshot) {
-          if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (!snapshot.data!.exists) {
-            return Center(
-              child: Text(_isSosMode ? 'SOS not found.' : 'Booking not found.'),
-            );
-          }
-
-          Map<String, dynamic> booking =
-              snapshot.data!.data() ?? const <String, dynamic>{};
-          if (_isSosMode) {
-            final sos = booking;
-            final linkedBookingId =
-                (normalizeString(sos['bookingId']) ?? '').trim();
-            if (linkedBookingId.isNotEmpty) {
-              if (widget.suppressSosLinkedBookingNavigation) {
-                return const Center(child: CircularProgressIndicator());
-              }
-              final fromCaregiverSosTab =
-                  !widget.showBackButton &&
-                  (widget.appBarTitle ?? '').trim() == 'Emergency Assistance' &&
-                  widget.showActionFrontSheet;
-              if (!_navigatedToLinkedBooking) {
-                _navigatedToLinkedBooking = true;
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (!mounted) return;
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => TrackCaregiverScreen(
-                        bookingId: linkedBookingId,
-                        caregiverName: widget.caregiverName,
-                        caregiverId: widget.caregiverId,
-                        personId: widget.personId,
-                        showStatusUpdateButton: widget.showStatusUpdateButton,
-                        showActionFrontSheet: widget.showActionFrontSheet,
-                        showBackButton: true,
-                        appBarTitle: widget.appBarTitle,
-                        exitToCaregiverJobsOnBack: fromCaregiverSosTab,
-                      ),
+            body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+              stream: _isSosMode
+                  ? FirebaseFirestore.instance
+                        .collection('sos')
+                        .doc((widget.sosId ?? '').trim())
+                        .snapshots()
+                  : FirebaseFirestore.instance
+                        .collection('bookings')
+                        .doc(widget.bookingId)
+                        .snapshots(),
+              builder: (context, snapshot) {
+                if (!snapshot.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (!snapshot.data!.exists) {
+                  return Center(
+                    child: Text(
+                      _isSosMode ? 'SOS not found.' : 'Booking not found.',
                     ),
                   );
-                });
-              }
-              return const Center(child: CircularProgressIndicator());
-            }
+                }
 
-            final userIdFromSos =
-                (normalizeString(sos['ownerUserId']) ??
-                        normalizeString(sos['userId']) ??
-                        '')
+                Map<String, dynamic> booking =
+                    snapshot.data!.data() ?? const <String, dynamic>{};
+                if (_isSosMode) {
+                  final sos = booking;
+                  final linkedBookingId =
+                      (normalizeString(sos['bookingId']) ?? '').trim();
+                  if (linkedBookingId.isNotEmpty) {
+                    if (widget.suppressSosLinkedBookingNavigation) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+                    final fromCaregiverSosTab =
+                        !widget.showBackButton &&
+                        (widget.appBarTitle ?? '').trim() ==
+                            'Emergency Assistance' &&
+                        widget.showActionFrontSheet;
+                    if (!_navigatedToLinkedBooking) {
+                      _navigatedToLinkedBooking = true;
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (!mounted) return;
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => TrackCaregiverScreen(
+                              bookingId: linkedBookingId,
+                              caregiverName: widget.caregiverName,
+                              caregiverId: widget.caregiverId,
+                              personId: widget.personId,
+                              showStatusUpdateButton:
+                                  widget.showStatusUpdateButton,
+                              showActionFrontSheet: widget.showActionFrontSheet,
+                              showBackButton: true,
+                              appBarTitle: widget.appBarTitle,
+                              exitToCaregiverJobsOnBack: fromCaregiverSosTab,
+                            ),
+                          ),
+                        );
+                      });
+                    }
+                    return const Center(child: CircularProgressIndicator());
+                  }
+
+                  final userIdFromSos =
+                      (normalizeString(sos['ownerUserId']) ??
+                              normalizeString(sos['userId']) ??
+                              '')
+                          .trim();
+                  final personNameFromSos =
+                      (normalizeString(sos['selectedPersonName']) ??
+                              normalizeString(sos['userName']) ??
+                              'Client')
+                          .trim();
+                  final addressFromSos =
+                      (normalizeString(sos['address']) ??
+                              normalizeString(sos['userAddress']) ??
+                              'Location not provided')
+                          .trim();
+                  final lat = sos['userLat'];
+                  final lng = sos['userLng'];
+                  booking = <String, dynamic>{
+                    'status': 'EMERGENCY_ALERT',
+                    'userId': userIdFromSos,
+                    'personName': personNameFromSos,
+                    'personAddress': addressFromSos,
+                    'service': 'Emergency alert',
+                    'serviceLabel': 'Emergency alert',
+                    'personLat': lat,
+                    'personLng': lng,
+                    'lat': lat,
+                    'lng': lng,
+                    'sosId': (widget.sosId ?? '').trim(),
+                  };
+                }
+
+                final caregiverId = _isSosMode
+                    ? (FirebaseAuth.instance.currentUser?.uid ?? '').trim()
+                    : (normalizeString(booking['caregiverId']) ??
+                              widget.caregiverId ??
+                              '')
+                          .trim();
+                if (caregiverId.isNotEmpty) {
+                  unawaited(_ensureCaregiverAvatarLoaded(caregiverId));
+                }
+                final userId = (normalizeString(booking['userId']) ?? '')
                     .trim();
-            final personNameFromSos =
-                (normalizeString(sos['selectedPersonName']) ??
-                        normalizeString(sos['userName']) ??
-                        'Client')
+                final personName =
+                    normalizeString(booking['personName']) ?? 'Your loved one';
+                final location =
+                    normalizeString(booking['personAddress']) ??
+                    normalizeString(booking['addressLabel']) ??
+                    'Location not provided';
+                final status = _normalizeStatus(
+                  normalizeString(booking['status']) ?? 'PENDING',
+                );
+                final previousStatus = _lastSeenStatusNormalized;
+                if (previousStatus != status) {
+                  _lastSeenStatusNormalized = status;
+                }
+                final sessionAction = _sessionActionForBooking(
+                  booking: booking,
+                  rawStatus: status,
+                );
+                final ongoingStatusMessage = widget.showActionFrontSheet
+                    ? ''
+                    : _clientOngoingStatusMessage(booking);
+                if (status == 'COMPLETED' &&
+                    !_completionPopupShown &&
+                    (previousStatus == null || previousStatus != 'COMPLETED')) {
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (!mounted) return;
+                    _showCompletionPopupAndRedirect(
+                      caregiverView: caregiverView,
+                    );
+                  });
+                }
+                if (widget.showActionFrontSheet && caregiverId.isNotEmpty) {
+                  _syncLiveLocationForStatus(
+                    status: status,
+                    caregiverId: caregiverId,
+                  );
+                }
+
+                final destinationFromBooking = _latLngFromBookingAddress(
+                  booking,
+                );
+                final String? personPhotoUrl =
+                    normalizeString(booking['personPhotoUrl']) ??
+                    normalizeString(booking['personPhoto']) ??
+                    normalizeString(booking['photoUrl']);
+                _liveMapCaregiverId = caregiverId;
+                _liveMapCaregiverLabel = widget.caregiverName;
+                _liveMapCaregiverPhotoUrl =
+                    normalizeString(booking['caregiverPhotoUrl']) ??
+                    normalizeString(booking['caregiverPhoto']) ??
+                    normalizeString(booking['caregiverAvatar']);
+                _liveMapDestinationPos =
+                    destinationFromBooking ?? _liveMapDestinationPos;
+                _liveMapDestinationLabel = personName;
+                _liveMapDestinationPhotoUrl = personPhotoUrl;
+                final String personId =
+                    normalizeString(booking['personId']) ??
+                    widget.personId ??
+                    'person';
+                final phone =
+                    normalizeString(booking['personPhone']) ??
+                    normalizeString(booking['phone']) ??
+                    '';
+                final caregiverStream = caregiverId.isEmpty
+                    ? const Stream<
+                        DocumentSnapshot<Map<String, dynamic>>
+                      >.empty()
+                    : FirebaseFirestore.instance
+                          .collection('caregivers')
+                          .doc(caregiverId)
+                          .snapshots();
+                final addressId = (normalizeString(booking['addressId']) ?? '')
                     .trim();
-            final addressFromSos =
-                (normalizeString(sos['address']) ??
-                        normalizeString(sos['userAddress']) ??
-                        'Location not provided')
-                    .trim();
-            final lat = sos['userLat'];
-            final lng = sos['userLng'];
-            booking = <String, dynamic>{
-              'status': 'EMERGENCY_ALERT',
-              'userId': userIdFromSos,
-              'personName': personNameFromSos,
-              'personAddress': addressFromSos,
-              'service': 'Emergency alert',
-              'serviceLabel': 'Emergency alert',
-              'personLat': lat,
-              'personLng': lng,
-              'lat': lat,
-              'lng': lng,
-              'sosId': (widget.sosId ?? '').trim(),
-            };
-          }
+                if (_currentAddressId != addressId) {
+                  _currentAddressId = addressId;
+                }
+                if (!_didAttemptCacheRestore) {
+                  _didAttemptCacheRestore = true;
+                  _restoreMapCache(
+                    expectedDestinationPos: destinationFromBooking,
+                  );
+                }
+                final userStream = userId.isEmpty
+                    ? const Stream<
+                        DocumentSnapshot<Map<String, dynamic>>
+                      >.empty()
+                    : FirebaseFirestore.instance
+                          .collection('users')
+                          .doc(userId)
+                          .snapshots();
 
-          final caregiverId = _isSosMode
-              ? (FirebaseAuth.instance.currentUser?.uid ?? '').trim()
-              : (normalizeString(booking['caregiverId']) ??
-                      widget.caregiverId ??
-                      '')
-                  .trim();
-          if (caregiverId.isNotEmpty) {
-            unawaited(_ensureCaregiverAvatarLoaded(caregiverId));
-          }
-          final userId = (normalizeString(booking['userId']) ?? '').trim();
-          final personName =
-              normalizeString(booking['personName']) ?? 'Your loved one';
-          final location =
-              normalizeString(booking['personAddress']) ??
-              normalizeString(booking['addressLabel']) ??
-              'Location not provided';
-          final status =
-              _normalizeStatus(normalizeString(booking['status']) ?? 'PENDING');
-          final previousStatus = _lastSeenStatusNormalized;
-          if (previousStatus != status) {
-            _lastSeenStatusNormalized = status;
-          }
-          final sessionAction = _sessionActionForBooking(
-            booking: booking,
-            rawStatus: status,
-          );
-          final ongoingStatusMessage = widget.showActionFrontSheet
-              ? ''
-              : _clientOngoingStatusMessage(booking);
-          if (status == 'COMPLETED' &&
-              !_completionPopupShown &&
-              (previousStatus == null || previousStatus != 'COMPLETED')) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (!mounted) return;
-              _showCompletionPopupAndRedirect(caregiverView: caregiverView);
-            });
-          }
-          if (widget.showActionFrontSheet && caregiverId.isNotEmpty) {
-            _syncLiveLocationForStatus(status: status, caregiverId: caregiverId);
-          }
+                final double panelHeight = _currentSheetHeight(context);
+                final mediaPadding = MediaQuery.of(context).padding;
+                final mapTopPadding = mediaPadding.top + kToolbarHeight + 8;
+                // Keep Google attribution/logo above the *min* sheet position so it
+                // matches the appearance when this screen is pushed as a route.
+                final viewportHeight =
+                    _viewportHeight ?? MediaQuery.of(context).size.height;
+                final minPanelHeight = _minSheetSize * viewportHeight;
+                final mapBottomPadding =
+                    (minPanelHeight + mediaPadding.bottom + 1).clamp(
+                      0.0,
+                      double.infinity,
+                    );
+                final double frontBottom = _hideFrontPanel
+                    ? -130
+                    : (mediaPadding.bottom + (_useSosSheetStyle ? 2.0 : 10.0))
+                          .clamp(4.0, double.infinity);
+                const double frontSheetInset = 136;
+                const BorderRadius panelBorderRadius = BorderRadius.vertical(
+                  top: Radius.circular(18),
+                );
 
-          final destinationFromBooking = _latLngFromBooking(booking);
-          final String? personPhotoUrl =
-              normalizeString(booking['personPhotoUrl']) ??
-              normalizeString(booking['personPhoto']) ??
-              normalizeString(booking['photoUrl']);
-          _liveMapCaregiverId = caregiverId;
-          _liveMapCaregiverLabel = widget.caregiverName;
-          _liveMapCaregiverPhotoUrl =
-              normalizeString(booking['caregiverPhotoUrl']) ??
-              normalizeString(booking['caregiverPhoto']) ??
-              normalizeString(booking['caregiverAvatar']);
-          _liveMapDestinationPos = destinationFromBooking ?? _liveMapDestinationPos;
-          _liveMapDestinationLabel = personName;
-          _liveMapDestinationPhotoUrl = personPhotoUrl;
-          final String personId =
-              normalizeString(booking['personId']) ?? widget.personId ?? 'person';
-           final phone =
-               normalizeString(booking['personPhone']) ?? normalizeString(booking['phone']) ?? '';
-           final caregiverStream = caregiverId.isEmpty
-               ? const Stream<DocumentSnapshot<Map<String, dynamic>>>.empty()
-               : FirebaseFirestore.instance
-                     .collection('caregivers')
-                    .doc(caregiverId)
-                    .snapshots();
-          final addressId = (normalizeString(booking['addressId']) ?? '').trim();
-          final userStream = userId.isEmpty
-              ? const Stream<DocumentSnapshot<Map<String, dynamic>>>.empty()
-              : FirebaseFirestore.instance
-                    .collection('users')
-                    .doc(userId)
-                    .snapshots();
-
-          final double panelHeight = _currentSheetHeight(context);
-          final mediaPadding = MediaQuery.of(context).padding;
-          final mapTopPadding = mediaPadding.top + kToolbarHeight + 8;
-          // Keep Google attribution/logo above the *min* sheet position so it
-          // matches the appearance when this screen is pushed as a route.
-          final viewportHeight =
-              _viewportHeight ?? MediaQuery.of(context).size.height;
-          final minPanelHeight = _minSheetSize * viewportHeight;
-          final mapBottomPadding =
-              (minPanelHeight + mediaPadding.bottom + 1).clamp(0.0, double.infinity);
-          final double frontBottom = _hideFrontPanel
-              ? -130
-              : (mediaPadding.bottom + (_useSosSheetStyle ? 2.0 : 10.0))
-                  .clamp(4.0, double.infinity);
-          const double frontSheetInset = 136;
-          const BorderRadius panelBorderRadius = BorderRadius.vertical(
-            top: Radius.circular(18),
-          );
-
-          return Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                border: Border.all(
-                  color: Colors.black12.withValues(alpha: 0.06),
-                ),
-                borderRadius: BorderRadius.zero,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.08),
-                    blurRadius: 16,
-                    offset: const Offset(0, 8),
+                return Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    border: Border.all(
+                      color: Colors.black12.withValues(alpha: 0.06),
+                    ),
+                    borderRadius: BorderRadius.zero,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.08),
+                        blurRadius: 16,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
                   ),
-                ],
-              ),
-              clipBehavior: Clip.hardEdge,
-              child: Stack(
-                children: [
-                  Positioned(
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    child: ValueListenableBuilder<Set<Marker>>(
-                      valueListenable: _markersNotifier,
-                      builder: (context, markerSet, _) {
-                        return ValueListenableBuilder<Set<Polyline>>(
-                          valueListenable: _polylinesNotifier,
-                          builder: (context, polylineSet, __) {
-                            final markers = markerSet.isNotEmpty
-                                ? markerSet
-                                : {
-                                    Marker(
-                                      markerId: const MarkerId('selected'),
-                                      position:
-                                          destinationFromBooking ??
-                                          _latestDestinationPos ??
-                                          _latestCaregiverPos ??
-                                          const LatLng(3.1390, 101.6869),
-                                      icon:
-                                          BitmapDescriptor.defaultMarkerWithHue(
-                                        BitmapDescriptor.hueAzure,
-                                      ),
-                                    ),
-                                  };
-                            return GoogleMap(
-                              initialCameraPosition: CameraPosition(
-                                target:
-                                    destinationFromBooking ??
-                                    const LatLng(3.1390, 101.6869),
-                                zoom: 16,
-                              ),
-                              style: boldMapStyle,
-                              myLocationEnabled: false,
-                              mapToolbarEnabled: false,
-                              compassEnabled: false,
-                              zoomControlsEnabled: false,
-                              myLocationButtonEnabled: false,
-                              padding: EdgeInsets.fromLTRB(
-                                0,
-                                mapTopPadding,
-                                0,
-                                mapBottomPadding,
-                              ),
-                              markers: markers,
-                              polylines: polylineSet,
-                              onMapCreated: (controller) {
-                                _mapController = controller;
-                                final caregiverPos = _latestCaregiverPos;
-                                final destinationPos = _latestDestinationPos;
-                                if (_pendingCameraUpdate) {
-                                  _scheduleCameraFit(
-                                    caregiverPos: caregiverPos,
-                                    destinationPos: destinationPos,
-                                  );
-                                } else {
-                                  controller.moveCamera(
-                                    CameraUpdate.newLatLng(
-                                      destinationFromBooking ??
-                                          caregiverPos ??
-                                          const LatLng(3.1390, 101.6869),
-                                    ),
-                                  );
-                                }
+                  clipBehavior: Clip.hardEdge,
+                  child: Stack(
+                    children: [
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        child: ValueListenableBuilder<Set<Marker>>(
+                          valueListenable: _markersNotifier,
+                          builder: (context, markerSet, _) {
+                            return ValueListenableBuilder<Set<Polyline>>(
+                              valueListenable: _polylinesNotifier,
+                              builder: (context, polylineSet, __) {
+                                final markers = markerSet.isNotEmpty
+                                    ? markerSet
+                                    : {
+                                        Marker(
+                                          markerId: const MarkerId('selected'),
+                                          position:
+                                              _latestDestinationPos ??
+                                              _liveMapDestinationPos ??
+                                              _latestCaregiverPos ??
+                                              const LatLng(3.1390, 101.6869),
+                                          icon:
+                                              BitmapDescriptor.defaultMarkerWithHue(
+                                                BitmapDescriptor.hueAzure,
+                                              ),
+                                        ),
+                                      };
+                                return GoogleMap(
+                                  initialCameraPosition: CameraPosition(
+                                    target:
+                                        destinationFromBooking ??
+                                        _latestDestinationPos ??
+                                        _liveMapDestinationPos ??
+                                        const LatLng(3.1390, 101.6869),
+                                    zoom: 16,
+                                  ),
+                                  style: boldMapStyle,
+                                  myLocationEnabled: false,
+                                  mapToolbarEnabled: false,
+                                  compassEnabled: false,
+                                  zoomControlsEnabled: false,
+                                  myLocationButtonEnabled: false,
+                                  padding: EdgeInsets.fromLTRB(
+                                    0,
+                                    mapTopPadding,
+                                    0,
+                                    mapBottomPadding,
+                                  ),
+                                  markers: markers,
+                                  polylines: polylineSet,
+                                  onCameraMoveStarted: () {
+                                    if (_programmaticCameraMove) return;
+                                    _userCameraLocked = true;
+                                  },
+                                  onMapCreated: (controller) {
+                                    _mapController = controller;
+                                    final caregiverPos = _latestCaregiverPos;
+                                    final destinationPos =
+                                        _latestDestinationPos;
+                                    if (_pendingCameraUpdate) {
+                                      _scheduleCameraFit(
+                                        caregiverPos: caregiverPos,
+                                        destinationPos: destinationPos,
+                                      );
+                                    } else {
+                                      if (!_userCameraLocked) {
+                                        _programmaticCameraMove = true;
+                                        controller.moveCamera(
+                                          CameraUpdate.newLatLng(
+                                            destinationFromBooking ??
+                                                _latestDestinationPos ??
+                                                _liveMapDestinationPos ??
+                                                caregiverPos ??
+                                                const LatLng(3.1390, 101.6869),
+                                          ),
+                                        );
+                                        _programmaticCameraMove = false;
+                                      }
+                                    }
+                                  },
+                                );
                               },
                             );
                           },
-                        );
-                      },
-                    ),
-                  ),
-                  IgnorePointer(
-                    ignoring: true,
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 180),
-                      color: Colors.black.withValues(alpha: _backdropOpacity),
-                    ),
-                  ),
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    height: panelHeight,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: panelBorderRadius,
-                        border: Border.all(
-                          color: Colors.black12.withValues(alpha: 0.08),
-                          width: 1,
                         ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.08),
-                            blurRadius: 14,
-                            offset: const Offset(0, -6),
-                          ),
-                        ],
                       ),
-                      child: ClipRRect(
-                        borderRadius: panelBorderRadius,
-                        child: ColoredBox(
-                          color: Colors.white,
-                          child: Column(
-                            mainAxisSize: MainAxisSize.max,
-                            children: [
-                              GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                dragStartBehavior: DragStartBehavior.down,
-                                onVerticalDragStart: _onHandleDragStart,
-                                onVerticalDragUpdate: _onHandleDragUpdate,
-                                onVerticalDragEnd: _onHandleDragEnd,
-                                child: SizedBox(
-                                  height: 44,
-                                  width: double.infinity,
-                                  child: Center(
-                                    child: Container(
-                                      width: 36,
-                                      height: 4,
-                                      decoration: BoxDecoration(
-                                        color: Colors.black.withValues(
-                                          alpha: 0.16,
+                      IgnorePointer(
+                        ignoring: true,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          color: Colors.black.withValues(
+                            alpha: _backdropOpacity,
+                          ),
+                        ),
+                      ),
+                      if (caregiverView && _latestRouteSteps.isNotEmpty)
+                        Positioned(
+                          top: mediaPadding.top + kToolbarHeight - 50,
+                          left: 16,
+                          right: 16,
+                          child: AnimatedOpacity(
+                            opacity: _latestRouteSteps.isNotEmpty ? 1 : 0,
+                            duration: const Duration(milliseconds: 160),
+                            child: _directionsBanner(_latestRouteSteps),
+                          ),
+                        ),
+                      Positioned(
+                        right: 16,
+                        bottom: panelHeight + 14,
+                        child: _circleIconButton(
+                          icon: Icons.my_location_rounded,
+                          background: _accentGreen.withValues(alpha: 0.12),
+                          iconColor: _accentGreen,
+                          onTap: () {
+                            _userCameraLocked = false;
+                            final caregiverPos = _latestCaregiverPos;
+                            final destinationPos = _latestDestinationPos;
+                            if (_navigationMode && caregiverPos != null) {
+                              _scheduleNavigationCamera(
+                                caregiverPos: caregiverPos,
+                                destinationPos: destinationPos,
+                              );
+                            } else {
+                              _scheduleCameraFit(
+                                caregiverPos: caregiverPos,
+                                destinationPos: destinationPos,
+                              );
+                            }
+                          },
+                        ),
+                      ),
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        height: panelHeight,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: panelBorderRadius,
+                            border: Border.all(
+                              color: Colors.black12.withValues(alpha: 0.08),
+                              width: 1,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.08),
+                                blurRadius: 14,
+                                offset: const Offset(0, -6),
+                              ),
+                            ],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: panelBorderRadius,
+                            child: ColoredBox(
+                              color: Colors.white,
+                              child: Column(
+                                mainAxisSize: MainAxisSize.max,
+                                children: [
+                                  GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    dragStartBehavior: DragStartBehavior.down,
+                                    onVerticalDragStart: _onHandleDragStart,
+                                    onVerticalDragUpdate: _onHandleDragUpdate,
+                                    onVerticalDragEnd: _onHandleDragEnd,
+                                    child: SizedBox(
+                                      height: 44,
+                                      width: double.infinity,
+                                      child: Center(
+                                        child: Container(
+                                          width: 36,
+                                          height: 4,
+                                          decoration: BoxDecoration(
+                                            color: Colors.black.withValues(
+                                              alpha: 0.16,
+                                            ),
+                                            borderRadius: BorderRadius.circular(
+                                              24,
+                                            ),
+                                          ),
                                         ),
-                                        borderRadius:
-                                            BorderRadius.circular(24),
                                       ),
                                     ),
                                   ),
-                                ),
-                              ),
-                              const Divider(height: 1),
-                              Expanded(
-                                child: ScrollConfiguration(
-                                  behavior: const _NoOverscrollScrollBehavior(),
-                                  child: ListView(
-                                    controller: _listController,
-                                    dragStartBehavior: DragStartBehavior.down,
-                                    physics: const ClampingScrollPhysics(
-                                      parent: AlwaysScrollableScrollPhysics(),
-                                    ),
-                                    padding: EdgeInsets.fromLTRB(
-                                      16,
-                                      12,
-                                      16,
-                                      MediaQuery.of(context).padding.bottom +
-                                          18 +
-                                          (widget.showActionFrontSheet &&
-                                                  !_hideFrontPanel
-                                              ? frontSheetInset
-                                              : 0),
-                                    ),
-                                    children: [
-                                      if (widget.showActionFrontSheet)
-                                        StreamBuilder<
-                                            DocumentSnapshot<Map<String, dynamic>>>(
-                                          stream: userStream,
-                                          builder: (context, userSnapshot) {
-                                            final caregiverPos = _latestCaregiverPos;
-                                            final caregiverNameLive =
-                                                widget.caregiverName;
-                                            final caregiverPhotoUrl =
-                                                normalizeString(
+                                  const Divider(height: 1),
+                                  Expanded(
+                                    child: ScrollConfiguration(
+                                      behavior:
+                                          const _NoOverscrollScrollBehavior(),
+                                      child: ListView(
+                                        controller: _listController,
+                                        dragStartBehavior:
+                                            DragStartBehavior.down,
+                                        physics: const ClampingScrollPhysics(
+                                          parent:
+                                              AlwaysScrollableScrollPhysics(),
+                                        ),
+                                        padding: EdgeInsets.fromLTRB(
+                                          16,
+                                          12,
+                                          16,
+                                          MediaQuery.of(
+                                                context,
+                                              ).padding.bottom +
+                                              18 +
+                                              (widget.showActionFrontSheet &&
+                                                      !_hideFrontPanel
+                                                  ? frontSheetInset
+                                                  : 0),
+                                        ),
+                                        children: [
+                                          if (widget.showActionFrontSheet)
+                                            StreamBuilder<
+                                              DocumentSnapshot<
+                                                Map<String, dynamic>
+                                              >
+                                            >(
+                                              stream: userStream,
+                                              builder: (context, userSnapshot) {
+                                                final caregiverPos =
+                                                    _latestCaregiverPos;
+                                                final caregiverNameLive =
+                                                    widget.caregiverName;
+                                                final caregiverPhotoUrl =
+                                                    normalizeString(
                                                       booking['caregiverPhotoUrl'],
                                                     ) ??
                                                     normalizeString(
@@ -3088,25 +4114,27 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                                       booking['caregiverPhoto'],
                                                     );
 
-                                            final userData =
-                                                userSnapshot.data?.data();
-                                            final selectedAddressEntry =
-                                                _pickAddressFromUserDoc(
-                                              userData: userData,
-                                              addressId: addressId,
-                                              personAddress: location,
-                                            );
-                                            final destinationPos =
-                                                destinationFromBooking ??
+                                                final userData = userSnapshot
+                                                    .data
+                                                    ?.data();
+                                                final selectedAddressEntry =
+                                                    _pickAddressFromUserDoc(
+                                                      userData: userData,
+                                                      addressId: addressId,
+                                                      personAddress: location,
+                                                    );
+                                                final destinationPos =
                                                     _latLngFromDoc(
                                                       selectedAddressEntry,
-                                                    );
-                                            _schedulePlaceNameUpdate(
-                                              caregiverPos: caregiverPos,
-                                              destinationPos: destinationPos,
-                                            );
-                                            final destinationPhotoUrl =
-                                                normalizeString(
+                                                    ) ??
+                                                    destinationFromBooking;
+                                                _schedulePlaceNameUpdate(
+                                                  caregiverPos: caregiverPos,
+                                                  destinationPos:
+                                                      destinationPos,
+                                                );
+                                                final destinationPhotoUrl =
+                                                    normalizeString(
                                                       booking['personPhotoUrl'],
                                                     ) ??
                                                     normalizeString(
@@ -3116,28 +4144,63 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                                       selectedAddressEntry?['photoUrl'],
                                                     ) ??
                                                     personPhotoUrl;
-                                            _liveMapCaregiverId = caregiverId;
-                                            _liveMapCaregiverLabel =
-                                                caregiverNameLive;
-                                            _liveMapCaregiverPhotoUrl =
-                                                caregiverPhotoUrl;
-                                            _liveMapDestinationPos = destinationPos;
-                                            _liveMapDestinationLabel = personName;
-                                            _liveMapDestinationPhotoUrl =
-                                                destinationPhotoUrl;
-                                            _scheduleMapUpdate(
-                                              caregiverPos: caregiverPos,
-                                              destinationPos: destinationPos,
-                                              caregiverId: caregiverId,
-                                              caregiverLabel: caregiverNameLive,
-                                              caregiverPhotoUrl: caregiverPhotoUrl,
-                                              destinationLabel: personName,
-                                              destinationPhotoUrl:
-                                                  destinationPhotoUrl,
-                                            );
+                                                final selectedPersonName =
+                                                    normalizeString(
+                                                      selectedAddressEntry?['name'],
+                                                    ) ??
+                                                    normalizeString(
+                                                      selectedAddressEntry?['personName'],
+                                                    ) ??
+                                                    normalizeString(
+                                                      selectedAddressEntry?['label'],
+                                                    ) ??
+                                                    personName;
+                                                final selectedPersonAddress =
+                                                    normalizeString(
+                                                      selectedAddressEntry?['personAddress'],
+                                                    ) ??
+                                                    normalizeString(
+                                                      selectedAddressEntry?['address'],
+                                                    ) ??
+                                                    normalizeString(
+                                                      selectedAddressEntry?['addressText'],
+                                                    ) ??
+                                                    normalizeString(
+                                                      selectedAddressEntry?['fullAddress'],
+                                                    ) ??
+                                                    normalizeString(
+                                                      selectedAddressEntry?['addressLabel'],
+                                                    ) ??
+                                                    location;
+                                                _liveMapCaregiverId =
+                                                    caregiverId;
+                                                _liveMapCaregiverLabel =
+                                                    caregiverNameLive;
+                                                _liveMapCaregiverPhotoUrl =
+                                                    caregiverPhotoUrl;
+                                                _liveMapDestinationPos =
+                                                    destinationPos;
+                                                _liveMapDestinationLabel =
+                                                    selectedPersonName;
+                                                _liveMapDestinationPhotoUrl =
+                                                    destinationPhotoUrl;
+                                                _scheduleMapUpdate(
+                                                  caregiverPos: caregiverPos,
+                                                  destinationPos:
+                                                      destinationPos,
+                                                  caregiverId: caregiverId,
+                                                  caregiverLabel:
+                                                      caregiverNameLive,
+                                                  caregiverPhotoUrl:
+                                                      caregiverPhotoUrl,
+                                                  destinationLabel:
+                                                      selectedPersonName,
+                                                  destinationPhotoUrl:
+                                                      destinationPhotoUrl,
+                                                );
 
-                                            final selectedPersonPhone =
-                                                normalizeString(
+                                                final selectedPersonPhone =
+                                                    normalizeString(
                                                       selectedAddressEntry?['phone'],
                                                     ) ??
                                                     normalizeString(
@@ -3155,371 +4218,690 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                                     normalizeString(
                                                       selectedAddressEntry?['tel'],
                                                     );
-                                            final effectivePersonPhone =
-                                                (selectedPersonPhone
+                                                final effectivePersonPhone =
+                                                    (selectedPersonPhone
                                                             ?.trim()
                                                             .isNotEmpty ==
                                                         true)
                                                     ? selectedPersonPhone
                                                     : phone;
 
-                                            return _trackingInfoSheet(
-                                              caregiverView:
-                                                  widget.showActionFrontSheet,
-                                              userId: userId,
-                                              caregiverId: caregiverId,
-                                              personId: personId,
-                                              caregiverName: caregiverNameLive,
-                                              caregiverPhotoUrl:
-                                                  caregiverPhotoUrl,
-                                              personName: personName,
-                                              personPhotoUrl: destinationPhotoUrl,
-                                              caregiverPhone: null,
-                                              personPhone: effectivePersonPhone,
-                                              ongoingStatusMessage:
-                                                  ongoingStatusMessage,
-                                              sessionStage:
-                                                  sessionAction.currentStage,
-                                              fallbackDestinationAddress:
-                                                  location,
-                                              fallbackCaregiverAddress: '',
-                                            );
-                                          },
-                                        ),
-                                      if (!widget.showActionFrontSheet)
-                                        StreamBuilder<
-                                  DocumentSnapshot<Map<String, dynamic>>
-                                >(
-                                  stream: caregiverStream,
-                                  builder: (context, caregiverSnapshot) {
-                                    final caregiverData = caregiverSnapshot.data
-                                        ?.data();
-                                    final caregiverPos = _latLngFromDoc(
-                                      caregiverData,
-                                    );
-                                    final caregiverNameLive =
-                                        normalizeString(
-                                          caregiverData?['name'],
-                                        ) ??
-                                        widget.caregiverName;
-                                    final caregiverPhotoUrl =
-                                        normalizeString(
-                                          caregiverData?['photoUrl'],
-                                        ) ??
-                                        normalizeString(
-                                          caregiverData?['avatarUrl'],
-                                        ) ??
-                                        normalizeString(
-                                          booking['caregiverPhoto'],
-                                        );
-                                    return StreamBuilder<
-                                      DocumentSnapshot<Map<String, dynamic>>
-                                    >(
-                                      stream: userStream,
-                                      builder: (context, userSnapshot) {
-                                        final userData = userSnapshot.data?.data();
-                                        final selectedAddressEntry =
-                                            _pickAddressFromUserDoc(
-                                          userData: userData,
-                                          addressId: addressId,
-                                          personAddress: location,
-                                        );
-                                        final destinationPos =
-                                            destinationFromBooking ??
-                                            _latLngFromDoc(selectedAddressEntry);
-                                        _schedulePlaceNameUpdate(
-                                          caregiverPos: caregiverPos,
-                                          destinationPos: destinationPos,
-                                        );
-                                        final destinationPhotoUrl =
-                                            normalizeString(
-                                              booking['personPhotoUrl'],
-                                            ) ??
-                                            normalizeString(
-                                              booking['personPhoto'],
-                                            ) ??
-                                            normalizeString(
-                                              selectedAddressEntry?['photoUrl'],
-                                            ) ??
-                                            personPhotoUrl;
-                                        _liveMapCaregiverId = caregiverId;
-                                        _liveMapCaregiverLabel = caregiverNameLive;
-                                        _liveMapCaregiverPhotoUrl = caregiverPhotoUrl;
-                                        _liveMapDestinationPos = destinationPos;
-                                        _liveMapDestinationLabel = personName;
-                                        _liveMapDestinationPhotoUrl =
-                                            destinationPhotoUrl;
-                                        _scheduleMapUpdate(
-                                          caregiverPos: caregiverPos,
-                                          destinationPos: destinationPos,
-                                          caregiverId: caregiverId,
-                                          caregiverLabel: caregiverNameLive,
-                                          caregiverPhotoUrl: caregiverPhotoUrl,
-                                          destinationLabel: personName,
-                                          destinationPhotoUrl:
-                                              destinationPhotoUrl,
-                                        );
-                                       final caregiverPhone =
-                                           normalizeString(caregiverData?['phone']) ??
-                                               normalizeString(
-                                                 caregiverData?['phoneNumber'],
-                                               ) ??
-                                               normalizeString(caregiverData?['mobile']) ??
-                                               normalizeString(
-                                                 caregiverData?['mobileNumber'],
-                                               ) ??
-                                               normalizeString(caregiverData?['contact']) ??
-                                               normalizeString(caregiverData?['tel']) ??
-                                               normalizeString(caregiverData?['phoneNo']) ??
-                                               normalizeString(booking['caregiverPhone']) ??
-                                               normalizeString(
-                                                 booking['caregiverContact'],
-                                               ) ??
-                                               normalizeString(
-                                                 booking['caregiverMobile'],
-                                               );
-                                       final selectedPersonPhone =
-                                           normalizeString(selectedAddressEntry?['phone']) ??
-                                               normalizeString(
-                                                 selectedAddressEntry?['phoneNumber'],
-                                               ) ??
-                                               normalizeString(
-                                                 selectedAddressEntry?['mobile'],
-                                               ) ??
-                                               normalizeString(
-                                                 selectedAddressEntry?['mobileNumber'],
-                                               ) ??
-                                               normalizeString(
-                                                 selectedAddressEntry?['contact'],
-                                               ) ??
-                                               normalizeString(
-                                                 selectedAddressEntry?['tel'],
-                                               );
-                                       final effectivePersonPhone =
-                                           (selectedPersonPhone?.trim().isNotEmpty ==
-                                                   true)
-                                               ? selectedPersonPhone
-                                               : phone;
-                                           return _trackingInfoSheet(
-                                             caregiverView: widget.showActionFrontSheet,
-                                             userId: userId,
-                                             caregiverId: caregiverId,
-                                            personId: personId,
-                                            caregiverName: caregiverNameLive,
-                                            caregiverPhotoUrl: caregiverPhotoUrl,
-                                            personName: personName,
-                                             personPhotoUrl: destinationPhotoUrl,
-                                             caregiverPhone: caregiverPhone,
-                                            personPhone: effectivePersonPhone,
-                                             ongoingStatusMessage: ongoingStatusMessage,
-                                             sessionStage: sessionAction.currentStage,
-                                             fallbackDestinationAddress: location,
-                                             fallbackCaregiverAddress:
-                                                 normalizeString(
-                                                   caregiverData?['address'],
-                                               ) ??
-                                              normalizeString(
-                                                caregiverData?['defaultAddress'],
-                                              ) ??
-                                              '',
-                                        );
-                                      },
-                                    );
-                                  },
-                                ),
+                                                return _trackingInfoSheet(
+                                                  caregiverView: widget
+                                                      .showActionFrontSheet,
+                                                  bookingId: widget.bookingId,
+                                                  userId: userId,
+                                                  caregiverId: caregiverId,
+                                                  personId: personId,
+                                                  caregiverName:
+                                                      caregiverNameLive,
+                                                  caregiverPhotoUrl:
+                                                      caregiverPhotoUrl,
+                                                  personName:
+                                                      selectedPersonName,
+                                                  personPhotoUrl:
+                                                      destinationPhotoUrl,
+                                                  caregiverPhone: null,
+                                                  personPhone:
+                                                      effectivePersonPhone,
+                                                  ongoingStatusMessage:
+                                                      ongoingStatusMessage,
+                                                  sessionStage: sessionAction
+                                                      .currentStage,
+                                                  fallbackDestinationAddress:
+                                                      selectedPersonAddress,
+                                                  fallbackCaregiverAddress: '',
+                                                  stageSnapshots:
+                                                      _extractStageSnapshots(
+                                                    booking['stageSnapshots'],
+                                                  ),
+                                                );
+                                              },
+                                            ),
+                                          if (!widget.showActionFrontSheet)
+                                            StreamBuilder<
+                                              DocumentSnapshot<
+                                                Map<String, dynamic>
+                                              >
+                                            >(
+                                              stream: caregiverStream,
+                                              builder: (context, caregiverSnapshot) {
+                                                final caregiverData =
+                                                    caregiverSnapshot.data
+                                                        ?.data();
+                                                final caregiverPos =
+                                                    _latLngFromDoc(
+                                                      caregiverData,
+                                                    );
+                                                final caregiverNameLive =
+                                                    normalizeString(
+                                                      caregiverData?['name'],
+                                                    ) ??
+                                                    widget.caregiverName;
+                                                final caregiverPhotoUrl =
+                                                    normalizeString(
+                                                      caregiverData?['photoUrl'],
+                                                    ) ??
+                                                    normalizeString(
+                                                      caregiverData?['avatarUrl'],
+                                                    ) ??
+                                                    normalizeString(
+                                                      booking['caregiverPhoto'],
+                                                    );
+                                                return StreamBuilder<
+                                                  DocumentSnapshot<
+                                                    Map<String, dynamic>
+                                                  >
+                                                >(
+                                                  stream: userStream,
+                                                  builder: (context, userSnapshot) {
+                                                    final userData =
+                                                        userSnapshot.data
+                                                            ?.data();
+                                                    final selectedAddressEntry =
+                                                        _pickAddressFromUserDoc(
+                                                          userData: userData,
+                                                          addressId: addressId,
+                                                          personAddress:
+                                                              location,
+                                                        );
+                                                    final destinationPos =
+                                                        _latLngFromDoc(
+                                                          selectedAddressEntry,
+                                                        ) ??
+                                                        destinationFromBooking;
+                                                    _schedulePlaceNameUpdate(
+                                                      caregiverPos:
+                                                          caregiverPos,
+                                                      destinationPos:
+                                                          destinationPos,
+                                                    );
+                                                    final destinationPhotoUrl =
+                                                        normalizeString(
+                                                          booking['personPhotoUrl'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          booking['personPhoto'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          selectedAddressEntry?['photoUrl'],
+                                                        ) ??
+                                                        personPhotoUrl;
+                                                    final selectedPersonName =
+                                                        normalizeString(
+                                                          selectedAddressEntry?['name'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          selectedAddressEntry?['personName'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          selectedAddressEntry?['label'],
+                                                        ) ??
+                                                        personName;
+                                                    final selectedPersonAddress =
+                                                        normalizeString(
+                                                          selectedAddressEntry?['personAddress'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          selectedAddressEntry?['address'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          selectedAddressEntry?['addressText'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          selectedAddressEntry?['fullAddress'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          selectedAddressEntry?['addressLabel'],
+                                                        ) ??
+                                                        location;
+                                                    _liveMapCaregiverId =
+                                                        caregiverId;
+                                                    _liveMapCaregiverLabel =
+                                                        caregiverNameLive;
+                                                    _liveMapCaregiverPhotoUrl =
+                                                        caregiverPhotoUrl;
+                                                    _liveMapDestinationPos =
+                                                        destinationPos;
+                                                    _liveMapDestinationLabel =
+                                                        selectedPersonName;
+                                                    _liveMapDestinationPhotoUrl =
+                                                        destinationPhotoUrl;
+                                                    _scheduleMapUpdate(
+                                                      caregiverPos:
+                                                          caregiverPos,
+                                                      destinationPos:
+                                                          destinationPos,
+                                                      caregiverId: caregiverId,
+                                                      caregiverLabel:
+                                                          caregiverNameLive,
+                                                      caregiverPhotoUrl:
+                                                          caregiverPhotoUrl,
+                                                      destinationLabel:
+                                                          selectedPersonName,
+                                                      destinationPhotoUrl:
+                                                          destinationPhotoUrl,
+                                                    );
+                                                    final caregiverPhone =
+                                                        normalizeString(
+                                                          caregiverData?['phone'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          caregiverData?['phoneNumber'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          caregiverData?['mobile'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          caregiverData?['mobileNumber'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          caregiverData?['contact'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          caregiverData?['tel'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          caregiverData?['phoneNo'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          booking['caregiverPhone'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          booking['caregiverContact'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          booking['caregiverMobile'],
+                                                        );
+                                                    final selectedPersonPhone =
+                                                        normalizeString(
+                                                          selectedAddressEntry?['phone'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          selectedAddressEntry?['phoneNumber'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          selectedAddressEntry?['mobile'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          selectedAddressEntry?['mobileNumber'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          selectedAddressEntry?['contact'],
+                                                        ) ??
+                                                        normalizeString(
+                                                          selectedAddressEntry?['tel'],
+                                                        );
+                                                    final effectivePersonPhone =
+                                                        (selectedPersonPhone
+                                                                ?.trim()
+                                                                .isNotEmpty ==
+                                                            true)
+                                                        ? selectedPersonPhone
+                                                        : phone;
+                                                    return _trackingInfoSheet(
+                                                      caregiverView: widget
+                                                          .showActionFrontSheet,
+                                                      bookingId: widget.bookingId,
+                                                      userId: userId,
+                                                      caregiverId: caregiverId,
+                                                      personId: personId,
+                                                      caregiverName:
+                                                          caregiverNameLive,
+                                                      caregiverPhotoUrl:
+                                                          caregiverPhotoUrl,
+                                                      personName:
+                                                          selectedPersonName,
+                                                      personPhotoUrl:
+                                                          destinationPhotoUrl,
+                                                      caregiverPhone:
+                                                          caregiverPhone,
+                                                      personPhone:
+                                                          effectivePersonPhone,
+                                                      ongoingStatusMessage:
+                                                          ongoingStatusMessage,
+                                                      sessionStage:
+                                                          sessionAction
+                                                              .currentStage,
+                                                      fallbackDestinationAddress:
+                                                          selectedPersonAddress,
+                                                      fallbackCaregiverAddress:
+                                                          normalizeString(
+                                                            caregiverData?['address'],
+                                                          ) ??
+                                                          normalizeString(
+                                                            caregiverData?['defaultAddress'],
+                                                          ) ??
+                                                          '',
+                                                      stageSnapshots:
+                                                          _extractStageSnapshots(
+                                                        booking['stageSnapshots'],
+                                                      ),
+                                                    );
+                                                  },
+                                                );
+                                              },
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      if (widget.showActionFrontSheet)
+                        AnimatedPositioned(
+                          duration: const Duration(milliseconds: 240),
+                          curve: Curves.easeOut,
+                          left: 8,
+                          right: 8,
+                          bottom: frontBottom,
+                          child: Builder(
+                            builder: (context) {
+                              final statusToSet = sessionAction.statusToSet;
+                              final stageToSet = sessionAction.stageToSet;
+                              final bookingId = widget.bookingId.trim();
+                              final sosId = (widget.sosId ?? '').trim();
+                              final canUpdate =
+                                  sessionAction.enabled &&
+                                  statusToSet != null &&
+                                  stageToSet != null &&
+                                  !_updatingStatus &&
+                                  caregiverId.isNotEmpty &&
+                                  (bookingId.isNotEmpty || sosId.isNotEmpty);
+                              final isStartSession =
+                                  sessionAction.currentStage ==
+                                  _stageStartSession;
+                              final label = sessionAction.label;
+                              final personLabel =
+                                  (normalizeString(booking['addressLabel']) ??
+                                          '')
+                                      .trim();
+                              final serviceLabel =
+                                  (normalizeString(booking['serviceLabel']) ??
+                                          normalizeString(
+                                            booking['serviceType'],
+                                          ) ??
+                                          normalizeString(booking['service']) ??
+                                          '')
+                                      .trim();
 
-                                    ],
+                              final isSosOfferMode = _isSosMode;
+                              final frontSheetEnabled = isSosOfferMode
+                                  ? !_processingSosOffer
+                                  : canUpdate;
+
+                              return StreamBuilder<
+                                DocumentSnapshot<Map<String, dynamic>>
+                              >(
+                                stream: userStream,
+                                builder: (context, userSnapshot) {
+                                  final userData = userSnapshot.data?.data();
+                                  final emergencyContacts =
+                                      _extractEmergencyContacts(userData);
+                                  final selectedAddressEntry =
+                                      _pickAddressFromUserDoc(
+                                        userData: userData,
+                                        addressId: addressId,
+                                        personAddress: location,
+                                      );
+                                  final selectedPersonName =
+                                      normalizeString(
+                                        selectedAddressEntry?['name'],
+                                      ) ??
+                                      normalizeString(
+                                        selectedAddressEntry?['personName'],
+                                      ) ??
+                                      normalizeString(
+                                        selectedAddressEntry?['label'],
+                                      ) ??
+                                      personName;
+                                  final selectedPersonAddress =
+                                      normalizeString(
+                                        selectedAddressEntry?['personAddress'],
+                                      ) ??
+                                      normalizeString(
+                                        selectedAddressEntry?['address'],
+                                      ) ??
+                                      normalizeString(
+                                        selectedAddressEntry?['addressText'],
+                                      ) ??
+                                      normalizeString(
+                                        selectedAddressEntry?['fullAddress'],
+                                      ) ??
+                                      normalizeString(
+                                        selectedAddressEntry?['addressLabel'],
+                                      ) ??
+                                      location;
+                                  final selectedPhotoUrl =
+                                      normalizeString(
+                                        selectedAddressEntry?['photoUrl'],
+                                      ) ??
+                                      personPhotoUrl;
+
+                                  return _actionFrontSheet(
+                                    personPhotoUrl: selectedPhotoUrl,
+                                    personName: selectedPersonName,
+                                    personLabel: personLabel,
+                                    personAddress: selectedPersonAddress,
+                                    serviceLabel: serviceLabel,
+                                    buttonLabel: isSosOfferMode
+                                        ? 'Accept'
+                                        : label,
+                                    secondaryButtonLabel: isSosOfferMode
+                                        ? 'Reject'
+                                        : null,
+                                    enabled: frontSheetEnabled,
+                                    onCameraPressed: (isSosOfferMode ||
+                                            bookingId.isEmpty ||
+                                            caregiverId.isEmpty)
+                                        ? null
+                                        : () => _captureStagePhoto(
+                                              bookingId: bookingId,
+                                              caregiverId: caregiverId,
+                                              stage: sessionAction.currentStage,
+                                            ),
+                                    onPressed: isSosOfferMode
+                                        ? () async {
+                                            try {
+                                              await _respondSosOffer('ACCEPT');
+                                            } catch (e) {
+                                              if (!context.mounted) return;
+                                              await showDialog<void>(
+                                                context: context,
+                                                builder: (_) => AlertDialog(
+                                                  shape: RoundedRectangleBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          18,
+                                                        ),
+                                                  ),
+                                                  title: const Text(
+                                                    'Unable to accept',
+                                                  ),
+                                                  content: Text('$e'),
+                                                  actions: [
+                                                    TextButton(
+                                                      onPressed: () =>
+                                                          Navigator.of(
+                                                            context,
+                                                          ).pop(),
+                                                      child: const Text('OK'),
+                                                    ),
+                                                  ],
+                                                ),
+                                              );
+                                            }
+                                          }
+                                        : (canUpdate
+                                              ? () async {
+                                                  final statusValue =
+                                                      statusToSet;
+                                                  final stageValue = stageToSet;
+                                                  final pushedPos =
+                                                      await _pushCaregiverLocationOnce(
+                                                        caregiverId:
+                                                            caregiverId,
+                                                      );
+                                                  await _updateBookingSession(
+                                                    status: statusValue,
+                                                    stage: stageValue,
+                                                    ongoingStatus: label,
+                                                  );
+                                                  if (statusValue ==
+                                                      'ONGOING') {
+                                                    _navigationMode = true;
+                                                    _lastNavigationPos = null;
+                                                    final targetPos =
+                                                        pushedPos ??
+                                                        _latestCaregiverPos;
+                                                    if (isStartSession &&
+                                                        targetPos != null) {
+                                                      await _focusCaregiverSideView(
+                                                        caregiverPos: targetPos,
+                                                        destinationPos:
+                                                            _latestDestinationPos,
+                                                      );
+                                                    } else if (targetPos !=
+                                                        null) {
+                                                      _scheduleNavigationCamera(
+                                                        caregiverPos: targetPos,
+                                                        destinationPos:
+                                                            _latestDestinationPos,
+                                                      );
+                                                    } else {
+                                                      await _recenterOnCaregiver();
+                                                    }
+                                                  }
+                                                  _syncLiveLocationForStatus(
+                                                    status: statusValue,
+                                                    caregiverId: caregiverId,
+                                                  );
+                                                  if (statusValue ==
+                                                      'COMPLETED') {
+                                                    if (!mounted) return;
+                                                    await _showCompletionPopupAndRedirect(
+                                                      caregiverView: true,
+                                                    );
+                                                  }
+                                                }
+                                              : null),
+                                    onSecondaryPressed: isSosOfferMode
+                                        ? () async {
+                                            try {
+                                              await _respondSosOffer('REJECT');
+                                            } catch (e) {
+                                              if (!context.mounted) return;
+                                              await showDialog<void>(
+                                                context: context,
+                                                builder: (_) => AlertDialog(
+                                                  shape: RoundedRectangleBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          18,
+                                                        ),
+                                                  ),
+                                                  title: const Text(
+                                                    'Unable to reject',
+                                                  ),
+                                                  content: Text('$e'),
+                                                  actions: [
+                                                    TextButton(
+                                                      onPressed: () =>
+                                                          Navigator.of(
+                                                            context,
+                                                          ).pop(),
+                                                      child: const Text('OK'),
+                                                    ),
+                                                  ],
+                                                ),
+                                              );
+                                            }
+                                          }
+                                        : null,
+                                    onSosPressed: isSosOfferMode
+                                        ? null
+                                        : () => _openEmergencyAlertSheet(
+                                            contacts: emergencyContacts,
+                                          ),
+                                  );
+                                },
+                              );
+                            },
+                          ),
+                        ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _DirectionsStep {
+  const _DirectionsStep({
+    required this.instruction,
+    required this.distanceText,
+    required this.durationText,
+    required this.maneuver,
+    this.startLocation,
+    this.endLocation,
+  });
+
+  final String instruction;
+  final String distanceText;
+  final String durationText;
+  final String maneuver;
+  final LatLng? startLocation;
+  final LatLng? endLocation;
+}
+
+class _StageSnapshotRow extends StatelessWidget {
+  const _StageSnapshotRow({
+    required this.entry,
+    required this.stageLabel,
+    required this.timeLabel,
+    required this.onDelete,
+  });
+
+  final Map<String, dynamic> entry;
+  final String stageLabel;
+  final String timeLabel;
+  final VoidCallback? onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final photoUrl = (entry['photoUrl']?.toString() ?? '').trim();
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0A000000),
+            blurRadius: 10,
+            offset: Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: SizedBox(
+              width: 54,
+              height: 54,
+              child: photoUrl.isEmpty
+                  ? Container(
+                      color: Colors.black.withValues(alpha: 0.04),
+                      child: const Icon(
+                        Icons.image_not_supported_outlined,
+                        size: 18,
+                        color: Colors.black45,
+                      ),
+                    )
+                  : GestureDetector(
+                      onTap: () {
+                        showDialog<void>(
+                          context: context,
+                          builder: (_) => Dialog(
+                            insetPadding: const EdgeInsets.all(18),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(16),
+                              child: AspectRatio(
+                                aspectRatio: 1,
+                                child: SafeNetworkImage(
+                                  photoUrl,
+                                  fit: BoxFit.cover,
+                                  placeholder: const Center(
+                                    child: SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    ),
+                                  ),
+                                  errorWidget: const Center(
+                                    child: Icon(Icons.broken_image_outlined),
                                   ),
                                 ),
                               ),
-                        ],
+                            ),
+                          ),
+                        );
+                      },
+                      child: SafeNetworkImage(
+                        photoUrl,
+                        fit: BoxFit.cover,
+                        placeholder: const SizedBox.shrink(),
+                        errorWidget: Container(
+                          color: Colors.black.withValues(alpha: 0.04),
+                          child: const Icon(
+                            Icons.broken_image_outlined,
+                            size: 18,
+                            color: Colors.black45,
+                          ),
+                        ),
                       ),
                     ),
-                    ),
-                    ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  stageLabel.trim().isEmpty ? 'Stage' : stageLabel.trim(),
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w900,
+                    color: _profileDarkText,
+                    height: 1.1,
                   ),
-                  if (widget.showActionFrontSheet)
-                    AnimatedPositioned(
-                      duration: const Duration(milliseconds: 240),
-                      curve: Curves.easeOut,
-                      left: 8,
-                      right: 8,
-                      bottom: frontBottom,
-                      child: Builder(
-                        builder: (context) {
-                          final statusToSet = sessionAction.statusToSet;
-                          final stageToSet = sessionAction.stageToSet;
-                          final bookingId = widget.bookingId.trim();
-                          final sosId = (widget.sosId ?? '').trim();
-                          final canUpdate = sessionAction.enabled &&
-                              statusToSet != null &&
-                              stageToSet != null &&
-                              !_updatingStatus &&
-                              caregiverId.isNotEmpty &&
-                              (bookingId.isNotEmpty || sosId.isNotEmpty);
-                          final isStartSession =
-                              sessionAction.currentStage == _stageStartSession;
-                          final label = sessionAction.label;
-                          final personLabel =
-                              (normalizeString(booking['addressLabel']) ?? '').trim();
-                           final serviceLabel = (normalizeString(booking['serviceLabel']) ??
-                                   normalizeString(booking['serviceType']) ??
-                                   normalizeString(booking['service']) ??
-                                   '')
-                               .trim();
-
-                           final isSosOfferMode = _isSosMode;
-                           final frontSheetEnabled =
-                               isSosOfferMode ? !_processingSosOffer : canUpdate;
-
-                           return StreamBuilder<
-                               DocumentSnapshot<Map<String, dynamic>>>(
-                             stream: userStream,
-                             builder: (context, userSnapshot) {
-                              final userData = userSnapshot.data?.data();
-                              final emergencyContacts = _extractEmergencyContacts(
-                                userData,
-                              );
-                              final selectedAddressEntry = _pickAddressFromUserDoc(
-                                userData: userData,
-                                addressId: addressId,
-                                personAddress: location,
-                              );
-                               final selectedPhotoUrl =
-                                   normalizeString(selectedAddressEntry?['photoUrl']) ??
-                                       personPhotoUrl;
-
-                                 return _actionFrontSheet(
-                                   personPhotoUrl: selectedPhotoUrl,
-                                   personName: personName,
-                                   personLabel: personLabel,
-                                   personAddress: location,
-                                   serviceLabel: serviceLabel,
-                                   buttonLabel: isSosOfferMode ? 'Accept' : label,
-                                   secondaryButtonLabel:
-                                       isSosOfferMode ? 'Reject' : null,
-                                   enabled: frontSheetEnabled,
-                                   onPressed: isSosOfferMode
-                                       ? () async {
-                                           try {
-                                             await _respondSosOffer('ACCEPT');
-                                           } catch (e) {
-                                             if (!context.mounted) return;
-                                             await showDialog<void>(
-                                               context: context,
-                                               builder: (_) => AlertDialog(
-                                                 shape: RoundedRectangleBorder(
-                                                   borderRadius:
-                                                       BorderRadius.circular(18),
-                                                 ),
-                                                 title:
-                                                     const Text('Unable to accept'),
-                                                 content: Text('$e'),
-                                                 actions: [
-                                                   TextButton(
-                                                     onPressed: () =>
-                                                         Navigator.of(context).pop(),
-                                                     child: const Text('OK'),
-                                                   ),
-                                                 ],
-                                               ),
-                                             );
-                                           }
-                                         }
-                                       : (canUpdate
-                                           ? () async {
-                                               final statusValue = statusToSet;
-                                               final stageValue = stageToSet;
-                                               final pushedPos =
-                                                   await _pushCaregiverLocationOnce(
-                                                 caregiverId: caregiverId,
-                                               );
-                                               await _updateBookingSession(
-                                                 status: statusValue,
-                                                 stage: stageValue,
-                                                 ongoingStatus: label,
-                                               );
-                                               if (statusValue == 'ONGOING') {
-                                                 _navigationMode = true;
-                                                 _lastNavigationPos = null;
-                                                 final targetPos =
-                                                     pushedPos ?? _latestCaregiverPos;
-                                                 if (isStartSession &&
-                                                     targetPos != null) {
-                                                   await _focusCaregiverSideView(
-                                                     caregiverPos: targetPos,
-                                                     destinationPos:
-                                                         _latestDestinationPos,
-                                                   );
-                                                 } else if (targetPos != null) {
-                                                   _scheduleNavigationCamera(
-                                                     caregiverPos: targetPos,
-                                                     destinationPos:
-                                                         _latestDestinationPos,
-                                                   );
-                                                 } else {
-                                                   await _recenterOnCaregiver();
-                                                 }
-                                               }
-                                               _syncLiveLocationForStatus(
-                                                 status: statusValue,
-                                                 caregiverId: caregiverId,
-                                               );
-                                               if (statusValue == 'COMPLETED') {
-                                                 if (!mounted) return;
-                                                 await _showCompletionPopupAndRedirect(
-                                                   caregiverView: true,
-                                                 );
-                                               }
-                                             }
-                                           : null),
-                                   onSecondaryPressed: isSosOfferMode
-                                       ? () async {
-                                           try {
-                                             await _respondSosOffer('REJECT');
-                                           } catch (e) {
-                                             if (!context.mounted) return;
-                                             await showDialog<void>(
-                                               context: context,
-                                               builder: (_) => AlertDialog(
-                                                 shape: RoundedRectangleBorder(
-                                                   borderRadius:
-                                                       BorderRadius.circular(18),
-                                                 ),
-                                                 title:
-                                                     const Text('Unable to reject'),
-                                                 content: Text('$e'),
-                                                 actions: [
-                                                   TextButton(
-                                                     onPressed: () =>
-                                                         Navigator.of(context).pop(),
-                                                     child: const Text('OK'),
-                                                   ),
-                                                 ],
-                                               ),
-                                             );
-                                           }
-                                         }
-                                       : null,
-                                   onSosPressed: isSosOfferMode
-                                       ? null
-                                       : () => _openEmergencyAlertSheet(
-                                             contacts: emergencyContacts,
-                                           ),
-                                 );
-                             },
-                           );
-                         },
-                       ),
-                    ),
-                   ],
-                 ),
-           );
-        },
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  timeLabel.trim().isEmpty ? '-' : timeLabel.trim(),
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.black.withValues(alpha: 0.55),
+                    height: 1.1,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          IconButton(
+            onPressed: onDelete,
+            icon: Icon(
+              Icons.delete_outline_rounded,
+              size: 20,
+              color: onDelete == null
+                  ? Colors.black26
+                  : Colors.red.shade700,
+            ),
+            splashRadius: 18,
+          ),
+        ],
       ),
-    ),
-    );
-      },
     );
   }
 }
@@ -3527,11 +4909,15 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
 class _DirectionsRouteResult {
   const _DirectionsRouteResult({
     required this.points,
+    this.alternativeRoutePoints = const <List<LatLng>>[],
+    this.steps = const <_DirectionsStep>[],
     required this.durationSeconds,
     required this.distanceMeters,
   });
 
   final List<LatLng> points;
+  final List<List<LatLng>> alternativeRoutePoints;
+  final List<_DirectionsStep> steps;
   final int? durationSeconds;
   final int? distanceMeters;
 }
@@ -3551,10 +4937,7 @@ class _PointRow extends StatelessWidget {
           width: 22,
           child: Padding(
             padding: EdgeInsets.zero,
-            child: Align(
-              alignment: Alignment.topCenter,
-              child: icon,
-            ),
+            child: Align(alignment: Alignment.topCenter, child: icon),
           ),
         ),
         const SizedBox(width: 10),
@@ -3638,8 +5021,7 @@ class _SwipeToConfirmButtonState extends State<_SwipeToConfirmButton> {
   @override
   Widget build(BuildContext context) {
     final onConfirmed = widget.enabled ? widget.onConfirmed : null;
-    final trackColor =
-        widget.enabled ? widget.accent : const Color(0xFFCDD1D6);
+    final trackColor = widget.enabled ? widget.accent : const Color(0xFFCDD1D6);
     final trackFg = widget.enabled ? Colors.white : Colors.white70;
 
     return LayoutBuilder(
@@ -3647,8 +5029,10 @@ class _SwipeToConfirmButtonState extends State<_SwipeToConfirmButton> {
         final width = constraints.maxWidth;
         const padding = 4.0;
         final thumbSize = widget.height - padding * 2;
-        final maxDx =
-            (width - padding * 2 - thumbSize).clamp(0.0, double.infinity);
+        final maxDx = (width - padding * 2 - thumbSize).clamp(
+          0.0,
+          double.infinity,
+        );
 
         void commit() {
           if (_confirmed) return;
@@ -3666,8 +5050,10 @@ class _SwipeToConfirmButtonState extends State<_SwipeToConfirmButton> {
           onHorizontalDragUpdate: onConfirmed == null
               ? null
               : (details) {
-                  final next = (_progress + (details.delta.dx / maxDx))
-                      .clamp(0.0, 1.0);
+                  final next = (_progress + (details.delta.dx / maxDx)).clamp(
+                    0.0,
+                    1.0,
+                  );
                   setState(() => _progress = next);
                 },
           onHorizontalDragEnd: onConfirmed == null
@@ -3761,9 +5147,7 @@ class _NoOverscrollScrollBehavior extends ScrollBehavior {
 
   @override
   ScrollPhysics getScrollPhysics(BuildContext context) {
-    return const ClampingScrollPhysics(
-      parent: AlwaysScrollableScrollPhysics(),
-    );
+    return const ClampingScrollPhysics(parent: AlwaysScrollableScrollPhysics());
   }
 
   @override
@@ -3777,30 +5161,53 @@ class _NoOverscrollScrollBehavior extends ScrollBehavior {
 }
 
 class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.label});
+  const _StatusChip({required this.label, this.dotColorOverride});
 
   final String label;
+  final Color? dotColorOverride;
 
   @override
   Widget build(BuildContext context) {
     final normalized = label.toUpperCase();
     final display = normalized.replaceAll('_', ' ');
-    var color = _accentGreen;
-    if (normalized == 'COMPLETED') color = Colors.green;
-    if (normalized.startsWith('CANCEL')) color = Colors.red;
+    var dotColor = _accentGreen;
+    if (normalized == 'COMPLETED') dotColor = Colors.green;
+    if (normalized.startsWith('CANCEL')) dotColor = Colors.red;
+    dotColor = dotColorOverride ?? dotColor;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade400),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.06),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
-      child: Text(
-        display,
-        style: TextStyle(
-          fontSize: 10,
-          fontWeight: FontWeight.w700,
-          color: color,
-        ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 3,
+            height: 3,
+            decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            display,
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 7.5,
+              color: Colors.black.withValues(alpha: 0.80),
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
       ),
     );
   }
@@ -3822,7 +5229,8 @@ class _EmergencyAlertBottomSheet extends StatefulWidget {
       _EmergencyAlertBottomSheetState();
 }
 
-class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> {
+class _EmergencyAlertBottomSheetState
+    extends State<_EmergencyAlertBottomSheet> {
   final TextEditingController _reasonController = TextEditingController();
   late Set<String> _selectedIds;
   bool _submitting = false;
@@ -3849,17 +5257,19 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
   }
 
   String _contactMeta(Map<String, dynamic> c) {
-    final label = c['relationship']?.toString().trim() ??
+    final label =
+        c['relationship']?.toString().trim() ??
         c['label']?.toString().trim() ??
         '';
-    final phone = c['phone']?.toString().trim() ??
-        c['contact']?.toString().trim() ??
-        '';
-    return [if (label.isNotEmpty) label, if (phone.isNotEmpty) phone].join(' • ');
+    final phone =
+        c['phone']?.toString().trim() ?? c['contact']?.toString().trim() ?? '';
+    return [
+      if (label.isNotEmpty) label,
+      if (phone.isNotEmpty) phone,
+    ].join(' • ');
   }
 
-  String _contactId(Map<String, dynamic> c) =>
-      c['id']?.toString().trim() ?? '';
+  String _contactId(Map<String, dynamic> c) => c['id']?.toString().trim() ?? '';
 
   Future<void> _submit() async {
     if (_submitting) return;
@@ -3872,9 +5282,9 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
       widget.onCompleted();
     } on _EmergencyAlertError catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.message)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
     } on FirebaseFunctionsException catch (e) {
       if (!mounted) return;
       final msg = e.message?.trim();
@@ -4035,8 +5445,9 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
                         ),
                       ),
                       IconButton(
-                        onPressed:
-                            _submitting ? null : () => Navigator.of(context).pop(),
+                        onPressed: _submitting
+                            ? null
+                            : () => Navigator.of(context).pop(),
                         icon: const Icon(Icons.close_rounded, size: 20),
                         color: Colors.black.withValues(alpha: 0.7),
                         padding: EdgeInsets.zero,
@@ -4085,14 +5496,13 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
                               ),
                             ),
                           )
-                        else
-                          ...[
-                            for (var i = 0; i < widget.contacts.length; i++) ...[
-                              _contactRow(widget.contacts[i]),
-                              if (i != widget.contacts.length - 1)
-                                const SizedBox(height: 10),
-                            ],
+                        else ...[
+                          for (var i = 0; i < widget.contacts.length; i++) ...[
+                            _contactRow(widget.contacts[i]),
+                            if (i != widget.contacts.length - 1)
+                              const SizedBox(height: 10),
                           ],
+                        ],
                         const SizedBox(height: 12),
                         Text(
                           'Reason',
@@ -4155,7 +5565,8 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                   child: ElevatedButton(
-                    onPressed: (_submitting ||
+                    onPressed:
+                        (_submitting ||
                             widget.contacts.isEmpty ||
                             _selectedIds.isEmpty)
                         ? null
@@ -4179,8 +5590,9 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
                             height: 18,
                             child: CircularProgressIndicator(
                               strokeWidth: 2.2,
-                              valueColor:
-                                  AlwaysStoppedAnimation<Color>(Colors.white),
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                Colors.white,
+                              ),
                             ),
                           )
                         : const Text('Start emergency alert'),
