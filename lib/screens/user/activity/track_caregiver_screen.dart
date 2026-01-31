@@ -177,9 +177,11 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
   String _mapUpdateScheduledKey = '';
   String _mapUpdateAppliedKey = '';
   String _markerAppliedKey = '';
+  DateTime? _lastMarkerRetryAt;
   double _backdropOpacity = 0.0;
   int _markerRequestSeq = 0;
   final Map<String, BitmapDescriptor> _markerCache = {};
+  final Set<String> _markerCacheWithAvatar = <String>{};
   final Map<String, ui.Image> _avatarImageCache = {};
   bool _updatingStatus = false;
   bool _completionPopupShown = false;
@@ -939,7 +941,10 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       _stageProvideServices => 'Provide services',
       _stageJobsDone => 'Jobs done',
       _stageCompleted => 'Completed',
-      _ => s.replaceAll('_', ' ').trim().isEmpty ? 'Stage' : s.replaceAll('_', ' '),
+      _ =>
+        s.replaceAll('_', ' ').trim().isEmpty
+            ? 'Stage'
+            : s.replaceAll('_', ' '),
     };
   }
 
@@ -981,8 +986,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       );
       await task;
       final url = await ref.getDownloadURL();
-      final bookingRef =
-          FirebaseFirestore.instance.collection('bookings').doc(trimmedBookingId);
+      final bookingRef = FirebaseFirestore.instance
+          .collection('bookings')
+          .doc(trimmedBookingId);
       final now = Timestamp.now();
 
       await FirebaseFirestore.instance.runTransaction((tx) async {
@@ -999,17 +1005,15 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
           'storagePath': storagePath,
           'createdAt': now,
         });
-        tx.set(
-          bookingRef,
-          {
-            'stageSnapshots': existing,
-            'updatedAt': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
+        tx.set(bookingRef, {
+          'stageSnapshots': existing,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
       });
     } catch (e) {
-      debugPrint('captureStagePhoto failed booking=$trimmedBookingId stage=$normalizedStage error=$e');
+      debugPrint(
+        'captureStagePhoto failed booking=$trimmedBookingId stage=$normalizedStage error=$e',
+      );
       await ref.delete().catchError((_) {});
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1032,8 +1036,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     final trimmedSnapshotId = snapshotId.trim();
     if (trimmedBookingId.isEmpty || trimmedSnapshotId.isEmpty) return;
 
-    final bookingRef =
-        FirebaseFirestore.instance.collection('bookings').doc(trimmedBookingId);
+    final bookingRef = FirebaseFirestore.instance
+        .collection('bookings')
+        .doc(trimmedBookingId);
     String storagePath = '';
 
     try {
@@ -1053,17 +1058,16 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
           }
           next.add(e);
         }
-        tx.set(
-          bookingRef,
-          {
-            'stageSnapshots': next,
-            'updatedAt': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
+        tx.set(bookingRef, {
+          'stageSnapshots': next,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
       });
       if (storagePath.isNotEmpty) {
-        await FirebaseStorage.instance.ref(storagePath).delete().catchError((_) {});
+        await FirebaseStorage.instance
+            .ref(storagePath)
+            .delete()
+            .catchError((_) {});
       }
     } catch (_) {
       if (!mounted) return;
@@ -1753,6 +1757,10 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
             normalizedLabel == 'jobs done') &&
         (onPressed != null);
     final canCameraPress = enabled && onCameraPressed != null;
+    final showCameraBesidePrimary =
+        !isSessionSwipe &&
+        canCameraPress &&
+        (normalizedLabel == 'complete' || normalizedLabel == 'upload evidence');
 
     final subtitleParts = <String>[
       personLabel.trim(),
@@ -1962,8 +1970,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                 const SizedBox(width: 10),
                                 _circleIconButton(
                                   icon: Icons.photo_camera_rounded,
-                                  background:
-                                      _accentGreen.withValues(alpha: 0.12),
+                                  background: _accentGreen.withValues(
+                                    alpha: 0.12,
+                                  ),
                                   iconColor: _accentGreen,
                                   onTap: canCameraPress
                                       ? onCameraPressed
@@ -1971,29 +1980,72 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                 ),
                               ],
                             )
-                          : ElevatedButton(
-                              onPressed: canPress ? onPressed : null,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: canPress
-                                    ? _routeColor
-                                    : const Color(0xFFCDD1D6),
-                                foregroundColor: canPress
-                                    ? Colors.black
-                                    : Colors.white70,
-                                elevation: 0,
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 12,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(18),
-                                ),
-                                textStyle: const TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w900,
-                                ),
-                              ),
-                              child: Text(buttonLabel),
-                            ),
+                          : (showCameraBesidePrimary
+                              ? Row(
+                                  children: [
+                                    Expanded(
+                                      child: ElevatedButton(
+                                        onPressed: canPress ? onPressed : null,
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: canPress
+                                              ? _routeColor
+                                              : const Color(0xFFCDD1D6),
+                                          foregroundColor: canPress
+                                              ? Colors.black
+                                              : Colors.white70,
+                                          elevation: 0,
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 12,
+                                          ),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(18),
+                                          ),
+                                          textStyle: const TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w900,
+                                          ),
+                                        ),
+                                        child: Text(buttonLabel),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    _circleIconButton(
+                                      icon: Icons.photo_camera_rounded,
+                                      background: _accentGreen.withValues(
+                                        alpha: 0.12,
+                                      ),
+                                      iconColor: _accentGreen,
+                                      onTap: canCameraPress
+                                          ? onCameraPressed
+                                          : null,
+                                    ),
+                                  ],
+                                )
+                              : ElevatedButton(
+                                  onPressed: canPress ? onPressed : null,
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: canPress
+                                        ? _routeColor
+                                        : const Color(0xFFCDD1D6),
+                                    foregroundColor: canPress
+                                        ? Colors.black
+                                        : Colors.white70,
+                                    elevation: 0,
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 12,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius:
+                                          BorderRadius.circular(18),
+                                    ),
+                                    textStyle: const TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                  child: Text(buttonLabel),
+                                )),
                     ),
                   ),
                 ],
@@ -2025,17 +2077,20 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
 
   List<Map<String, dynamic>> _extractStageSnapshots(dynamic raw) {
     if (raw is! List) return const [];
-    final items =
-        raw
-            .whereType<Map>()
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList(growable: false);
+    final items = raw
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList(growable: false);
     final sorted = [...items];
     sorted.sort((a, b) {
       final atA = a['createdAt'];
       final atB = b['createdAt'];
-      final da = atA is Timestamp ? atA.toDate() : DateTime.fromMillisecondsSinceEpoch(0);
-      final db = atB is Timestamp ? atB.toDate() : DateTime.fromMillisecondsSinceEpoch(0);
+      final da = atA is Timestamp
+          ? atA.toDate()
+          : DateTime.fromMillisecondsSinceEpoch(0);
+      final db = atB is Timestamp
+          ? atB.toDate()
+          : DateTime.fromMillisecondsSinceEpoch(0);
       return db.compareTo(da);
     });
     return sorted;
@@ -2243,35 +2298,49 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
               : endLocation.title,
           endSubtitle: endLocation.subtitle,
         ),
-        if (stageSnapshots.isNotEmpty) ...[
-          const SizedBox(height: 10),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-            decoration: _premiumCardDecoration(radius: 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: const [
-                    Icon(
-                      Icons.receipt_long_rounded,
-                      size: 18,
-                      color: _accentGreen,
+        const SizedBox(height: 10),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          decoration: _premiumCardDecoration(radius: 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: const [
+                  Icon(
+                    Icons.receipt_long_rounded,
+                    size: 18,
+                    color: _accentGreen,
+                  ),
+                  SizedBox(width: 8),
+                  Text(
+                    'Booking summary',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w800,
+                      color: _profileDarkText,
+                      letterSpacing: -0.2,
                     ),
-                    SizedBox(width: 8),
-                    Text(
-                      'Booking summary',
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w800,
-                        color: _profileDarkText,
-                        letterSpacing: -0.2,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              if (stageSnapshots.isEmpty)
+                Text(
+                  caregiverView
+                      ? 'No stage photos uploaded yet. Use the camera button to add one.'
+                      : 'No stage photos available yet.',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.black.withValues(alpha: 0.55),
+                    height: 1.2,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                )
+              else
                 for (final entry in stageSnapshots)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 10),
@@ -2287,20 +2356,20 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                       }(),
                       onDelete:
                           (entry['id']?.toString() ?? '').trim().isEmpty ||
-                                  !caregiverView ||
-                                  bookingId.trim().isEmpty
-                              ? null
-                              : () => _deleteStageSnapshot(
-                                    bookingId: bookingId,
-                                    snapshotId:
-                                        (entry['id']?.toString() ?? '').trim(),
-                                  ),
+                              !caregiverView ||
+                              !widget.showActionFrontSheet ||
+                              bookingId.trim().isEmpty
+                          ? null
+                          : () => _deleteStageSnapshot(
+                              bookingId: bookingId,
+                              snapshotId: (entry['id']?.toString() ?? '')
+                                  .trim(),
+                            ),
                     ),
                   ),
-              ],
-            ),
+            ],
           ),
-        ],
+        ),
       ],
     );
   }
@@ -2858,9 +2927,39 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     required String? destinationLabel,
     required String? destinationPhotoUrl,
   }) {
+    final safeCaregiverId = (caregiverId ?? '').trim();
+    final caregiverPhotoSuffix = (caregiverPhotoUrl ?? '').trim();
+    final personPhotoSuffix = (destinationPhotoUrl ?? '').trim();
+    final caregiverMarkerKey = safeCaregiverId.isEmpty
+        ? 'caregiver_${_mapMarkerSize.toInt()}_${caregiverPhotoSuffix.isEmpty ? 'no' : caregiverPhotoSuffix.hashCode}'
+        : 'caregiver_${safeCaregiverId}_${_mapMarkerSize.toInt()}_${caregiverPhotoSuffix.isEmpty ? 'no' : caregiverPhotoSuffix.hashCode}';
+    final personMarkerKey =
+        'person_${_mapMarkerSize.toInt()}_${personPhotoSuffix.isEmpty ? 'no' : personPhotoSuffix.hashCode}';
+
     final markerKey =
         '${_latLngKey(caregiverPos)}|${_latLngKey(destinationPos)}|${(caregiverId ?? '').trim()}|${(caregiverPhotoUrl ?? '').trim()}|${(destinationPhotoUrl ?? '').trim()}|${(caregiverLabel ?? '').trim()}|${(destinationLabel ?? '').trim()}';
-    if (markerKey == _markerAppliedKey) return;
+
+    bool avatarReady(String markerKey, String? photoUrl) {
+      final trimmedUrl = (photoUrl ?? '').trim();
+      if (trimmedUrl.isEmpty) return true;
+      if (_markerCacheWithAvatar.contains(markerKey)) return true;
+      if (_avatarImageCache.containsKey(trimmedUrl)) return true;
+      return false;
+    }
+
+    final shouldRetryAvatar =
+        !avatarReady(caregiverMarkerKey, caregiverPhotoUrl) ||
+        !avatarReady(personMarkerKey, destinationPhotoUrl);
+
+    if (markerKey == _markerAppliedKey && !shouldRetryAvatar) return;
+    if (markerKey == _markerAppliedKey && shouldRetryAvatar) {
+      final now = DateTime.now();
+      final last = _lastMarkerRetryAt;
+      if (last != null && now.difference(last) < const Duration(seconds: 2)) {
+        return;
+      }
+      _lastMarkerRetryAt = now;
+    }
     _markerAppliedKey = markerKey;
     _updateMarkersAsync(
       caregiverPos: caregiverPos,
@@ -2882,20 +2981,22 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
   }
 
   Future<ui.Image?> _loadAvatarImage(String? url) async {
-    if (url == null || url.trim().isEmpty) return null;
-    final cached = _avatarImageCache[url];
+    final trimmed = (url ?? '').trim();
+    if (trimmed.isEmpty) return null;
+    final cached = _avatarImageCache[trimmed];
     if (cached != null) return cached;
     try {
-      final uri = Uri.parse(url);
-      final ByteData data = await NetworkAssetBundle(uri).load('');
-      final Uint8List bytes = data.buffer.asUint8List();
+      final uri = Uri.parse(trimmed);
+      final response = await http.get(uri).timeout(const Duration(seconds: 6));
+      if (response.statusCode != 200) return null;
+      final Uint8List bytes = response.bodyBytes;
       final ui.Codec codec = await ui.instantiateImageCodec(
         bytes,
         targetWidth: 120,
         targetHeight: 120,
       );
       final ui.FrameInfo frame = await codec.getNextFrame();
-      _avatarImageCache[url] = frame.image;
+      _avatarImageCache[trimmed] = frame.image;
       return frame.image;
     } catch (_) {
       return null;
@@ -2909,9 +3010,19 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
     String? photoUrl,
     double size = 68,
   }) async {
+    final trimmedUrl = (photoUrl ?? '').trim();
     final cached = _markerCache[key];
-    if (cached != null) return cached;
-    final ui.Image? avatar = await _loadAvatarImage(photoUrl);
+    if (cached != null) {
+      // If we previously cached a fallback marker when the avatar wasn't
+      // available, allow retries so the avatar can appear later.
+      if (trimmedUrl.isEmpty ||
+          _markerCacheWithAvatar.contains(key) ||
+          _avatarImageCache.containsKey(trimmedUrl)) {
+        return cached;
+      }
+    }
+
+    final ui.Image? avatar = await _loadAvatarImage(trimmedUrl);
     final descriptor = await _buildAvatarMarker(
       fillColor: fillColor,
       label: label,
@@ -2919,7 +3030,14 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       size: size,
       avatar: avatar,
     );
-    _markerCache[key] = descriptor;
+
+    // Only cache when:
+    // - no photoUrl (pure fallback), OR
+    // - we successfully rendered an avatar.
+    if (trimmedUrl.isEmpty || avatar != null) {
+      _markerCache[key] = descriptor;
+      if (avatar != null) _markerCacheWithAvatar.add(key);
+    }
     return descriptor;
   }
 
@@ -4253,8 +4371,8 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                                   fallbackCaregiverAddress: '',
                                                   stageSnapshots:
                                                       _extractStageSnapshots(
-                                                    booking['stageSnapshots'],
-                                                  ),
+                                                        booking['stageSnapshots'],
+                                                      ),
                                                 );
                                               },
                                             ),
@@ -4442,7 +4560,8 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                                     return _trackingInfoSheet(
                                                       caregiverView: widget
                                                           .showActionFrontSheet,
-                                                      bookingId: widget.bookingId,
+                                                      bookingId:
+                                                          widget.bookingId,
                                                       userId: userId,
                                                       caregiverId: caregiverId,
                                                       personId: personId,
@@ -4475,8 +4594,8 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                                           '',
                                                       stageSnapshots:
                                                           _extractStageSnapshots(
-                                                        booking['stageSnapshots'],
-                                                      ),
+                                                            booking['stageSnapshots'],
+                                                          ),
                                                     );
                                                   },
                                                 );
@@ -4533,6 +4652,16 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                               final frontSheetEnabled = isSosOfferMode
                                   ? !_processingSosOffer
                                   : canUpdate;
+                              final stageSnapshots = _extractStageSnapshots(
+                                booking['stageSnapshots'],
+                              );
+                              final bool needsEvidenceToComplete =
+                                  !isSosOfferMode &&
+                                  stageToSet == _stageCompleted &&
+                                  statusToSet == 'COMPLETED';
+                              final bool canCompleteNow =
+                                  !needsEvidenceToComplete ||
+                                  stageSnapshots.isNotEmpty;
 
                               return StreamBuilder<
                                 DocumentSnapshot<Map<String, dynamic>>
@@ -4590,20 +4719,24 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                     serviceLabel: serviceLabel,
                                     buttonLabel: isSosOfferMode
                                         ? 'Accept'
-                                        : label,
+                                        : (!canCompleteNow &&
+                                                needsEvidenceToComplete
+                                            ? 'Upload Evidence'
+                                            : label),
                                     secondaryButtonLabel: isSosOfferMode
                                         ? 'Reject'
                                         : null,
                                     enabled: frontSheetEnabled,
-                                    onCameraPressed: (isSosOfferMode ||
+                                    onCameraPressed:
+                                        (isSosOfferMode ||
                                             bookingId.isEmpty ||
                                             caregiverId.isEmpty)
                                         ? null
                                         : () => _captureStagePhoto(
-                                              bookingId: bookingId,
-                                              caregiverId: caregiverId,
-                                              stage: sessionAction.currentStage,
-                                            ),
+                                            bookingId: bookingId,
+                                            caregiverId: caregiverId,
+                                            stage: sessionAction.currentStage,
+                                          ),
                                     onPressed: isSosOfferMode
                                         ? () async {
                                             try {
@@ -4637,7 +4770,8 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                             }
                                           }
                                         : (canUpdate
-                                              ? () async {
+                                              ? (canCompleteNow
+                                                    ? () async {
                                                   final statusValue =
                                                       statusToSet;
                                                   final stageValue = stageToSet;
@@ -4688,7 +4822,8 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                                     );
                                                   }
                                                 }
-                                              : null),
+                                              : null)
+                                                    : null),
                                     onSecondaryPressed: isSosOfferMode
                                         ? () async {
                                             try {
@@ -4888,18 +5023,18 @@ class _StageSnapshotRow extends StatelessWidget {
               ],
             ),
           ),
-          const SizedBox(width: 10),
-          IconButton(
-            onPressed: onDelete,
-            icon: Icon(
-              Icons.delete_outline_rounded,
-              size: 20,
-              color: onDelete == null
-                  ? Colors.black26
-                  : Colors.red.shade700,
+          if (onDelete != null) ...[
+            const SizedBox(width: 10),
+            IconButton(
+              onPressed: onDelete,
+              icon: Icon(
+                Icons.delete_outline_rounded,
+                size: 20,
+                color: Colors.red.shade700,
+              ),
+              splashRadius: 18,
             ),
-            splashRadius: 18,
-          ),
+          ],
         ],
       ),
     );

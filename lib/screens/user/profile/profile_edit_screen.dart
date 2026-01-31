@@ -14,6 +14,9 @@ import 'package:intl_phone_field/countries.dart';
 import 'package:emergencies_disability_assistance_app/services/geocoding_service.dart';
 import 'package:emergencies_disability_assistance_app/widgets/default_profile_avatar.dart';
 
+import '../../admin/admin_root_screen.dart';
+import '../../caregiver/caregiver_root_screen.dart';
+import '../user_root_screen.dart';
 import 'profile_email_edit_screen.dart';
 import 'profile_phone_edit_screen.dart';
 
@@ -916,9 +919,15 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   }
 
   void _returnToOverview() {
-    if (Navigator.of(context).canPop()) {
-      Navigator.of(context).pop();
-    }
+    final Widget target = widget.useAdminData
+        ? const AdminRootScreen(initialIndex: 4)
+        : (widget.useCaregiverData || _isCaregiver)
+        ? const CaregiverRootScreen(initialIndex: 4)
+        : const UserRootScreen(initialIndex: 4);
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => target),
+      (_) => false,
+    );
   }
 
   Future<bool> _confirmDiscard() async {

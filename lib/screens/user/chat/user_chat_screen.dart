@@ -1,4 +1,3 @@
-
 import 'dart:math' as math;
 import 'dart:ui';
 
@@ -14,6 +13,7 @@ import 'package:intl/intl.dart';
 import '../../../models/chat_message_model.dart';
 import '../../../services/auth_service.dart';
 import '../../../services/chat_service.dart';
+import '../../../utils/phone_caller.dart';
 import '../../../widgets/default_profile_avatar.dart';
 import '../../../widgets/safe_network_image.dart';
 
@@ -62,6 +62,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
   final ImagePicker _picker = ImagePicker();
 
   late final Future<String?> _photoFuture;
+  late final Future<String?> _phoneFuture;
   XFile? _selectedImage;
   Uint8List? _selectedImageBytes;
   bool _isUploadingImage = false;
@@ -76,6 +77,21 @@ class _UserChatScreenState extends State<UserChatScreen> {
   void initState() {
     super.initState();
     _photoFuture = _loadOtherUserPhoto();
+    _phoneFuture = _loadOtherUserPhone();
+  }
+
+  String? _extractPhone(Map<String, dynamic>? data) {
+    if (data == null) return null;
+    final candidates = <String?>[
+      data['phoneNumber'] as String?,
+      data['phone'] as String?,
+      data['fullPhoneNumber'] as String?,
+    ];
+    for (final c in candidates) {
+      final trimmed = (c ?? '').trim();
+      if (trimmed.isNotEmpty) return trimmed;
+    }
+    return null;
   }
 
   Future<String?> _loadOtherUserPhoto() async {
@@ -99,6 +115,48 @@ class _UserChatScreenState extends State<UserChatScreen> {
     }
 
     return null;
+  }
+
+  Future<String?> _loadOtherUserPhone() async {
+    try {
+      final caregiverDoc = await FirebaseFirestore.instance
+          .collection('caregivers')
+          .doc(widget.otherUserId)
+          .get();
+      final caregiverPhone = _extractPhone(caregiverDoc.data());
+      if (caregiverPhone?.isNotEmpty == true) return caregiverPhone;
+    } catch (_) {}
+
+    try {
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(widget.otherUserId)
+          .get();
+      final userPhone = _extractPhone(userDoc.data());
+      if (userPhone?.isNotEmpty == true) return userPhone;
+    } catch (_) {}
+
+    return null;
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _callOtherUser() async {
+    final phone = (await _phoneFuture)?.trim() ?? '';
+    if (phone.isEmpty) {
+      _showSnack('Phone number is unavailable.');
+      return;
+    }
+    try {
+      await callNumber(phone);
+    } catch (_) {
+      _showSnack('Unable to open phone app.');
+    }
   }
 
   void _scrollToBottom() {
@@ -285,8 +343,9 @@ class _UserChatScreenState extends State<UserChatScreen> {
         Icon(
           Icons.done_all,
           size: 14,
-          color:
-              message.readAt != null ? Colors.white : Colors.white.withValues(alpha: 0.62),
+          color: message.readAt != null
+              ? Colors.white
+              : Colors.white.withValues(alpha: 0.62),
         ),
       ],
     ];
@@ -301,8 +360,9 @@ class _UserChatScreenState extends State<UserChatScreen> {
     final baseStyle = isMe ? _bubbleTextMe : _bubbleTextOther;
     if (message.isDeleted) {
       final deletedByMe = message.deletedBy == currentUserId;
-      final placeholderText =
-          deletedByMe ? 'You deleted this message.' : 'Message deleted.';
+      final placeholderText = deletedByMe
+          ? 'You deleted this message.'
+          : 'Message deleted.';
       return Row(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.end,
@@ -414,8 +474,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
     final maxLeft = math.max(screenSize.width - menuWidth - 12.0, 12.0);
     final menuLeft = target.dx.clamp(12.0, maxLeft);
     final maxTop = math.max(screenSize.height - 220.0, 12.0);
-    final menuTop =
-        (target.dy + size.height + 12.0).clamp(12.0, maxTop);
+    final menuTop = (target.dy + size.height + 12.0).clamp(12.0, maxTop);
 
     final hasText = message.text.trim().isNotEmpty;
     final hasImage = message.imageUrl?.trim().isNotEmpty ?? false;
@@ -442,9 +501,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
                 onTap: () => Navigator.of(dialogContext).pop(),
                 child: BackdropFilter(
                   filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                  child: Container(
-                    color: Colors.black.withValues(alpha: 0.15),
-                  ),
+                  child: Container(color: Colors.black.withValues(alpha: 0.15)),
                 ),
               ),
             ),
@@ -542,8 +599,9 @@ class _UserChatScreenState extends State<UserChatScreen> {
   void _startEditingMessage(ChatMessageModel message) {
     setState(() => _editingMessageId = message.messageId);
     _controller.text = message.text;
-    _controller.selection =
-        TextSelection.collapsed(offset: message.text.length);
+    _controller.selection = TextSelection.collapsed(
+      offset: message.text.length,
+    );
     _textFocusNode.requestFocus();
   }
 
@@ -553,7 +611,6 @@ class _UserChatScreenState extends State<UserChatScreen> {
     _controller.clear();
     _textFocusNode.unfocus();
   }
-
 
   Future<void> _saveImageToGallery(String url) async {
     if (kIsWeb) {
@@ -608,11 +665,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
         alignment: Alignment.centerLeft,
         child: Row(
           children: [
-            Icon(
-              icon,
-              color: textColor ?? _tealAccent,
-              size: 20,
-            ),
+            Icon(icon, color: textColor ?? _tealAccent, size: 20),
             const SizedBox(width: 12),
             Text(
               label,
@@ -696,7 +749,10 @@ class _UserChatScreenState extends State<UserChatScreen> {
                   maxWidth: MediaQuery.of(context).size.width * 0.8,
                 ),
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 9,
+                  ),
                   decoration: BoxDecoration(
                     color: isMe ? _bubbleMeBackground : _bubbleYouBackground,
                     borderRadius: BorderRadius.circular(_containerRadius),
@@ -707,7 +763,9 @@ class _UserChatScreenState extends State<UserChatScreen> {
                           ),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withValues(alpha: isMe ? 0.12 : 0.06),
+                        color: Colors.black.withValues(
+                          alpha: isMe ? 0.12 : 0.06,
+                        ),
                         blurRadius: isMe ? 16 : 14,
                         offset: Offset(0, isMe ? 7 : 8),
                       ),
@@ -732,7 +790,8 @@ class _UserChatScreenState extends State<UserChatScreen> {
   Widget build(BuildContext context) {
     final userId = _auth.userId;
 
-    final canSend = _controller.text.trim().isNotEmpty || _selectedImage != null;
+    final canSend =
+        _controller.text.trim().isNotEmpty || _selectedImage != null;
     return Scaffold(
       backgroundColor: _chatPageBackground,
       appBar: PreferredSize(
@@ -799,7 +858,7 @@ class _UserChatScreenState extends State<UserChatScreen> {
               : [
                   IconButton(
                     padding: const EdgeInsets.all(8),
-                    onPressed: () {},
+                    onPressed: _callOtherUser,
                     icon: const Icon(
                       Icons.call,
                       color: _profileTextColor,
@@ -822,8 +881,8 @@ class _UserChatScreenState extends State<UserChatScreen> {
                     .snapshots(),
                 builder: (context, chatSnap) {
                   final chatData = chatSnap.data?.data();
-                  final clearedMap =
-                      (chatData?['clearedAt'] as Map?)?.cast<String, dynamic>();
+                  final clearedMap = (chatData?['clearedAt'] as Map?)
+                      ?.cast<String, dynamic>();
                   final clearedAt = clearedMap?[userId] as Timestamp?;
 
                   return StreamBuilder<List<ChatMessageModel>>(
@@ -853,7 +912,10 @@ class _UserChatScreenState extends State<UserChatScreen> {
                             child: ListView.builder(
                               controller: _scrollController,
                               physics: const BouncingScrollPhysics(),
-                              padding: const EdgeInsets.only(top: 12, bottom: 16),
+                              padding: const EdgeInsets.only(
+                                top: 12,
+                                bottom: 16,
+                              ),
                               itemCount: visibleMessages.length,
                               itemBuilder: (context, index) {
                                 final message = visibleMessages[index];
@@ -884,15 +946,13 @@ class _UserChatScreenState extends State<UserChatScreen> {
                   color: _tealAccent.withValues(alpha: 0.08),
                   borderRadius: BorderRadius.circular(14),
                 ),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
                 child: Row(
                   children: [
-                    Icon(
-                      Icons.edit,
-                      color: _tealAccent,
-                      size: 18,
-                    ),
+                    Icon(Icons.edit, color: _tealAccent, size: 18),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
@@ -958,9 +1018,9 @@ class _UserChatScreenState extends State<UserChatScreen> {
                     ),
                   ),
                   Expanded(
-                  child: TextField(
-                    focusNode: _textFocusNode,
-                    controller: _controller,
+                    child: TextField(
+                      focusNode: _textFocusNode,
+                      controller: _controller,
                       textInputAction: TextInputAction.newline,
                       keyboardType: TextInputType.multiline,
                       minLines: 1,

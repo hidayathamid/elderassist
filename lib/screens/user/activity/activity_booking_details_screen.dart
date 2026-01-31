@@ -41,11 +41,7 @@ BoxDecoration _premiumCardDecoration({double radius = _cardRadius}) {
     borderRadius: BorderRadius.circular(radius),
     border: Border.all(color: _cardBorderStrong),
     boxShadow: const [
-      BoxShadow(
-        color: _cardShadow,
-        blurRadius: 12,
-        offset: Offset(0, 6),
-      ),
+      BoxShadow(color: _cardShadow, blurRadius: 12, offset: Offset(0, 6)),
     ],
   );
 }
@@ -101,7 +97,8 @@ class _EmergencyAlertBottomSheet extends StatefulWidget {
       _EmergencyAlertBottomSheetState();
 }
 
-class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> {
+class _EmergencyAlertBottomSheetState
+    extends State<_EmergencyAlertBottomSheet> {
   final TextEditingController _reasonController = TextEditingController();
   late Set<String> _selectedIds;
   bool _submitting = false;
@@ -128,17 +125,19 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
   }
 
   String _contactMeta(Map<String, dynamic> c) {
-    final label = c['relationship']?.toString().trim() ??
+    final label =
+        c['relationship']?.toString().trim() ??
         c['label']?.toString().trim() ??
         '';
-    final phone = c['phone']?.toString().trim() ??
-        c['contact']?.toString().trim() ??
-        '';
-    return [if (label.isNotEmpty) label, if (phone.isNotEmpty) phone].join(' • ');
+    final phone =
+        c['phone']?.toString().trim() ?? c['contact']?.toString().trim() ?? '';
+    return [
+      if (label.isNotEmpty) label,
+      if (phone.isNotEmpty) phone,
+    ].join(' • ');
   }
 
-  String _contactId(Map<String, dynamic> c) =>
-      c['id']?.toString().trim() ?? '';
+  String _contactId(Map<String, dynamic> c) => c['id']?.toString().trim() ?? '';
 
   Future<void> _submit() async {
     if (_submitting) return;
@@ -151,9 +150,9 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
       widget.onCompleted();
     } on _EmergencyAlertError catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.message)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
     } on FirebaseFunctionsException catch (e) {
       if (!mounted) return;
       final msg = e.message?.trim();
@@ -314,11 +313,16 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
                         ),
                       ),
                       IconButton(
-                        onPressed: _submitting ? null : () => Navigator.of(context).pop(),
+                        onPressed: _submitting
+                            ? null
+                            : () => Navigator.of(context).pop(),
                         icon: const Icon(Icons.close_rounded, size: 20),
                         color: Colors.black.withValues(alpha: 0.7),
                         padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                        constraints: const BoxConstraints(
+                          minWidth: 40,
+                          minHeight: 40,
+                        ),
                       ),
                     ],
                   ),
@@ -360,14 +364,13 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
                               ),
                             ),
                           )
-                        else
-                          ...[
-                            for (var i = 0; i < widget.contacts.length; i++) ...[
-                              _contactRow(widget.contacts[i]),
-                              if (i != widget.contacts.length - 1)
-                                const SizedBox(height: 10),
-                            ],
+                        else ...[
+                          for (var i = 0; i < widget.contacts.length; i++) ...[
+                            _contactRow(widget.contacts[i]),
+                            if (i != widget.contacts.length - 1)
+                              const SizedBox(height: 10),
                           ],
+                        ],
                         const SizedBox(height: 12),
                         Text(
                           'Reason',
@@ -429,7 +432,8 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                   child: ElevatedButton(
-                    onPressed: (_submitting ||
+                    onPressed:
+                        (_submitting ||
                             widget.contacts.isEmpty ||
                             _selectedIds.isEmpty)
                         ? null
@@ -453,8 +457,9 @@ class _EmergencyAlertBottomSheetState extends State<_EmergencyAlertBottomSheet> 
                             height: 18,
                             child: CircularProgressIndicator(
                               strokeWidth: 2.2,
-                              valueColor:
-                                  AlwaysStoppedAnimation<Color>(Colors.white),
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                Colors.white,
+                              ),
                             ),
                           )
                         : const Text('Start emergency alert'),
@@ -646,15 +651,8 @@ class _ActivityBookingDetailsScreenState
     return null;
   }
 
-  ({
-    String name,
-    String label,
-    String address,
-    String phone,
-    String? photoUrl,
-  }) _resolvePersonDisplay(
-    Map<String, dynamic> booking,
-  ) {
+  ({String name, String label, String address, String phone, String? photoUrl})
+  _resolvePersonDisplay(Map<String, dynamic> booking) {
     final userData = _userData;
     final personId = normalizeString(booking['personId']) ?? '';
     final addressId = normalizeString(booking['addressId']) ?? '';
@@ -748,10 +746,9 @@ class _ActivityBookingDetailsScreenState
     final subtitleBase = serviceLabel.trim().isNotEmpty
         ? serviceLabel.trim()
         : 'Caregiver assigned';
-    final subtitle =
-        (metaLine != null && metaLine.trim().isNotEmpty)
-            ? '$subtitleBase • ${metaLine.trim()}'
-            : subtitleBase;
+    final subtitle = (metaLine != null && metaLine.trim().isNotEmpty)
+        ? '$subtitleBase • ${metaLine.trim()}'
+        : subtitleBase;
 
     return Material(
       color: Colors.white,
@@ -966,14 +963,15 @@ class _ActivityBookingDetailsScreenState
   void initState() {
     super.initState();
     _selectedTabIndex = widget.initialTabIndex;
-    _panelController = AnimationController(
-      vsync: this,
-      value: 0.0,
-      duration: const Duration(milliseconds: 220),
-    )..addListener(() {
-        if (!mounted) return;
-        setState(() {});
-      });
+    _panelController =
+        AnimationController(
+          vsync: this,
+          value: 0.0,
+          duration: const Duration(milliseconds: 220),
+        )..addListener(() {
+          if (!mounted) return;
+          setState(() {});
+        });
     _entryController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 220),
@@ -1029,21 +1027,21 @@ class _ActivityBookingDetailsScreenState
         .doc(bookingId)
         .snapshots()
         .listen((snap) {
-      final data = snap.data();
-      final next = _normalizeBookingStatusForListener(
-        normalizeString(data?['status']) ?? '',
-      );
-      final prev = _lastLiveBookingStatus;
-      _lastLiveBookingStatus = next;
-      if (prev == null || prev == next) return;
-      if (next != 'COMPLETED') return;
-      if (_completionPopupShown) return;
-      _completionPopupShown = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        _showCompletionPopupAndRedirect();
-      });
-    });
+          final data = snap.data();
+          final next = _normalizeBookingStatusForListener(
+            normalizeString(data?['status']) ?? '',
+          );
+          final prev = _lastLiveBookingStatus;
+          _lastLiveBookingStatus = next;
+          if (prev == null || prev == next) return;
+          if (next != 'COMPLETED') return;
+          if (_completionPopupShown) return;
+          _completionPopupShown = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            _showCompletionPopupAndRedirect();
+          });
+        });
   }
 
   Future<void> _showCompletionPopupAndRedirect() async {
@@ -1055,7 +1053,9 @@ class _ActivityBookingDetailsScreenState
       builder: (ctx) {
         return Dialog(
           insetPadding: const EdgeInsets.symmetric(horizontal: 22),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
             child: Column(
@@ -1067,7 +1067,9 @@ class _ActivityBookingDetailsScreenState
                   decoration: BoxDecoration(
                     color: _accentGold.withValues(alpha: 0.22),
                     shape: BoxShape.circle,
-                    border: Border.all(color: _accentGold.withValues(alpha: 0.35)),
+                    border: Border.all(
+                      color: _accentGold.withValues(alpha: 0.35),
+                    ),
                   ),
                   child: const Icon(
                     Icons.check_rounded,
@@ -1184,8 +1186,9 @@ class _ActivityBookingDetailsScreenState
   void _onPanelHandleDragUpdate(double delta, double rangePx) {
     if (rangePx <= 0) return;
     _panelUserInteracted = true;
-    final next =
-        (_panelController.value - (delta / rangePx)).clamp(0.0, 1.0).toDouble();
+    final next = (_panelController.value - (delta / rangePx))
+        .clamp(0.0, 1.0)
+        .toDouble();
     _panelController.value = next;
   }
 
@@ -1513,9 +1516,11 @@ class _ActivityBookingDetailsScreenState
     final caregiverId = widget.caregiverId?.trim() ?? '';
     if (caregiverId.isEmpty) return;
     final now = DateTime.now();
-    final initialDay = DateTime(now.year, now.month, now.day).add(
-      const Duration(days: 1),
-    );
+    final initialDay = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).add(const Duration(days: 1));
     final result = await showScheduleBookingTelegramSheet(
       context: context,
       caregiverId: caregiverId,
@@ -2008,14 +2013,14 @@ class _ActivityBookingDetailsScreenState
           right: 0,
           child: Center(
             child: Container(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(color: _avatarOutlineColor, width: 3.0),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.10),
-                      blurRadius: 12,
-                      offset: const Offset(0, 7),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: _avatarOutlineColor, width: 3.0),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.10),
+                    blurRadius: 12,
+                    offset: const Offset(0, 7),
                   ),
                 ],
               ),
@@ -2109,10 +2114,7 @@ class _ActivityBookingDetailsScreenState
     );
   }
 
-  Widget _buildHeaderPill({
-    required IconData icon,
-    required String text,
-  }) {
+  Widget _buildHeaderPill({required IconData icon, required String text}) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return const SizedBox.shrink();
     return Container(
@@ -2120,18 +2122,12 @@ class _ActivityBookingDetailsScreenState
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.04),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(
-          color: Colors.black.withValues(alpha: 0.10),
-        ),
+        border: Border.all(color: Colors.black.withValues(alpha: 0.10)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            icon,
-            size: 14,
-            color: Colors.black.withValues(alpha: 0.62),
-          ),
+          Icon(icon, size: 14, color: Colors.black.withValues(alpha: 0.62)),
           const SizedBox(width: 6),
           Text(
             trimmed,
@@ -2303,10 +2299,10 @@ class _ActivityBookingDetailsScreenState
     final caregiverName = normalizeString(caregiver?['name']) ?? 'Caregiver';
     final caregiverPhotoUrl =
         (normalizeString(caregiver?['photoUrl'])?.trim().isNotEmpty == true
-            ? normalizeString(caregiver?['photoUrl'])!.trim()
-            : (normalizeString(caregiver?['imageUrl'])?.trim().isNotEmpty == true
-                  ? normalizeString(caregiver?['imageUrl'])!.trim()
-                  : null));
+        ? normalizeString(caregiver?['photoUrl'])!.trim()
+        : (normalizeString(caregiver?['imageUrl'])?.trim().isNotEmpty == true
+              ? normalizeString(caregiver?['imageUrl'])!.trim()
+              : null));
     final caregiverLocation =
         normalizeString(caregiver?['defaultAddress']) ??
         normalizeString(caregiver?['address']) ??
@@ -2357,8 +2353,8 @@ class _ActivityBookingDetailsScreenState
       builder: (context, snapshot) {
         final verifiedDocs = snapshot.hasData
             ? snapshot.data!.docs
-                .where((d) => (d.data()['status'] as bool?) == true)
-                .toList(growable: false)
+                  .where((d) => (d.data()['status'] as bool?) == true)
+                  .toList(growable: false)
             : const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
         final certificateNames = verifiedDocs
             .map((d) => (d.data()['name'] as String?)?.trim() ?? '')
@@ -2515,7 +2511,9 @@ class _ActivityBookingDetailsScreenState
     );
   }
 
-  List<Map<String, dynamic>> _extractEmergencyContacts(Map<String, dynamic>? data) {
+  List<Map<String, dynamic>> _extractEmergencyContacts(
+    Map<String, dynamic>? data,
+  ) {
     if (data == null) return const [];
     final raw = data['emergencyContacts'];
     if (raw is List) {
@@ -2559,8 +2557,8 @@ class _ActivityBookingDetailsScreenState
             _buildInfoRow(
               icon: Icons.family_restroom_rounded,
               title: 'Relationship',
-              value:
-                  (contacts[i]['relationship'] ?? 'Relationship not set').toString(),
+              value: (contacts[i]['relationship'] ?? 'Relationship not set')
+                  .toString(),
             ),
             Builder(
               builder: (context) {
@@ -2600,10 +2598,10 @@ class _ActivityBookingDetailsScreenState
         '-';
     final ownerPhotoUrl =
         (normalizeString(user['photoUrl'])?.trim().isNotEmpty == true
-            ? normalizeString(user['photoUrl'])!.trim()
-            : (normalizeString(user['imageUrl'])?.trim().isNotEmpty == true
-                  ? normalizeString(user['imageUrl'])!.trim()
-                  : null));
+        ? normalizeString(user['photoUrl'])!.trim()
+        : (normalizeString(user['imageUrl'])?.trim().isNotEmpty == true
+              ? normalizeString(user['imageUrl'])!.trim()
+              : null));
     final notes =
         normalizeString(booking['personNotes'] ?? booking['notes']) ?? '';
 
@@ -2764,12 +2762,12 @@ class _ActivityBookingDetailsScreenState
       bookingDay = selectedDay;
     }
     final caregiverIdFromBooking = (booking['caregiverId'] as String?)?.trim();
-    final caregiverId =
-        caregiverIdFromBooking?.isNotEmpty == true
-            ? caregiverIdFromBooking!
-            : (widget.caregiverId?.trim() ?? '');
-    final bookingStart =
-        startTime.isNotEmpty ? _parseStoredTime(startTime) : null;
+    final caregiverId = caregiverIdFromBooking?.isNotEmpty == true
+        ? caregiverIdFromBooking!
+        : (widget.caregiverId?.trim() ?? '');
+    final bookingStart = startTime.isNotEmpty
+        ? _parseStoredTime(startTime)
+        : null;
     final bookingEnd = endTime.isNotEmpty ? _parseStoredTime(endTime) : null;
 
     if (bookingDay == null) {
@@ -2889,30 +2887,30 @@ class _ActivityBookingDetailsScreenState
         Color(0xFF7E57C2),
       ];
 
-      final blocks =
-          <({int start, int end, Color color, String title})>[];
+      final blocks = <({int start, int end, Color color, String title})>[];
       for (int i = 0; i < taken.length; i++) {
         final r = taken[i];
         final s = toMinutes(r.start);
         final e = toMinutes(r.end);
         if (e <= s) continue;
-        blocks.add(
-          (start: s, end: e, color: palette[i % palette.length], title: 'Booked'),
-        );
+        blocks.add((
+          start: s,
+          end: e,
+          color: palette[i % palette.length],
+          title: 'Booked',
+        ));
       }
 
       if (showBooking && bookingStart != null && bookingEnd != null) {
         final s = toMinutes(bookingStart);
         final e = toMinutes(bookingEnd);
         if (e > s) {
-          blocks.add(
-            (
-              start: s,
-              end: e,
-              color: const Color(0xFF71CBBE),
-              title: 'Your booking',
-            ),
-          );
+          blocks.add((
+            start: s,
+            end: e,
+            color: const Color(0xFF71CBBE),
+            title: 'Your booking',
+          ));
         }
       }
 
@@ -2947,15 +2945,13 @@ class _ActivityBookingDetailsScreenState
         } else {
           laneEnds[lane] = item.end;
         }
-        laidOut.add(
-          (
-            start: item.start,
-            end: item.end,
-            lane: lane,
-            color: item.color,
-            title: item.title,
-          ),
-        );
+        laidOut.add((
+          start: item.start,
+          end: item.end,
+          lane: lane,
+          color: item.color,
+          title: item.title,
+        ));
       }
       final lanes = laneEnds.isEmpty ? 1 : laneEnds.length;
 
@@ -3038,8 +3034,10 @@ class _ActivityBookingDetailsScreenState
                                 top: (e.start - startMin) * pxPerMin,
                                 left: e.lane * (laneWidth + laneGap),
                                 width: laneWidth,
-                                height:
-                                    ((e.end - e.start) * pxPerMin).clamp(18.0, 9999.0),
+                                height: ((e.end - e.start) * pxPerMin).clamp(
+                                  18.0,
+                                  9999.0,
+                                ),
                                 child: Container(
                                   decoration: BoxDecoration(
                                     color: e.color,
@@ -3057,7 +3055,8 @@ class _ActivityBookingDetailsScreenState
                                     vertical: 10,
                                   ),
                                   child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       Text(
                                         e.title,
@@ -3076,7 +3075,9 @@ class _ActivityBookingDetailsScreenState
                                         style: TextStyle(
                                           fontSize: 11,
                                           fontWeight: FontWeight.w800,
-                                          color: Colors.white.withValues(alpha: 0.92),
+                                          color: Colors.white.withValues(
+                                            alpha: 0.92,
+                                          ),
                                           height: 1.1,
                                         ),
                                       ),
@@ -3137,8 +3138,9 @@ class _ActivityBookingDetailsScreenState
                   final dayNum = d.day.toString().padLeft(2, '0');
 
                   return InkWell(
-                    onTap:
-                        isPast ? null : () => setState(() => _scheduleSelectedDay = d),
+                    onTap: isPast
+                        ? null
+                        : () => setState(() => _scheduleSelectedDay = d),
                     borderRadius: BorderRadius.circular(10),
                     child: Container(
                       width: 54,
@@ -3249,9 +3251,11 @@ class _ActivityBookingDetailsScreenState
             final startRaw = entry['start']?.toString() ?? '08:00';
             final endRaw = entry['end']?.toString() ?? '18:00';
             final start =
-                _parseStoredTime(startRaw) ?? const TimeOfDay(hour: 8, minute: 0);
+                _parseStoredTime(startRaw) ??
+                const TimeOfDay(hour: 8, minute: 0);
             final end =
-                _parseStoredTime(endRaw) ?? const TimeOfDay(hour: 18, minute: 0);
+                _parseStoredTime(endRaw) ??
+                const TimeOfDay(hour: 18, minute: 0);
             map[weekday] = (available: available, start: start, end: end);
           }
           return map;
@@ -3260,8 +3264,11 @@ class _ActivityBookingDetailsScreenState
         final blockedRangesValue = blockedRanges();
         final weeklyValue = weeklyRanges();
 
-        final normalizedDay =
-            DateTime(selectedDay.year, selectedDay.month, selectedDay.day);
+        final normalizedDay = DateTime(
+          selectedDay.year,
+          selectedDay.month,
+          selectedDay.day,
+        );
         final blockedByDates = blockedRangesValue.any((r) {
           final start = DateTime(r.start.year, r.start.month, r.start.day);
           final end = DateTime(r.end.year, r.end.month, r.end.day);
@@ -3295,7 +3302,8 @@ class _ActivityBookingDetailsScreenState
 
         final taken = _scheduleTakenCache[selectedKey] ?? const <_TimeRange>[];
         final isLoadingTaken =
-            caregiverId.isNotEmpty && !_scheduleTakenCache.containsKey(selectedKey);
+            caregiverId.isNotEmpty &&
+            !_scheduleTakenCache.containsKey(selectedKey);
 
         final header = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -3362,8 +3370,8 @@ class _ActivityBookingDetailsScreenState
                     TimeOfDay(
                       hour:
                           (bookingStart.hour +
-                                  ((bookingStart.minute + 15) ~/ 60)) %
-                              24,
+                              ((bookingStart.minute + 15) ~/ 60)) %
+                          24,
                       minute: (bookingStart.minute + 15) % 60,
                     ))
               : null;
@@ -3818,7 +3826,9 @@ class _ActivityBookingDetailsScreenState
         ),
         child: DefaultProfileAvatar(
           radius: radius,
-          photoUrl: (photoUrl?.trim().isNotEmpty == true) ? photoUrl!.trim() : null,
+          photoUrl: (photoUrl?.trim().isNotEmpty == true)
+              ? photoUrl!.trim()
+              : null,
           label: label,
         ),
       ),
@@ -3833,10 +3843,16 @@ class _ActivityBookingDetailsScreenState
     );
   }
 
-  Widget _buildSectionHeader({required String title, String? hint}) {
+  Widget _buildSectionHeader({
+    required String title,
+    String? hint,
+    EdgeInsets padding = const EdgeInsets.fromLTRB(4, 6, 4, 8),
+    double hintTopSpacing = 3,
+    bool tightHint = false,
+  }) {
     final trimmedHint = (hint ?? '').trim();
     return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 6, 4, 8),
+      padding: padding,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -3854,13 +3870,27 @@ class _ActivityBookingDetailsScreenState
             ],
           ),
           if (trimmedHint.isNotEmpty) ...[
-            const SizedBox(height: 3),
+            SizedBox(height: hintTopSpacing),
             Text(
               trimmedHint,
+              strutStyle: tightHint
+                  ? const StrutStyle(
+                      forceStrutHeight: true,
+                      height: 1.0,
+                      leading: 0,
+                    )
+                  : null,
+              textHeightBehavior: tightHint
+                  ? const TextHeightBehavior(
+                      applyHeightToFirstAscent: false,
+                      applyHeightToLastDescent: false,
+                    )
+                  : null,
               style: TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.w600,
                 color: Colors.black.withValues(alpha: 0.50),
+                height: tightHint ? 1.0 : null,
               ),
             ),
           ],
@@ -3914,14 +3944,15 @@ class _ActivityBookingDetailsScreenState
         'Location not provided';
     final caregiverPhotoUrl =
         (normalizeString(caregiver['photoUrl'])?.trim().isNotEmpty == true
-            ? normalizeString(caregiver['photoUrl'])!.trim()
-            : (normalizeString(caregiver['imageUrl'])?.trim().isNotEmpty == true
-                  ? normalizeString(caregiver['imageUrl'])!.trim()
-                  : null));
+        ? normalizeString(caregiver['photoUrl'])!.trim()
+        : (normalizeString(caregiver['imageUrl'])?.trim().isNotEmpty == true
+              ? normalizeString(caregiver['imageUrl'])!.trim()
+              : null));
     final caregiverServices = extractServicePreferencesList(
       caregiver['servicePreferences'] ?? caregiver['services'],
     );
-    final caregiverServiceFallback = normalizeString(caregiver['service']) ?? '';
+    final caregiverServiceFallback =
+        normalizeString(caregiver['service']) ?? '';
     final caregiverServicesValue = caregiverServices.isNotEmpty
         ? caregiverServices.join(', ')
         : (caregiverServiceFallback.trim().isNotEmpty
@@ -4027,85 +4058,319 @@ class _ActivityBookingDetailsScreenState
     );
   }
 
-  // ignore: unused_element
   Widget _buildBookingSummaryTab(
     BuildContext context,
     Map<String, dynamic> booking,
     String caregiverId,
     String caregiverName,
   ) {
-    final events = buildTimelineEvents(booking);
+    final stageSnapshots = _extractStageSnapshots(booking);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildSectionHeader(
-            title: 'Booking flow',
-            hint: 'Status updates in time order.',
+            title: 'Stage photos',
+            hint: 'Captured during the caregiver session.',
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 0),
+            hintTopSpacing: 0,
+            tightHint: true,
           ),
-          ListView.separated(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: events.length,
-            itemBuilder: (_, index) =>
-                _buildTimelineRow(events[index], index == events.length - 1),
-            separatorBuilder: (_, __) => const SizedBox(height: 12),
-          ),
-          if (caregiverId.isNotEmpty) ...[
-            const SizedBox(height: 18),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton(
-                onPressed: () async {
-                  final personId = normalizeString(booking['personId']) ?? '';
-                  final caregiverId =
-                      normalizeString(booking['caregiverId']) ?? '';
-
-                  await FirebaseFirestore.instance
-                      .collection('bookings')
-                      .doc(widget.bookingId)
-                      .set({
-                        'trackingCaregiverId': caregiverId,
-                        if (personId.isNotEmpty) 'trackingPersonId': personId,
-                        'trackingUpdatedAt': FieldValue.serverTimestamp(),
-                      }, SetOptions(merge: true));
-
-                  if (!context.mounted) return;
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => TrackCaregiverScreen(
-                        bookingId: widget.bookingId,
-                        caregiverName: caregiverName,
-                        caregiverId: caregiverId.isNotEmpty
-                            ? caregiverId
-                            : null,
-                        personId: personId.isNotEmpty ? personId : null,
-                        showStatusUpdateButton: false,
-                      ),
-                    ),
-                  );
-                },
-                style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: _accentGreen),
-                  foregroundColor: _accentGreen,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                child: const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 12),
-                  child: Text(
-                    'Open tracker',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+          if (stageSnapshots.isEmpty)
+            Transform.translate(
+              offset: const Offset(0, -60),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(6, 0, 6, 14),
+                child: Text(
+                  'No stage photos available yet.',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.black.withValues(alpha: 0.62),
+                    height: 1.25,
                   ),
                 ),
               ),
+            )
+          else
+            Transform.translate(
+              offset: const Offset(0, -60),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(6, 0, 6, 14),
+                child: GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: stageSnapshots.length,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    crossAxisSpacing: 12,
+                    mainAxisSpacing: 12,
+                    childAspectRatio: 0.96,
+                  ),
+                  itemBuilder: (context, index) {
+                    final entry = stageSnapshots[index];
+                    final stageRaw = (entry['stage']?.toString() ?? '').trim();
+                    final stageLabel = _formatStageSnapshotStage(stageRaw);
+                    final ts = entry['createdAt'];
+                    final dt = ts is Timestamp ? ts.toDate() : null;
+                    final timeLabel = dt == null
+                        ? '-'
+                        : _formatSnapshotTime(dt);
+                    final photoUrl = (entry['photoUrl']?.toString() ?? '')
+                        .trim();
+
+                    return InkWell(
+                      borderRadius: BorderRadius.circular(16),
+                      onTap: photoUrl.isEmpty
+                          ? null
+                          : () => _openStagePhotoPreview(
+                              context,
+                              photoUrl,
+                              title: stageLabel,
+                              subtitle: timeLabel,
+                            ),
+                      child: Container(
+                        decoration: _premiumCardDecoration(radius: 16),
+                        clipBehavior: Clip.antiAlias,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Expanded(
+                              child: photoUrl.isEmpty
+                                  ? Container(
+                                      color: Colors.black.withValues(
+                                        alpha: 0.04,
+                                      ),
+                                      child: const Center(
+                                        child: Icon(
+                                          Icons.photo_outlined,
+                                          color: Colors.black26,
+                                          size: 26,
+                                        ),
+                                      ),
+                                    )
+                                  : SafeNetworkImage(
+                                      photoUrl,
+                                      fit: BoxFit.cover,
+                                      placeholder: Container(
+                                        color: Colors.black.withValues(
+                                          alpha: 0.04,
+                                        ),
+                                        child: const Center(
+                                          child: SizedBox(
+                                            width: 22,
+                                            height: 22,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      errorWidget: Container(
+                                        color: Colors.black.withValues(
+                                          alpha: 0.04,
+                                        ),
+                                        child: const Center(
+                                          child: Icon(
+                                            Icons.broken_image_outlined,
+                                            color: Colors.black26,
+                                            size: 26,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(
+                                12,
+                                10,
+                                12,
+                                10,
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    stageLabel,
+                                    style: const TextStyle(
+                                      fontSize: 12.5,
+                                      fontWeight: FontWeight.w900,
+                                      color: _profileDarkText,
+                                      height: 1.1,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    timeLabel,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700,
+                                      color: Colors.black.withValues(
+                                        alpha: 0.6,
+                                      ),
+                                      height: 1.1,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
             ),
-          ],
         ],
       ),
+    );
+  }
+
+  List<Map<String, dynamic>> _extractStageSnapshots(
+    Map<String, dynamic> booking,
+  ) {
+    final raw = booking['stageSnapshots'];
+    if (raw is! List) return const <Map<String, dynamic>>[];
+    final entries = raw
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList(growable: false);
+    final sorted = entries.toList(growable: true);
+    sorted.sort((a, b) {
+      final aTs = a['createdAt'];
+      final bTs = b['createdAt'];
+      final aDt = aTs is Timestamp ? aTs.toDate() : null;
+      final bDt = bTs is Timestamp ? bTs.toDate() : null;
+      if (aDt == null && bDt == null) return 0;
+      if (aDt == null) return 1;
+      if (bDt == null) return -1;
+      return aDt.compareTo(bDt);
+    });
+    return sorted;
+  }
+
+  String _formatStageSnapshotStage(String raw) {
+    final normalized = raw
+        .trim()
+        .toUpperCase()
+        .replaceAll(' ', '_')
+        .replaceAll('-', '_')
+        .replaceAll('__', '_');
+    switch (normalized) {
+      case 'START_SESSION':
+        return 'Start session';
+      case 'ARRIVED':
+        return 'Arrived';
+      case 'PROVIDE_SERVICES':
+        return 'Provide services';
+      case 'JOBS_DONE':
+        return 'Jobs done';
+      case 'COMPLETED':
+        return 'Completed';
+      default:
+        if (normalized.isEmpty) return 'Stage';
+        final words = normalized.split('_').where((w) => w.isNotEmpty).toList();
+        if (words.isEmpty) return 'Stage';
+        return words
+            .map((w) => '${w[0]}${w.substring(1).toLowerCase()}')
+            .join(' ');
+    }
+  }
+
+  String _formatSnapshotTime(DateTime dt) {
+    return DateFormat('d MMM yyyy • h:mm a').format(dt);
+  }
+
+  Future<void> _openStagePhotoPreview(
+    BuildContext context,
+    String photoUrl, {
+    String title = '',
+    String subtitle = '',
+  }) async {
+    final safeUrl = photoUrl.trim();
+    if (safeUrl.isEmpty) return;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        return Dialog(
+          backgroundColor: Colors.white,
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 18,
+            vertical: 18,
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (title.trim().isNotEmpty)
+                        Text(
+                          title.trim(),
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w900,
+                            color: _profileDarkText,
+                          ),
+                        ),
+                      if (subtitle.trim().isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          subtitle.trim(),
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.black.withValues(alpha: 0.62),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                AspectRatio(
+                  aspectRatio: 1,
+                  child: SafeNetworkImage(
+                    safeUrl,
+                    fit: BoxFit.cover,
+                    placeholder: const Center(
+                      child: SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
+                    errorWidget: Container(
+                      color: Colors.black.withValues(alpha: 0.04),
+                      child: const Center(
+                        child: Icon(
+                          Icons.broken_image_outlined,
+                          color: Colors.black38,
+                          size: 28,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -4192,11 +4457,15 @@ class _ActivityBookingDetailsScreenState
                 message: 'Location permission is required for SOS.',
               );
             }
-            final functions = FirebaseFunctions.instanceFor(region: 'us-central1');
+            final functions = FirebaseFunctions.instanceFor(
+              region: 'us-central1',
+            );
             await functions.httpsCallable('handleSOSAlert').call({
               'lat': pos.latitude,
               'lng': pos.longitude,
-              'reason': reason.trim().isNotEmpty ? reason.trim() : 'Emergency alert',
+              'reason': reason.trim().isNotEmpty
+                  ? reason.trim()
+                  : 'Emergency alert',
               'notifyContactIds': ids.toList(growable: false),
             });
           },
@@ -4229,11 +4498,7 @@ class _ActivityBookingDetailsScreenState
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          DefaultProfileAvatar(
-            radius: 18,
-            photoUrl: photoUrl,
-            label: name,
-          ),
+          DefaultProfileAvatar(radius: 18, photoUrl: photoUrl, label: name),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -4498,57 +4763,6 @@ class _ActivityBookingDetailsScreenState
     );
   }
 
-  Widget _buildTimelineRow(TimelineEvent event, bool isLast) {
-    final timeLabel = formatTimelineTime(event.timestamp);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Column(
-          children: [
-            Container(
-              width: 12,
-              height: 12,
-              decoration: BoxDecoration(
-                color: _accentGreen,
-                shape: BoxShape.circle,
-              ),
-            ),
-            if (!isLast) Container(width: 2, height: 40, color: _cardBorder),
-          ],
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (timeLabel.isNotEmpty)
-                Text(
-                  timeLabel,
-                  style: const TextStyle(fontSize: 11, color: Colors.grey),
-                ),
-              Text(
-                event.title,
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: _profileDarkText,
-                ),
-              ),
-              if (event.description != null && event.description!.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(
-                    event.description!,
-                    style: const TextStyle(fontSize: 12, color: Colors.black54),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
   Widget _buildInfoContentRow({
     required IconData icon,
     required String title,
@@ -4607,13 +4821,14 @@ class _ActivityBookingDetailsScreenState
         'Caregiver';
     final caregiverPhoto =
         (normalizeString(_caregiverData?['photoUrl'])?.trim().isNotEmpty == true
-            ? normalizeString(_caregiverData?['photoUrl'])!.trim()
-            : (normalizeString(_caregiverData?['imageUrl'])?.trim().isNotEmpty ==
-                      true
-                  ? normalizeString(_caregiverData?['imageUrl'])!.trim()
-                  : _defaultAvatarUrl));
-    final rawServiceLabel =
-        _booking == null ? '' : extractServiceLabelFromFirestore(booking);
+        ? normalizeString(_caregiverData?['photoUrl'])!.trim()
+        : (normalizeString(_caregiverData?['imageUrl'])?.trim().isNotEmpty ==
+                  true
+              ? normalizeString(_caregiverData?['imageUrl'])!.trim()
+              : _defaultAvatarUrl));
+    final rawServiceLabel = _booking == null
+        ? ''
+        : extractServiceLabelFromFirestore(booking);
     final service = rawServiceLabel.isNotEmpty ? rawServiceLabel : 'Home care';
     // Keep booking status available for downstream sections if needed later.
     // (No longer shown in the header card.)
@@ -4639,14 +4854,13 @@ class _ActivityBookingDetailsScreenState
               .snapshots()
               .map((snap) => snap.docs.length)
         : Stream<int>.value(0);
-    final verifiedDocsCountStream =
-        (!isCaregiverView && caregiverId.isNotEmpty)
-            ? documentsStream.map(
-                (snap) => snap.docs
-                    .where((d) => (d.data()['status'] as bool?) == true)
-                    .length,
-              )
-            : Stream<int>.value(0);
+    final verifiedDocsCountStream = (!isCaregiverView && caregiverId.isNotEmpty)
+        ? documentsStream.map(
+            (snap) => snap.docs
+                .where((d) => (d.data()['status'] as bool?) == true)
+                .length,
+          )
+        : Stream<int>.value(0);
     final clientsCountStream = (!isCaregiverView && caregiverId.isNotEmpty)
         ? FirebaseFirestore.instance
               .collection('bookings')
@@ -4658,9 +4872,14 @@ class _ActivityBookingDetailsScreenState
 
     final hasBookingTab = !_isPreviewMode && !widget.hideBookingDetailsTab;
     final showScheduleTab = _isPreviewMode && !isCaregiverView;
+    final normalizedStatus = _normalizeBookingStatusForListener(
+      normalizeString(booking['status']) ?? '',
+    );
+    final showBookingSummaryTab = normalizedStatus == 'COMPLETED';
 
     late final List<String> tabLabels;
     late final int bookingDetailsTabIndex;
+    late final int bookingSummaryTabIndex;
     late final int scheduleTabIndex;
     late final int reviewsTabIndex;
     late final int emergencyTabIndex;
@@ -4670,22 +4889,42 @@ class _ActivityBookingDetailsScreenState
         'Client details',
         'Emergency contact',
         'Booking details',
+        if (showBookingSummaryTab) 'Booking summary',
       ];
       bookingDetailsTabIndex = 2;
+      bookingSummaryTabIndex = showBookingSummaryTab ? 3 : -1;
       scheduleTabIndex = -1;
       reviewsTabIndex = -1;
       emergencyTabIndex = 1;
     } else {
-      tabLabels = <String>[
-        'Caregiver details',
-        if (hasBookingTab) 'Booking details',
-        if (showScheduleTab) 'Schedule',
-        'Reviews',
-      ];
-      bookingDetailsTabIndex = hasBookingTab ? 1 : -1;
-      scheduleTabIndex = showScheduleTab ? (hasBookingTab ? 2 : 1) : -1;
-      reviewsTabIndex =
-          hasBookingTab ? (showScheduleTab ? 3 : 2) : (showScheduleTab ? 2 : 1);
+      final nextLabels = <String>['Caregiver details'];
+      var nextBookingDetailsIndex = -1;
+      var nextBookingSummaryIndex = -1;
+      var nextScheduleIndex = -1;
+
+      if (hasBookingTab) {
+        nextBookingDetailsIndex = nextLabels.length;
+        nextLabels.add('Booking details');
+      }
+
+      if (showBookingSummaryTab) {
+        nextBookingSummaryIndex = nextLabels.length;
+        nextLabels.add('Booking summary');
+      }
+
+      if (showScheduleTab) {
+        nextScheduleIndex = nextLabels.length;
+        nextLabels.add('Schedule');
+      }
+
+      final nextReviewsIndex = nextLabels.length;
+      nextLabels.add('Reviews');
+
+      tabLabels = nextLabels;
+      bookingDetailsTabIndex = nextBookingDetailsIndex;
+      bookingSummaryTabIndex = nextBookingSummaryIndex;
+      scheduleTabIndex = nextScheduleIndex;
+      reviewsTabIndex = nextReviewsIndex;
       emergencyTabIndex = -1;
     }
 
@@ -4710,6 +4949,14 @@ class _ActivityBookingDetailsScreenState
       if (hasBookingTab && index == bookingDetailsTabIndex) {
         return _buildBookingDetailsTab();
       }
+      if (bookingSummaryTabIndex >= 0 && index == bookingSummaryTabIndex) {
+        return _buildBookingSummaryTab(
+          context,
+          booking,
+          caregiverId,
+          caregiverName,
+        );
+      }
       if (scheduleTabIndex >= 0 && index == scheduleTabIndex) {
         return _buildScheduleTab(booking);
       }
@@ -4721,10 +4968,10 @@ class _ActivityBookingDetailsScreenState
 
     final clientPhoto =
         (normalizeString(_userData?['photoUrl'])?.trim().isNotEmpty == true
-            ? normalizeString(_userData?['photoUrl'])!.trim()
-            : (normalizeString(_userData?['imageUrl'])?.trim().isNotEmpty == true
-                  ? normalizeString(_userData?['imageUrl'])!.trim()
-                  : _defaultAvatarUrl));
+        ? normalizeString(_userData?['photoUrl'])!.trim()
+        : (normalizeString(_userData?['imageUrl'])?.trim().isNotEmpty == true
+              ? normalizeString(_userData?['imageUrl'])!.trim()
+              : _defaultAvatarUrl));
 
     final personDisplay = _resolvePersonDisplay(booking);
     final clientName =
@@ -4734,105 +4981,106 @@ class _ActivityBookingDetailsScreenState
 
     final headerName = isCaregiverView ? clientName : caregiverName;
     final headerPhoto = isCaregiverView ? clientPhoto : caregiverPhoto;
-    final headerAddress =
-        isCaregiverView ? personDisplay.address : caregiverDefaultAddress;
+    final headerAddress = isCaregiverView
+        ? personDisplay.address
+        : caregiverDefaultAddress;
 
-    final coverPhoto =
-        headerPhoto.trim().isNotEmpty ? headerPhoto.trim() : _defaultAvatarUrl;
+    final coverPhoto = headerPhoto.trim().isNotEmpty
+        ? headerPhoto.trim()
+        : _defaultAvatarUrl;
 
     const double headerCardOverlap = 96;
-    final headerWithMetrics =
-        isCaregiverView
-            ? SizedBox(
-                height: 220 + headerCardOverlap,
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    const Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      child: SizedBox(height: 220),
-                    ),
-                    Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      child: _buildHeroCover(coverPhoto),
-                    ),
-                    Positioned(
-                      left: 16,
-                      right: 16,
-                      bottom: 0,
-                      child: _buildHeaderCard(
-                        name: headerName,
-                        serviceLabel: service,
-                        servicePreferences: const [],
-                        defaultAddress: headerAddress,
-                        clientsCount: 0,
-                        verifiedDocsCount: 0,
-                        reviewsCount: 0,
-                        photoUrl: headerPhoto,
-                        hideMetrics: true,
-                        showServiceSubtitle: true,
-                      ),
-                    ),
-                  ],
+    final headerWithMetrics = isCaregiverView
+        ? SizedBox(
+            height: 220 + headerCardOverlap,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                const Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: SizedBox(height: 220),
                 ),
-              )
-            : StreamBuilder<int>(
-                stream: clientsCountStream,
-                builder: (context, clientsSnap) {
-                  final clientsCount = clientsSnap.data ?? 0;
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: _buildHeroCover(coverPhoto),
+                ),
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: 0,
+                  child: _buildHeaderCard(
+                    name: headerName,
+                    serviceLabel: service,
+                    servicePreferences: const [],
+                    defaultAddress: headerAddress,
+                    clientsCount: 0,
+                    verifiedDocsCount: 0,
+                    reviewsCount: 0,
+                    photoUrl: headerPhoto,
+                    hideMetrics: true,
+                    showServiceSubtitle: true,
+                  ),
+                ),
+              ],
+            ),
+          )
+        : StreamBuilder<int>(
+            stream: clientsCountStream,
+            builder: (context, clientsSnap) {
+              final clientsCount = clientsSnap.data ?? 0;
+              return StreamBuilder<int>(
+                stream: verifiedDocsCountStream,
+                builder: (context, docsSnap) {
+                  final verifiedDocs = docsSnap.data ?? 0;
                   return StreamBuilder<int>(
-                    stream: verifiedDocsCountStream,
-                    builder: (context, docsSnap) {
-                      final verifiedDocs = docsSnap.data ?? 0;
-                      return StreamBuilder<int>(
-                        stream: reviewsCountStream,
-                        builder: (context, reviewsSnap) {
-                          final reviewsCount = reviewsSnap.data ?? 0;
-                          return SizedBox(
-                            height: 220 + headerCardOverlap,
-                            child: Stack(
-                              clipBehavior: Clip.none,
-                              children: [
-                                const Positioned(
-                                  top: 0,
-                                  left: 0,
-                                  right: 0,
-                                  child: SizedBox(height: 220),
-                                ),
-                                Positioned(
-                                  top: 0,
-                                  left: 0,
-                                  right: 0,
-                                  child: _buildHeroCover(coverPhoto),
-                                ),
-                                Positioned(
-                                  left: 16,
-                                  right: 16,
-                                  bottom: 0,
-                                  child: _buildHeaderCard(
-                                    name: caregiverName,
-                                    serviceLabel: service,
-                                    servicePreferences: const [],
-                                    defaultAddress: caregiverDefaultAddress,
-                                    clientsCount: clientsCount,
-                                    verifiedDocsCount: verifiedDocs,
-                                    reviewsCount: reviewsCount,
-                                    photoUrl: caregiverPhoto,
-                                  ),
-                                ),
-                              ],
+                    stream: reviewsCountStream,
+                    builder: (context, reviewsSnap) {
+                      final reviewsCount = reviewsSnap.data ?? 0;
+                      return SizedBox(
+                        height: 220 + headerCardOverlap,
+                        child: Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            const Positioned(
+                              top: 0,
+                              left: 0,
+                              right: 0,
+                              child: SizedBox(height: 220),
                             ),
-                          );
-                        },
+                            Positioned(
+                              top: 0,
+                              left: 0,
+                              right: 0,
+                              child: _buildHeroCover(coverPhoto),
+                            ),
+                            Positioned(
+                              left: 16,
+                              right: 16,
+                              bottom: 0,
+                              child: _buildHeaderCard(
+                                name: caregiverName,
+                                serviceLabel: service,
+                                servicePreferences: const [],
+                                defaultAddress: caregiverDefaultAddress,
+                                clientsCount: clientsCount,
+                                verifiedDocsCount: verifiedDocs,
+                                reviewsCount: reviewsCount,
+                                photoUrl: caregiverPhoto,
+                              ),
+                            ),
+                          ],
+                        ),
                       );
                     },
                   );
                 },
               );
+            },
+          );
     _scheduleAutoSheetExtentUpdate();
 
     final tabSelector = _buildOtherInfoTabs(
@@ -4861,16 +5109,18 @@ class _ActivityBookingDetailsScreenState
     final effectivePanelT = previewDenom <= 0
         ? 0.0
         : (_panelSeeded
-                ? _panelController.value
-                : ((sheetInitialExtent - sheetMinExtent) / previewDenom))
-            .clamp(0.0, 1.0);
+                  ? _panelController.value
+                  : ((sheetInitialExtent - sheetMinExtent) / previewDenom))
+              .clamp(0.0, 1.0);
     final effectiveSheetExtent =
         sheetMinExtent + (previewDenom * effectivePanelT);
     final showPreviewCta = _canBookFromSchedule && widget.showPreviewFrontSheet;
     final previewT = previewDenom <= 0
         ? 0.0
-        : ((effectiveSheetExtent - sheetMinExtent) / previewDenom)
-            .clamp(0.0, 1.0);
+        : ((effectiveSheetExtent - sheetMinExtent) / previewDenom).clamp(
+            0.0,
+            1.0,
+          );
     final hidePreviewCta = showPreviewCta && previewT > 0.55;
     final showTrackFrontSheet =
         widget.showTrackFrontSheet &&
@@ -4879,7 +5129,8 @@ class _ActivityBookingDetailsScreenState
         _showTrackButton &&
         caregiverId.trim().isNotEmpty;
     final hideTrackFrontSheet = showTrackFrontSheet && previewT > 0.55;
-    final showCaregiverFrontSheet = isCaregiverView && !_isPreviewMode;
+    final showCaregiverFrontSheet =
+        isCaregiverView && !_isPreviewMode && normalizedStatus != 'COMPLETED';
     final hideCaregiverFrontSheet = showCaregiverFrontSheet && previewT > 0.55;
     final String? distance = null;
     final String? eta = null;
@@ -4922,8 +5173,10 @@ class _ActivityBookingDetailsScreenState
             final denom = (sheetMaxExtent - sheetMinExtent);
             final desiredInitialT = denom <= 0
                 ? 0.0
-                : ((sheetInitialExtent - sheetMinExtent) / denom)
-                    .clamp(0.0, 1.0);
+                : ((sheetInitialExtent - sheetMinExtent) / denom).clamp(
+                    0.0,
+                    1.0,
+                  );
             if (!_panelSeeded ||
                 (!_panelUserInteracted &&
                     (_panelController.value - desiredInitialT).abs() > 0.001)) {
@@ -4941,11 +5194,14 @@ class _ActivityBookingDetailsScreenState
             final extentBase =
                 sheetMinExtent + (denom * _panelController.value);
             final t = denom <= 0 ? 0.0 : _panelController.value;
-            final appBarT =
-                ((extentBase - 0.90) / 0.10).clamp(0.0, 1.0).toDouble();
-            final topChromeInset = (lerpDouble(0, kToolbarHeight + 6.0, appBarT) ??
-                    0.0)
-                .clamp(0.0, double.infinity);
+            final appBarT = ((extentBase - 0.90) / 0.10)
+                .clamp(0.0, 1.0)
+                .toDouble();
+            final topChromeInset =
+                (lerpDouble(0, kToolbarHeight + 6.0, appBarT) ?? 0.0).clamp(
+                  0.0,
+                  double.infinity,
+                );
             final previewVisible = showPreviewCta && !hidePreviewCta;
             final trackVisible = showTrackFrontSheet && !hideTrackFrontSheet;
             final caregiverVisible =
@@ -4954,10 +5210,12 @@ class _ActivityBookingDetailsScreenState
                 ? 172.0
                 : (caregiverVisible ? 212.0 : 0.0);
 
-            final panelHeight =
-                (extentBase * screenHeight).clamp(0.0, screenHeight).toDouble();
-            final dragRangePx =
-                (denom.abs() * screenHeight).clamp(1.0, double.infinity).toDouble();
+            final panelHeight = (extentBase * screenHeight)
+                .clamp(0.0, screenHeight)
+                .toDouble();
+            final dragRangePx = (denom.abs() * screenHeight)
+                .clamp(1.0, double.infinity)
+                .toDouble();
 
             return Align(
               alignment: Alignment.bottomCenter,
@@ -4971,42 +5229,49 @@ class _ActivityBookingDetailsScreenState
                     borderRadius: const BorderRadius.vertical(
                       top: Radius.circular(28),
                     ),
-                  border: Border.all(
-                    color: Colors.black.withValues(
-                      alpha: (lerpDouble(0.05, 0.07, t) ?? 0.06)
-                          .clamp(0.0, 1.0),
-                    ),
-                  ),
-                  boxShadow: [
-                    BoxShadow(
+                    border: Border.all(
                       color: Colors.black.withValues(
-                        alpha: (lerpDouble(0.14, 0.22, t) ?? 0.14)
-                            .clamp(0.0, 1.0),
-                      ),
-                      blurRadius: (lerpDouble(18, 26, t) ?? 22)
-                          .clamp(0.0, double.infinity),
-                      offset: Offset(
-                        0,
-                        -((lerpDouble(6, 10, t) ?? 8)
-                            .clamp(0.0, double.infinity)),
+                        alpha: (lerpDouble(0.05, 0.07, t) ?? 0.06).clamp(
+                          0.0,
+                          1.0,
+                        ),
                       ),
                     ),
-                  ],
-                ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(
+                          alpha: (lerpDouble(0.14, 0.22, t) ?? 0.14).clamp(
+                            0.0,
+                            1.0,
+                          ),
+                        ),
+                        blurRadius: (lerpDouble(18, 26, t) ?? 22).clamp(
+                          0.0,
+                          double.infinity,
+                        ),
+                        offset: Offset(
+                          0,
+                          -((lerpDouble(6, 10, t) ?? 8).clamp(
+                            0.0,
+                            double.infinity,
+                          )),
+                        ),
+                      ),
+                    ],
+                  ),
                   child: Column(
                     children: [
                       SizedBox(height: topChromeInset),
                       GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         dragStartBehavior: DragStartBehavior.down,
-                        onVerticalDragUpdate:
-                            (details) => _onPanelHandleDragUpdate(
+                        onVerticalDragUpdate: (details) =>
+                            _onPanelHandleDragUpdate(
                               details.delta.dy,
                               dragRangePx,
                             ),
-                        onVerticalDragEnd: (details) => _onPanelHandleDragEnd(
-                          details.primaryVelocity ?? 0,
-                        ),
+                        onVerticalDragEnd: (details) =>
+                            _onPanelHandleDragEnd(details.primaryVelocity ?? 0),
                         onVerticalDragCancel: () => _onPanelHandleDragEnd(0),
                         child: SizedBox(
                           height: 44,
@@ -5023,42 +5288,47 @@ class _ActivityBookingDetailsScreenState
                           ),
                         ),
                       ),
-                    Divider(
-                      height: 1,
-                      color: Colors.black.withValues(alpha: 0.06),
-                    ),
-                    const SizedBox(height: 10),
-                    tabSelector,
-                    Divider(
-                      height: 10,
-                      thickness: 2,
-                      color: Colors.black.withValues(alpha: 0.12),
-                    ),
-                    const SizedBox(height: 6),
-                    Expanded(
-                      child: ScrollConfiguration(
-                        behavior: const _NoOverscrollScrollBehavior(),
-                        child: ListView(
-                          controller: _panelScrollController,
-                          padding: EdgeInsets.only(bottom: bottomCtaPadding),
-                          physics: const ClampingScrollPhysics(),
-                          children: [
-                            FadeTransition(
-                              opacity: _tabFade,
-                              child: SlideTransition(
-                                position: _tabSlide,
-                                child: Padding(
-                                  padding: const EdgeInsets.fromLTRB(0, 2, 0, 12),
-                                  child: selectedTabContent(),
+                      Divider(
+                        height: 1,
+                        color: Colors.black.withValues(alpha: 0.06),
+                      ),
+                      const SizedBox(height: 10),
+                      tabSelector,
+                      Divider(
+                        height: 10,
+                        thickness: 2,
+                        color: Colors.black.withValues(alpha: 0.12),
+                      ),
+                      const SizedBox(height: 2),
+                      Expanded(
+                        child: ScrollConfiguration(
+                          behavior: const _NoOverscrollScrollBehavior(),
+                          child: ListView(
+                            controller: _panelScrollController,
+                            padding: EdgeInsets.only(bottom: bottomCtaPadding),
+                            physics: const ClampingScrollPhysics(),
+                            children: [
+                              FadeTransition(
+                                opacity: _tabFade,
+                                child: SlideTransition(
+                                  position: _tabSlide,
+                                  child: Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      0,
+                                      0,
+                                      0,
+                                      12,
+                                    ),
+                                    child: selectedTabContent(),
+                                  ),
                                 ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                  ],
-                ),
+                    ],
+                  ),
                 ),
               ),
             );

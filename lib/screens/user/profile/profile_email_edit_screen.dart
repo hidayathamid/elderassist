@@ -534,7 +534,7 @@ class _ProfileEmailEditScreenState extends State<ProfileEmailEditScreen>
       await _showInfoDialog(
         title: 'Verification sent',
         message:
-            'We sent a verification link to:\n\n$newEmail\n\nPlease verify the email, then return to the app.',
+            'We sent a verification link to:\n\n$newEmail\n\nPlease verify the email, then return to the app.\n\nIf the session expires, tap "Log out & sign in" to complete the update.',
         onOk: () {},
       );
     } on FirebaseAuthException catch (e) {
@@ -731,10 +731,10 @@ class _ProfileEmailEditScreenState extends State<ProfileEmailEditScreen>
     final isSuccessful = _completed;
     final buttonLabel = isSuccessful
         ? 'Successful'
-        : (isAwaiting ? 'I have verified' : 'Verify');
+        : (isAwaiting ? 'Log out & sign in' : 'Verify');
     final VoidCallback? buttonAction = (!isSuccessful && canVerify)
         ? (isAwaiting
-              ? () => _tryCompleteAfterVerification()
+              ? () => _signOutAndGoToLogin(prefilledEmail: pendingEmail)
               : _sendVerification)
         : null;
 

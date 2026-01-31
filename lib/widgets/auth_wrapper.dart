@@ -9,6 +9,7 @@ import '../screens/admin/admin_root_screen.dart';
 import '../screens/caregiver/caregiver_root_screen.dart';
 import '../screens/user/user_root_screen.dart';
 import '../screens/user/profile/profile_email_edit_screen.dart';
+import '../screens/user/profile/profile_edit_screen.dart';
 
 class AuthWrapper extends StatefulWidget {
   const AuthWrapper({super.key});
@@ -171,12 +172,30 @@ class _PostLoginActionGateState extends State<_PostLoginActionGate> {
           .trim();
       if (initialEmail.isEmpty) return;
       if (!mounted) return;
-      await Navigator.of(context).push(
+      final result = await Navigator.of(context).push<String>(
         MaterialPageRoute(
           builder: (_) => ProfileEmailEditScreen(
             initialEmail: initialEmail,
             isCaregiver: widget.isCaregiver,
           ),
+        ),
+      );
+      if (!mounted) return;
+      // If the email edit completed successfully, route user to ProfileEditScreen.
+      // (Normal login flow is unchanged; this runs only for the post-login action.)
+      final nextEmail = (result ?? '').trim();
+      if (nextEmail.isEmpty) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => widget.isCaregiver
+              ? const ProfileEditScreen(
+                  useCaregiverData: true,
+                  showPasswordResetField: true,
+                )
+              : const ProfileEditScreen(
+                  showBudgetField: true,
+                  showPasswordResetField: true,
+                ),
         ),
       );
     });
