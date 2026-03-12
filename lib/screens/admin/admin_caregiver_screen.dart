@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'dart:io' show File, Platform;
 import 'dart:math' as math;
+import 'dart:ui' show lerpDouble;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:open_filex/open_filex.dart';
@@ -20,6 +22,7 @@ import 'admin_ui.dart';
 
 const Color _profileDarkText = Color(0xFF1B1D29);
 const Color _primaryBlue = Color(0xFF00A8A7);
+const double _panelMaxExtent = 0.96;
 const List<BoxShadow> _cardShadow = [
   BoxShadow(color: Color(0x0A000000), blurRadius: 10, offset: Offset(0, 4)),
 ];
@@ -36,10 +39,17 @@ class AdminCaregiverScreen extends StatefulWidget {
   State<AdminCaregiverScreen> createState() => _AdminCaregiverScreenState();
 }
 
-class _AdminCaregiverScreenState extends State<AdminCaregiverScreen> {
+class _AdminCaregiverScreenState extends State<AdminCaregiverScreen>
+    with TickerProviderStateMixin {
   final TextEditingController _searchController = TextEditingController();
   String _searchText = '';
   bool _modalSheetScrimVisible = false;
+
+  late final AnimationController _panelController;
+  final ScrollController _panelScrollController = ScrollController();
+  bool _panelSeeded = false;
+  bool _panelUserInteracted = false;
+  double? _pendingPanelSeedValue;
 
   late DateTime _selectedMonth;
   _CaregiverStatusFilter _statusFilter = _CaregiverStatusFilter.all;
@@ -51,6 +61,14 @@ class _AdminCaregiverScreenState extends State<AdminCaregiverScreen> {
   @override
   void initState() {
     super.initState();
+    _panelController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+    _panelController.addListener(() {
+      if (!mounted) return;
+      setState(() {});
+    });
     final now = DateTime.now();
     _selectedMonth = DateTime(now.year, now.month);
     _searchController.addListener(() {
@@ -61,8 +79,33 @@ class _AdminCaregiverScreenState extends State<AdminCaregiverScreen> {
 
   @override
   void dispose() {
+    _panelController.dispose();
+    _panelScrollController.dispose();
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _onPanelHandleDragUpdate(double deltaY, double dragRangePx) {
+    _panelUserInteracted = true;
+    final next = (_panelController.value - (deltaY / dragRangePx)).clamp(
+      0.0,
+      1.0,
+    );
+    _panelController.value = next;
+  }
+
+  void _onPanelHandleDragEnd(double velocity) {
+    _panelUserInteracted = true;
+    if (velocity.abs() > 500) {
+      if (velocity < 0) {
+        _panelController.animateTo(1.0, curve: Curves.easeOutCubic);
+      } else {
+        _panelController.animateTo(0.0, curve: Curves.easeOutCubic);
+      }
+      return;
+    }
+    final snapTarget = _panelController.value >= 0.5 ? 1.0 : 0.0;
+    _panelController.animateTo(snapTarget, curve: Curves.easeOutCubic);
   }
 
   Future<void> _deleteApplication(_CaregiverApplicationEntry entry) async {
@@ -130,19 +173,16 @@ class _AdminCaregiverScreenState extends State<AdminCaregiverScreen> {
     );
     if (confirm != true) return;
 
-    await FirebaseFirestore.instance.collection('waitinglist').doc(uid).set(
-      {
-        'hidden': true,
-        'hiddenAt': FieldValue.serverTimestamp(),
-        'updatedAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
+    await FirebaseFirestore.instance.collection('waitinglist').doc(uid).set({
+      'hidden': true,
+      'hiddenAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
 
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Application removed.')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Application removed.')));
   }
 
   void _shiftMonth(int delta) {
@@ -209,8 +249,9 @@ class _AdminCaregiverScreenState extends State<AdminCaregiverScreen> {
     );
 
     try {
-      final callable =
-          _functions.httpsCallable('generateAdminCaregiverVerificationsReport');
+      final callable = _functions.httpsCallable(
+        'generateAdminCaregiverVerificationsReport',
+      );
       final result = await callable.call(<String, dynamic>{
         'year': month.year,
         'month': month.month,
@@ -230,8 +271,9 @@ class _AdminCaregiverScreenState extends State<AdminCaregiverScreen> {
       }
 
       final bytes = base64Decode(pdfBase64);
-      final suggested =
-          fileName.trim().isNotEmpty ? fileName.trim() : 'caregiver-report.pdf';
+      final suggested = fileName.trim().isNotEmpty
+          ? fileName.trim()
+          : 'caregiver-report.pdf';
 
       if (Platform.isAndroid || Platform.isIOS) {
         final dir = await getApplicationDocumentsDirectory();
@@ -253,9 +295,9 @@ class _AdminCaregiverScreenState extends State<AdminCaregiverScreen> {
     } catch (e) {
       closeLoadingIfOpen();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to generate report: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to generate report: $e')));
     }
   }
 
@@ -284,6 +326,12 @@ class _AdminCaregiverScreenState extends State<AdminCaregiverScreen> {
         .where('status', isEqualTo: false)
         .snapshots();
 
+    final bottomInset = MediaQuery.of(context).padding.bottom;
+    final panelBackdropAlpha =
+        (lerpDouble(0.0, 0.08, _panelController.value) ?? 0.0)
+            .clamp(0.0, 0.12)
+            .toDouble();
+
     return Scaffold(
       backgroundColor: activityBackgroundColor,
       appBar: buildProfileStyleAppBar(
@@ -292,54 +340,204 @@ class _AdminCaregiverScreenState extends State<AdminCaregiverScreen> {
       ),
       body: Stack(
         children: [
-          Padding(
+          ListView(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-            child: Column(
-              children: [
-                _CaregiversAnalyticsCard(
-                  monthLabel: monthLabel,
-                  onPrev: () => _shiftMonth(-1),
-                  onNext: () => _shiftMonth(1),
-                  onGenerateReport: _generateMonthlyCaregiverVerificationsReport,
-                  monthDocsStream: monthAppsStream,
+            physics: const NeverScrollableScrollPhysics(),
+            children: [
+              _CaregiversAnalyticsCard(
+                monthLabel: monthLabel,
+                onPrev: () => _shiftMonth(-1),
+                onNext: () => _shiftMonth(1),
+                onGenerateReport: _generateMonthlyCaregiverVerificationsReport,
+                monthDocsStream: monthAppsStream,
+              ),
+            ],
+          ),
+          if (panelBackdropAlpha > 0.001)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 120),
+                  curve: Curves.easeOut,
+                  color: Colors.black.withValues(alpha: panelBackdropAlpha),
                 ),
-                const SizedBox(height: 12),
-                _SearchField(controller: _searchController),
-                const SizedBox(height: 12),
-                _CaregiverFilterBar(
-                  selected: _statusFilter,
-                  onSelected: (f) => setState(() => _statusFilter = f),
-                ),
-                const SizedBox(height: 10),
-                Expanded(
-                  child: _ApplicationsList(
-                    waitingStream: waitingStream,
-                    pendingDocsStream: pendingDocsStream,
-                    statusFilter: _statusFilter,
-                    searchText: _searchText,
-                    onOpenSheet: (entry, editable) async {
-                      setState(() => _modalSheetScrimVisible = true);
-                      try {
-                        await showModalBottomSheet<void>(
-                          context: context,
-                          isScrollControlled: true,
-                          barrierColor: Colors.transparent,
-                          backgroundColor: Colors.transparent,
-                          builder: (_) => editable
-                              ? _CaregiverVerificationEditSheet(entry: entry)
-                              : _CaregiverVerificationViewSheet(entry: entry),
-                        );
-                      } finally {
-                        if (mounted) {
-                          setState(() => _modalSheetScrimVisible = false);
-                        }
-                      }
-                    },
-                    onDelete: (entry) => _deleteApplication(entry),
+              ),
+            ),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final screenHeight = constraints.maxHeight;
+              const estimatedHeaderHeight = 280.0;
+              const desiredTopGap = 12.0;
+              final panelMinExtent =
+                  ((screenHeight - (estimatedHeaderHeight + desiredTopGap)) /
+                          screenHeight)
+                      .clamp(0.30, 0.70)
+                      .toDouble();
+
+              final denom = (_panelMaxExtent - panelMinExtent).clamp(0.0, 1.0);
+              const desiredInitialT = 0.0;
+
+              if (!_panelSeeded ||
+                  (!_panelUserInteracted &&
+                      (_panelController.value - desiredInitialT).abs() >
+                          0.001)) {
+                _panelSeeded = true;
+                _pendingPanelSeedValue = desiredInitialT;
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!mounted) return;
+                  if (_panelUserInteracted) return;
+                  final seed = _pendingPanelSeedValue;
+                  if (seed == null) return;
+                  _panelController.value = seed;
+                });
+              }
+
+              final extentBase =
+                  panelMinExtent + (denom * _panelController.value);
+              final t = denom <= 0 ? 0.0 : _panelController.value;
+              final panelHeight = (extentBase * screenHeight)
+                  .clamp(0.0, screenHeight)
+                  .toDouble();
+              final dragRangePx = (denom.abs() * screenHeight)
+                  .clamp(1.0, double.infinity)
+                  .toDouble();
+
+              return Align(
+                alignment: Alignment.bottomCenter,
+                child: SizedBox(
+                  width: double.infinity,
+                  height: panelHeight,
+                  child: Container(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: const BorderRadius.vertical(
+                        top: Radius.circular(28),
+                      ),
+                      border: Border.all(
+                        color: Colors.black.withValues(
+                          alpha: (lerpDouble(0.05, 0.07, t) ?? 0.06).clamp(
+                            0.0,
+                            1.0,
+                          ),
+                        ),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(
+                            alpha: (lerpDouble(0.14, 0.22, t) ?? 0.14).clamp(
+                              0.0,
+                              1.0,
+                            ),
+                          ),
+                          blurRadius: (lerpDouble(18, 26, t) ?? 22).clamp(
+                            0.0,
+                            double.infinity,
+                          ),
+                          offset: Offset(
+                            0,
+                            -((lerpDouble(6, 10, t) ?? 8).clamp(
+                              0.0,
+                              double.infinity,
+                            )),
+                          ),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      children: [
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          dragStartBehavior: DragStartBehavior.down,
+                          onVerticalDragUpdate: (details) =>
+                              _onPanelHandleDragUpdate(
+                                details.delta.dy,
+                                dragRangePx,
+                              ),
+                          onVerticalDragEnd: (details) => _onPanelHandleDragEnd(
+                            details.primaryVelocity ?? 0,
+                          ),
+                          onVerticalDragCancel: () => _onPanelHandleDragEnd(0),
+                          child: SizedBox(
+                            height: 44,
+                            width: double.infinity,
+                            child: Center(
+                              child: Container(
+                                width: 44,
+                                height: 5,
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withValues(alpha: 0.18),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        Divider(
+                          height: 1,
+                          color: Colors.black.withValues(alpha: 0.06),
+                        ),
+                        const SizedBox(height: 12),
+                        Expanded(
+                          child: ListView(
+                            controller: _panelScrollController,
+                            padding: EdgeInsets.only(
+                              bottom: (bottomInset + 24).clamp(24.0, 64.0),
+                            ),
+                            physics: const ClampingScrollPhysics(),
+                            children: [
+                              _SearchField(controller: _searchController),
+                              const SizedBox(height: 12),
+                              _CaregiverFilterBar(
+                                selected: _statusFilter,
+                                onSelected: (f) =>
+                                    setState(() => _statusFilter = f),
+                              ),
+                              const SizedBox(height: 10),
+                              _ApplicationsList(
+                                waitingStream: waitingStream,
+                                pendingDocsStream: pendingDocsStream,
+                                statusFilter: _statusFilter,
+                                searchText: _searchText,
+                                shrinkWrap: true,
+                                physics: const NeverScrollableScrollPhysics(),
+                                onOpenSheet: (entry, editable) async {
+                                  setState(
+                                    () => _modalSheetScrimVisible = true,
+                                  );
+                                  try {
+                                    await showModalBottomSheet<void>(
+                                      context: context,
+                                      isScrollControlled: true,
+                                      barrierColor: Colors.transparent,
+                                      backgroundColor: Colors.transparent,
+                                      builder: (_) => editable
+                                          ? _CaregiverVerificationEditSheet(
+                                              entry: entry,
+                                            )
+                                          : _CaregiverVerificationViewSheet(
+                                              entry: entry,
+                                            ),
+                                    );
+                                  } finally {
+                                    if (mounted) {
+                                      setState(
+                                        () => _modalSheetScrimVisible = false,
+                                      );
+                                    }
+                                  }
+                                },
+                                onDelete: (entry) => _deleteApplication(entry),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ],
-            ),
+              );
+            },
           ),
           Positioned.fill(
             child: IgnorePointer(
@@ -422,8 +620,8 @@ class _CaregiverFilterBar extends StatelessWidget {
     final label = selected == _CaregiverStatusFilter.verified
         ? 'Verified caregivers'
         : selected == _CaregiverStatusFilter.unverified
-            ? 'Unverified caregivers'
-            : 'All caregivers';
+        ? 'Unverified caregivers'
+        : 'All caregivers';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -550,6 +748,8 @@ class _ApplicationsList extends StatelessWidget {
     required this.pendingDocsStream,
     required this.statusFilter,
     required this.searchText,
+    this.shrinkWrap = false,
+    this.physics,
     required this.onOpenSheet,
     required this.onDelete,
   });
@@ -558,8 +758,10 @@ class _ApplicationsList extends StatelessWidget {
   final Stream<QuerySnapshot<Map<String, dynamic>>> pendingDocsStream;
   final _CaregiverStatusFilter statusFilter;
   final String searchText;
+  final bool shrinkWrap;
+  final ScrollPhysics? physics;
   final Future<void> Function(_CaregiverApplicationEntry entry, bool editable)
-      onOpenSheet;
+  onOpenSheet;
   final Future<void> Function(_CaregiverApplicationEntry entry) onDelete;
 
   @override
@@ -591,45 +793,46 @@ class _ApplicationsList extends StatelessWidget {
             }
 
             final search = searchText.trim().toLowerCase();
-            final entries = waitingDocs
-                .map((doc) {
-                  final data = doc.data();
-                  final uid = doc.id.trim();
-                  if ((data['hidden'] as bool?) == true) {
-                    return null;
-                  }
-                  final verified = (data['verified'] as bool?) == true;
-                  return _CaregiverApplicationEntry(
-                    uid: uid,
-                    name: (data['name'] as String?)?.trim() ?? '',
-                    email: (data['email'] as String?)?.trim() ?? '',
-                    phone: (data['phone'] as String?)?.trim() ?? '',
-                    createdAt: data['createdAt'] as Timestamp?,
-                    verified: verified,
-                    pendingDocs: pendingCounts[uid] ?? 0,
-                  );
-                })
-                .whereType<_CaregiverApplicationEntry>()
-                .where((e) {
-                  if (statusFilter == _CaregiverStatusFilter.verified &&
-                      !e.verified) {
-                    return false;
-                  }
-                  if (statusFilter == _CaregiverStatusFilter.unverified &&
-                      e.verified) {
-                    return false;
-                  }
-                  if (search.isEmpty) return true;
-                  final hay =
-                      '${e.uid} ${e.name} ${e.email} ${e.phone}'.toLowerCase();
-                  return hay.contains(search);
-                })
-                .toList()
-              ..sort((a, b) {
-                final aTs = a.createdAt?.millisecondsSinceEpoch ?? 0;
-                final bTs = b.createdAt?.millisecondsSinceEpoch ?? 0;
-                return bTs.compareTo(aTs);
-              });
+            final entries =
+                waitingDocs
+                    .map((doc) {
+                      final data = doc.data();
+                      final uid = doc.id.trim();
+                      if ((data['hidden'] as bool?) == true) {
+                        return null;
+                      }
+                      final verified = (data['verified'] as bool?) == true;
+                      return _CaregiverApplicationEntry(
+                        uid: uid,
+                        name: (data['name'] as String?)?.trim() ?? '',
+                        email: (data['email'] as String?)?.trim() ?? '',
+                        phone: (data['phone'] as String?)?.trim() ?? '',
+                        createdAt: data['createdAt'] as Timestamp?,
+                        verified: verified,
+                        pendingDocs: pendingCounts[uid] ?? 0,
+                      );
+                    })
+                    .whereType<_CaregiverApplicationEntry>()
+                    .where((e) {
+                      if (statusFilter == _CaregiverStatusFilter.verified &&
+                          !e.verified) {
+                        return false;
+                      }
+                      if (statusFilter == _CaregiverStatusFilter.unverified &&
+                          e.verified) {
+                        return false;
+                      }
+                      if (search.isEmpty) return true;
+                      final hay = '${e.uid} ${e.name} ${e.email} ${e.phone}'
+                          .toLowerCase();
+                      return hay.contains(search);
+                    })
+                    .toList()
+                  ..sort((a, b) {
+                    final aTs = a.createdAt?.millisecondsSinceEpoch ?? 0;
+                    final bTs = b.createdAt?.millisecondsSinceEpoch ?? 0;
+                    return bTs.compareTo(aTs);
+                  });
 
             if (entries.isEmpty) {
               return buildAdminEmptyState(
@@ -644,7 +847,8 @@ class _ApplicationsList extends StatelessWidget {
             }
 
             return ListView.separated(
-              physics: const BouncingScrollPhysics(),
+              shrinkWrap: shrinkWrap,
+              physics: physics ?? const BouncingScrollPhysics(),
               itemCount: entries.length,
               separatorBuilder: (_, __) => const SizedBox(height: 10),
               itemBuilder: (context, index) {
@@ -686,7 +890,9 @@ class _CaregiverApplicationCard extends StatelessWidget {
         ? entry.name
         : (entry.uid.isNotEmpty ? entry.uid : 'Caregiver');
     final appliedAt = entry.createdAt?.toDate();
-    final appliedValue = appliedAt == null ? '-' : _dateFormat.format(appliedAt);
+    final appliedValue = appliedAt == null
+        ? '-'
+        : _dateFormat.format(appliedAt);
 
     final borderColor = Colors.grey.shade300;
     return Container(
@@ -1238,25 +1444,27 @@ class _ActivityBookingStyleCaregiverDetailsTab extends StatelessWidget {
         : 'Caregiver';
     final caregiverLocation =
         _normalize(caregiverData['defaultAddress']).isNotEmpty
-            ? _normalize(caregiverData['defaultAddress'])
-            : (_normalize(caregiverData['address']).isNotEmpty
-                  ? _normalize(caregiverData['address'])
-                  : 'Location not provided');
+        ? _normalize(caregiverData['defaultAddress'])
+        : (_normalize(caregiverData['address']).isNotEmpty
+              ? _normalize(caregiverData['address'])
+              : 'Location not provided');
 
     final bioRaw = _normalize(caregiverData['bio']);
     final servicesList = _extractServicePreferences(
       caregiverData['servicePreferences'] ?? caregiverData['services'],
     );
 
-    final stream = documentsStream ?? const Stream<QuerySnapshot<Map<String, dynamic>>>.empty();
+    final stream =
+        documentsStream ??
+        const Stream<QuerySnapshot<Map<String, dynamic>>>.empty();
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: stream,
       builder: (context, snapshot) {
         final verifiedDocs = snapshot.hasData
             ? snapshot.data!.docs
-                .where((d) => (d.data()['status'] as bool?) == true)
-                .toList(growable: false)
+                  .where((d) => (d.data()['status'] as bool?) == true)
+                  .toList(growable: false)
             : const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
         final certificateNames = verifiedDocs
             .map((d) => (d.data()['name'] as String?)?.trim() ?? '')
@@ -1627,10 +1835,7 @@ class _LegendRow extends StatelessWidget {
         Container(
           width: 10,
           height: 10,
-          decoration: BoxDecoration(
-            color: color,
-            shape: BoxShape.circle,
-          ),
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
         ),
         const SizedBox(width: 8),
         Expanded(
@@ -1710,9 +1915,9 @@ class _CaregiverVerificationDetailsSheet extends StatelessWidget {
     final documentsStream = uid.isEmpty
         ? null
         : FirebaseFirestore.instance
-            .collection('documents')
-            .where('caregiverId', isEqualTo: uid)
-            .snapshots();
+              .collection('documents')
+              .where('caregiverId', isEqualTo: uid)
+              .snapshots();
 
     return ClipRRect(
       borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
@@ -1726,12 +1931,13 @@ class _CaregiverVerificationDetailsSheet extends StatelessWidget {
             child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
               stream: waitingRef?.snapshots(),
               builder: (context, waitingSnap) {
-                final data = waitingSnap.data?.data() ?? const <String, dynamic>{};
+                final data =
+                    waitingSnap.data?.data() ?? const <String, dynamic>{};
                 final name = ((data['name'] as String?) ?? '').trim();
                 final email = ((data['email'] as String?) ?? '').trim();
                 final phone = ((data['phone'] as String?) ?? '').trim();
-                final address =
-                    ((data['defaultAddress'] as String?) ?? '').trim();
+                final address = ((data['defaultAddress'] as String?) ?? '')
+                    .trim();
                 final verified = (data['verified'] as bool?) == true;
                 final createdAt = (data['createdAt'] as Timestamp?)?.toDate();
 
@@ -1750,7 +1956,9 @@ class _CaregiverVerificationDetailsSheet extends StatelessWidget {
                       children: [
                         Expanded(
                           child: Text(
-                            editable ? 'Edit verification' : 'Verification details',
+                            editable
+                                ? 'Edit verification'
+                                : 'Verification details',
                             style: const TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.w900,
@@ -1766,117 +1974,144 @@ class _CaregiverVerificationDetailsSheet extends StatelessWidget {
                     ),
                     const SizedBox(height: 10),
                     if (false) ...[
-                    _sectionTitle('Application'),
-                    _cardShell(
-                      child: Column(
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.center,
-                              children: [
-                                DefaultProfileAvatar(
-                                  radius: 22,
-                                  photoUrl: null,
-                                  label: displayName,
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        displayName,
-                                        style: const TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w900,
-                                          color: _profileDarkText,
-                                        ),
-                                      ),
-                                      if (subtitle.isNotEmpty) ...[
-                                        const SizedBox(height: 6),
+                      _sectionTitle('Application'),
+                      _cardShell(
+                        child: Column(
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(
+                                14,
+                                12,
+                                14,
+                                12,
+                              ),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.center,
+                                children: [
+                                  DefaultProfileAvatar(
+                                    radius: 22,
+                                    photoUrl: null,
+                                    label: displayName,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
                                         Text(
-                                          subtitle,
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w700,
-                                            color: Colors.black.withValues(
-                                              alpha: 0.55,
-                                            ),
+                                          displayName,
+                                          style: const TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w900,
+                                            color: _profileDarkText,
                                           ),
                                         ),
+                                        if (subtitle.isNotEmpty) ...[
+                                          const SizedBox(height: 6),
+                                          Text(
+                                            subtitle,
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w700,
+                                              color: Colors.black.withValues(
+                                                alpha: 0.55,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
                                       ],
-                                    ],
+                                    ),
                                   ),
-                                ),
-                              ],
+                                ],
+                              ),
                             ),
-                          ),
-                          Divider(
-                            height: 1,
-                            thickness: 1,
-                            color: Colors.black.withValues(alpha: 0.06),
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 14),
-                            child: Column(
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(vertical: 10),
-                                  decoration: BoxDecoration(
-                                    border: Border(
-                                      bottom: BorderSide(
-                                        color: Colors.black.withValues(alpha: 0.06),
-                                      ),
-                                    ),
-                                  ),
-                                  child: _InfoRow(label: 'User ID', value: uid),
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(vertical: 10),
-                                  decoration: BoxDecoration(
-                                    border: Border(
-                                      bottom: BorderSide(
-                                        color: Colors.black.withValues(alpha: 0.06),
-                                      ),
-                                    ),
-                                  ),
-                                  child: _InfoRow(
-                                    label: 'Status',
-                                    value: verified ? 'Verified' : 'Unverified',
-                                  ),
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(vertical: 10),
-                                  decoration: BoxDecoration(
-                                    border: Border(
-                                      bottom: BorderSide(
-                                        color: Colors.black.withValues(alpha: 0.06),
-                                      ),
-                                    ),
-                                  ),
-                                  child: _InfoRow(
-                                    label: 'Applied at',
-                                    value: createdAt == null
-                                        ? '-'
-                                        : _dateFormat.format(createdAt),
-                                  ),
-                                ),
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 10),
-                                  child: _InfoRow(
-                                    label: 'Address',
-                                    value: address.isNotEmpty ? address : '-',
-                                  ),
-                                ),
-                              ],
+                            Divider(
+                              height: 1,
+                              thickness: 1,
+                              color: Colors.black.withValues(alpha: 0.06),
                             ),
-                          ),
-                          const SizedBox(height: 2),
-                        ],
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                              ),
+                              child: Column(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 10,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      border: Border(
+                                        bottom: BorderSide(
+                                          color: Colors.black.withValues(
+                                            alpha: 0.06,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    child: _InfoRow(
+                                      label: 'User ID',
+                                      value: uid,
+                                    ),
+                                  ),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 10,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      border: Border(
+                                        bottom: BorderSide(
+                                          color: Colors.black.withValues(
+                                            alpha: 0.06,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    child: _InfoRow(
+                                      label: 'Status',
+                                      value: verified
+                                          ? 'Verified'
+                                          : 'Unverified',
+                                    ),
+                                  ),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 10,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      border: Border(
+                                        bottom: BorderSide(
+                                          color: Colors.black.withValues(
+                                            alpha: 0.06,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    child: _InfoRow(
+                                      label: 'Applied at',
+                                      value: createdAt == null
+                                          ? '-'
+                                          : _dateFormat.format(createdAt),
+                                    ),
+                                  ),
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 10,
+                                    ),
+                                    child: _InfoRow(
+                                      label: 'Address',
+                                      value: address.isNotEmpty ? address : '-',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                          ],
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 14),
+                      const SizedBox(height: 14),
                     ],
                     _sectionTitle('Documents'),
                     _DocumentsCard(
@@ -2008,7 +2243,9 @@ class _AdminBookingsStyleUserDetailsTab extends StatelessWidget {
         ),
         child: DefaultProfileAvatar(
           radius: radius,
-          photoUrl: (photoUrl?.trim().isNotEmpty == true) ? photoUrl!.trim() : null,
+          photoUrl: (photoUrl?.trim().isNotEmpty == true)
+              ? photoUrl!.trim()
+              : null,
           label: label,
         ),
       ),
@@ -2033,7 +2270,9 @@ class _AdminBookingsStyleUserDetailsTab extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
       decoration: BoxDecoration(
         border: Border(
-          bottom: showBorder ? const BorderSide(color: _cardBorder) : BorderSide.none,
+          bottom: showBorder
+              ? const BorderSide(color: _cardBorder)
+              : BorderSide.none,
         ),
       ),
       child: Row(
@@ -2057,8 +2296,12 @@ class _AdminBookingsStyleUserDetailsTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final displayName = name.trim().isNotEmpty ? name.trim() : (uid.trim().isNotEmpty ? uid.trim() : 'User');
-    final appliedAtLabel = createdAt == null ? '—' : _dateFormat.format(createdAt!);
+    final displayName = name.trim().isNotEmpty
+        ? name.trim()
+        : (uid.trim().isNotEmpty ? uid.trim() : 'User');
+    final appliedAtLabel = createdAt == null
+        ? '—'
+        : _dateFormat.format(createdAt!);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2099,7 +2342,9 @@ class _AdminBookingsStyleUserDetailsTab extends StatelessWidget {
             value: appliedAtLabel,
           ),
           _buildInfoRow(
-            icon: verified ? Icons.verified_rounded : Icons.pending_actions_rounded,
+            icon: verified
+                ? Icons.verified_rounded
+                : Icons.pending_actions_rounded,
             title: 'Verification status',
             value: verified ? 'Verified' : 'Unverified',
             showBorder: false,
@@ -2168,9 +2413,9 @@ class _CaregiverVerificationViewSheetState
     final documentsStream = uid.isEmpty
         ? null
         : FirebaseFirestore.instance
-            .collection('documents')
-            .where('caregiverId', isEqualTo: uid)
-            .snapshots();
+              .collection('documents')
+              .where('caregiverId', isEqualTo: uid)
+              .snapshots();
 
     return Padding(
       padding: EdgeInsets.only(bottom: bottomInset),
@@ -2234,19 +2479,23 @@ class _CaregiverVerificationViewSheetState
                   _ActivityStyleTabs(
                     labels: const ['User details', 'Verification details'],
                     selectedIndex: _selectedTabIndex,
-                    onSelected: (index) => setState(() => _selectedTabIndex = index),
+                    onSelected: (index) =>
+                        setState(() => _selectedTabIndex = index),
                   ),
                   const SizedBox(height: 12),
                   StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
                     stream: waitingRef?.snapshots(),
                     builder: (context, waitingSnap) {
-                      final data = waitingSnap.data?.data() ?? const <String, dynamic>{};
+                      final data =
+                          waitingSnap.data?.data() ?? const <String, dynamic>{};
                       final name = ((data['name'] as String?) ?? '').trim();
                       final email = ((data['email'] as String?) ?? '').trim();
                       final phone = ((data['phone'] as String?) ?? '').trim();
-                      final address = ((data['defaultAddress'] as String?) ?? '').trim();
+                      final address =
+                          ((data['defaultAddress'] as String?) ?? '').trim();
                       final verified = (data['verified'] as bool?) == true;
-                      final createdAt = (data['createdAt'] as Timestamp?)?.toDate();
+                      final createdAt = (data['createdAt'] as Timestamp?)
+                          ?.toDate();
 
                       if (_selectedTabIndex == 0) {
                         return _AdminBookingsStyleUserDetailsTab(
@@ -2265,124 +2514,160 @@ class _CaregiverVerificationViewSheetState
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           if (false) ...[
-                          _sectionTitle('Application'),
-                          _cardShell(
-                            child: Column(
-                              children: [
-                                Padding(
-                                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                                  child: Row(
-                                    crossAxisAlignment: CrossAxisAlignment.center,
-                                    children: [
-                                      DefaultProfileAvatar(
-                                        radius: 22,
-                                        photoUrl: null,
-                                        label: name.isNotEmpty
-                                            ? name
-                                            : (uid.isNotEmpty ? uid : 'Caregiver'),
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              name.isNotEmpty
-                                                  ? name
-                                                  : (uid.isNotEmpty ? uid : 'Caregiver'),
-                                              style: const TextStyle(
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w900,
-                                                color: _profileDarkText,
-                                              ),
-                                            ),
-                                            if (email.isNotEmpty || phone.isNotEmpty) ...[
-                                              const SizedBox(height: 6),
+                            _sectionTitle('Application'),
+                            _cardShell(
+                              child: Column(
+                                children: [
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      14,
+                                      12,
+                                      14,
+                                      12,
+                                    ),
+                                    child: Row(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.center,
+                                      children: [
+                                        DefaultProfileAvatar(
+                                          radius: 22,
+                                          photoUrl: null,
+                                          label: name.isNotEmpty
+                                              ? name
+                                              : (uid.isNotEmpty
+                                                    ? uid
+                                                    : 'Caregiver'),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
                                               Text(
-                                                [
-                                                  if (email.isNotEmpty) email,
-                                                  if (phone.isNotEmpty) phone,
-                                                ].join(' â€¢ '),
-                                                style: TextStyle(
-                                                  fontSize: 11,
-                                                  fontWeight: FontWeight.w700,
-                                                  color: Colors.black.withValues(
-                                                    alpha: 0.55,
-                                                  ),
+                                                name.isNotEmpty
+                                                    ? name
+                                                    : (uid.isNotEmpty
+                                                          ? uid
+                                                          : 'Caregiver'),
+                                                style: const TextStyle(
+                                                  fontSize: 13,
+                                                  fontWeight: FontWeight.w900,
+                                                  color: _profileDarkText,
                                                 ),
                                               ),
+                                              if (email.isNotEmpty ||
+                                                  phone.isNotEmpty) ...[
+                                                const SizedBox(height: 6),
+                                                Text(
+                                                  [
+                                                    if (email.isNotEmpty) email,
+                                                    if (phone.isNotEmpty) phone,
+                                                  ].join(' â€¢ '),
+                                                  style: TextStyle(
+                                                    fontSize: 11,
+                                                    fontWeight: FontWeight.w700,
+                                                    color: Colors.black
+                                                        .withValues(
+                                                          alpha: 0.55,
+                                                        ),
+                                                  ),
+                                                ),
+                                              ],
                                             ],
-                                          ],
+                                          ),
                                         ),
-                                      ),
-                                    ],
+                                      ],
+                                    ),
                                   ),
-                                ),
-                                Divider(
-                                  height: 1,
-                                  thickness: 1,
-                                  color: Colors.black.withValues(alpha: 0.06),
-                                ),
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                                  child: Column(
-                                    children: [
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(vertical: 10),
-                                        decoration: BoxDecoration(
-                                          border: Border(
-                                            bottom: BorderSide(
-                                              color: Colors.black.withValues(alpha: 0.06),
-                                            ),
-                                          ),
-                                        ),
-                                        child: _InfoRow(label: 'User ID', value: uid),
-                                      ),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(vertical: 10),
-                                        decoration: BoxDecoration(
-                                          border: Border(
-                                            bottom: BorderSide(
-                                              color: Colors.black.withValues(alpha: 0.06),
-                                            ),
-                                          ),
-                                        ),
-                                        child: _InfoRow(
-                                          label: 'Status',
-                                          value: verified ? 'Verified' : 'Unverified',
-                                        ),
-                                      ),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(vertical: 10),
-                                        decoration: BoxDecoration(
-                                          border: Border(
-                                            bottom: BorderSide(
-                                              color: Colors.black.withValues(alpha: 0.06),
-                                            ),
-                                          ),
-                                        ),
-                                        child: _InfoRow(
-                                          label: 'Applied at',
-                                          value: createdAt == null
-                                              ? '-'
-                                              : _dateFormat.format(createdAt),
-                                        ),
-                                      ),
-                                      Padding(
-                                        padding: const EdgeInsets.symmetric(vertical: 10),
-                                        child: _InfoRow(
-                                          label: 'Address',
-                                          value: address.isNotEmpty ? address : '-',
-                                        ),
-                                      ),
-                                    ],
+                                  Divider(
+                                    height: 1,
+                                    thickness: 1,
+                                    color: Colors.black.withValues(alpha: 0.06),
                                   ),
-                                ),
-                                const SizedBox(height: 2),
-                              ],
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 14,
+                                    ),
+                                    child: Column(
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 10,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            border: Border(
+                                              bottom: BorderSide(
+                                                color: Colors.black.withValues(
+                                                  alpha: 0.06,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                          child: _InfoRow(
+                                            label: 'User ID',
+                                            value: uid,
+                                          ),
+                                        ),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 10,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            border: Border(
+                                              bottom: BorderSide(
+                                                color: Colors.black.withValues(
+                                                  alpha: 0.06,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                          child: _InfoRow(
+                                            label: 'Status',
+                                            value: verified
+                                                ? 'Verified'
+                                                : 'Unverified',
+                                          ),
+                                        ),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 10,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            border: Border(
+                                              bottom: BorderSide(
+                                                color: Colors.black.withValues(
+                                                  alpha: 0.06,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                          child: _InfoRow(
+                                            label: 'Applied at',
+                                            value: createdAt == null
+                                                ? '-'
+                                                : _dateFormat.format(createdAt),
+                                          ),
+                                        ),
+                                        Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 10,
+                                          ),
+                                          child: _InfoRow(
+                                            label: 'Address',
+                                            value: address.isNotEmpty
+                                                ? address
+                                                : '-',
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                ],
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 14),
+                            const SizedBox(height: 14),
                           ],
                           _sectionTitle('Documents'),
                           _DocumentsCard(
@@ -2448,15 +2733,11 @@ class _CaregiverVerificationEditSheetState
         if (pendingDocs.docs.isNotEmpty) {
           final batch = db.batch();
           for (final doc in pendingDocs.docs) {
-            batch.set(
-              doc.reference,
-              {
-                'status': true,
-                'verifiedAt': FieldValue.serverTimestamp(),
-                'updatedAt': FieldValue.serverTimestamp(),
-              },
-              SetOptions(merge: true),
-            );
+            batch.set(doc.reference, {
+              'status': true,
+              'verifiedAt': FieldValue.serverTimestamp(),
+              'updatedAt': FieldValue.serverTimestamp(),
+            }, SetOptions(merge: true));
           }
           await batch.commit();
         }
@@ -2517,8 +2798,8 @@ class _CaregiverVerificationEditSheetState
           'servicePreferences': data['servicePreferences'] ?? const [],
           'photoUrl':
               ((userData?['photoUrl'] as String?) ?? '').trim().isNotEmpty
-                  ? ((userData?['photoUrl'] as String?) ?? '').trim()
-                  : '',
+              ? ((userData?['photoUrl'] as String?) ?? '').trim()
+              : '',
           'bio': (userData?['bio'] as String?)?.toString() ?? '',
           'certifications': userData?['certifications'] ?? const [],
           'rating': (userData?['rating'] as num?)?.toDouble() ?? 0.0,
@@ -2530,7 +2811,8 @@ class _CaregiverVerificationEditSheetState
           'updatedAt': FieldValue.serverTimestamp(),
         };
         final paymentDetails = userData?['paymentDetails'];
-        if (paymentDetails is Map) caregiverPayload['paymentDetails'] = paymentDetails;
+        if (paymentDetails is Map)
+          caregiverPayload['paymentDetails'] = paymentDetails;
         final fcmToken = (userData?['fcmToken'] as String?)?.trim();
         if (fcmToken != null && fcmToken.isNotEmpty) {
           caregiverPayload['fcmToken'] = fcmToken;
@@ -2538,15 +2820,11 @@ class _CaregiverVerificationEditSheetState
 
         final batch = db.batch();
         batch.set(caregiverRef, caregiverPayload, SetOptions(merge: true));
-        batch.set(
-          waitingRef,
-          {
-            'verified': true,
-            'verifiedAt': FieldValue.serverTimestamp(),
-            'updatedAt': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
+        batch.set(waitingRef, {
+          'verified': true,
+          'verifiedAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
         batch.delete(userRef);
         await batch.commit();
       } else {
@@ -2561,15 +2839,11 @@ class _CaregiverVerificationEditSheetState
         if (approvedDocs.docs.isNotEmpty) {
           final batch = db.batch();
           for (final doc in approvedDocs.docs) {
-            batch.set(
-              doc.reference,
-              {
-                'status': false,
-                'verifiedAt': FieldValue.delete(),
-                'updatedAt': FieldValue.serverTimestamp(),
-              },
-              SetOptions(merge: true),
-            );
+            batch.set(doc.reference, {
+              'status': false,
+              'verifiedAt': FieldValue.delete(),
+              'updatedAt': FieldValue.serverTimestamp(),
+            }, SetOptions(merge: true));
           }
           await batch.commit();
         }
@@ -2594,9 +2868,11 @@ class _CaregiverVerificationEditSheetState
               '',
           if (caregiverData?['paymentDetails'] is Map)
             'paymentDetails': caregiverData?['paymentDetails'],
-          if ((caregiverData?['photoUrl'] as String?)?.trim().isNotEmpty == true)
+          if ((caregiverData?['photoUrl'] as String?)?.trim().isNotEmpty ==
+              true)
             'photoUrl': (caregiverData?['photoUrl'] as String?)!.trim(),
-          if ((caregiverData?['fcmToken'] as String?)?.trim().isNotEmpty == true)
+          if ((caregiverData?['fcmToken'] as String?)?.trim().isNotEmpty ==
+              true)
             'fcmToken': (caregiverData?['fcmToken'] as String?)!.trim(),
           'forceLogoutAt': FieldValue.serverTimestamp(),
           'updatedAt': FieldValue.serverTimestamp(),
@@ -2604,14 +2880,10 @@ class _CaregiverVerificationEditSheetState
 
         final batch = db.batch();
         batch.set(userRef, userPayload, SetOptions(merge: true));
-        batch.set(
-          waitingRef,
-          {
-            'verified': false,
-            'updatedAt': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
+        batch.set(waitingRef, {
+          'verified': false,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
         batch.delete(caregiverRef);
         await batch.commit();
       }
@@ -2669,306 +2941,359 @@ class _CaregiverVerificationEditSheetState
 
     return Padding(
       padding: EdgeInsets.only(bottom: bottomInset),
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
-          border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.18),
-              blurRadius: 22,
-              offset: const Offset(0, -10),
+      child: DraggableScrollableSheet(
+        initialChildSize: 0.72,
+        minChildSize: 0.52,
+        maxChildSize: 0.96,
+        builder: (sheetContext, controller) {
+          return Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFFF7F8FA),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(26),
+              ),
+              border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.18),
+                  blurRadius: 22,
+                  offset: const Offset(0, -10),
+                ),
+              ],
             ),
-          ],
-        ),
-        child: SafeArea(
-          top: false,
-          child: SingleChildScrollView(
-            physics: const BouncingScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
-            child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-            stream: waitingRef?.snapshots(),
-            builder: (context, snap) {
-              final data = snap.data?.data() ?? const <String, dynamic>{};
-              final waitingExists = snap.data?.exists == true;
-              final nameWaiting = ((data['name'] as String?) ?? '').trim();
-              final emailWaiting = ((data['email'] as String?) ?? '').trim();
-              final phoneWaiting = ((data['phone'] as String?) ?? '').trim();
-              final addressWaiting =
-                  ((data['defaultAddress'] as String?) ?? '').trim();
+            child: SafeArea(
+              top: false,
+              child: ListView(
+                controller: controller,
+                physics: const BouncingScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+                children: [
+                  StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                    stream: waitingRef?.snapshots(),
+                    builder: (context, snap) {
+                      final data =
+                          snap.data?.data() ?? const <String, dynamic>{};
+                      final waitingExists = snap.data?.exists == true;
+                      final nameWaiting = ((data['name'] as String?) ?? '')
+                          .trim();
+                      final emailWaiting = ((data['email'] as String?) ?? '')
+                          .trim();
+                      final phoneWaiting = ((data['phone'] as String?) ?? '')
+                          .trim();
+                      final addressWaiting =
+                          ((data['defaultAddress'] as String?) ?? '').trim();
 
-              InputDecoration inputDecoration({
-                required String labelText,
-                Widget? suffixIcon,
-              }) {
-                return InputDecoration(
-                  labelText: labelText,
-                  labelStyle: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.black.withValues(alpha: 0.55),
-                  ),
-                  filled: true,
-                  fillColor: Colors.white,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 10,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: BorderSide(color: Colors.grey[300]!),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: BorderSide(color: Colors.grey[300]!),
-                  ),
-                  focusedBorder: const OutlineInputBorder(
-                    borderRadius: BorderRadius.all(Radius.circular(16)),
-                    borderSide: BorderSide(color: _profileDarkText, width: 1.1),
-                  ),
-                  suffixIcon: suffixIcon,
-                );
-              }
-
-              return FutureBuilder<Map<String, dynamic>>(
-                future: loadProfile(),
-                builder: (context, profileSnap) {
-                  final profile =
-                      profileSnap.data ?? const <String, dynamic>{};
-
-                  String pickText(Iterable<dynamic> candidates) {
-                    for (final c in candidates) {
-                      final v = c?.toString().trim() ?? '';
-                      if (v.isNotEmpty) return v;
-                    }
-                    return '';
-                  }
-
-                  String resolveAddressLikeUserDetails(dynamic value) {
-                    final v = value;
-                    if (v == null) return '';
-                    if (v is String) return v.trim();
-                    if (v is List) {
-                      Map<String, dynamic>? best;
-                      for (final entry in v) {
-                        if (entry is! Map) continue;
-                        final map = Map<String, dynamic>.from(entry);
-                        best ??= map;
-                        if (map['isDefault'] == true) {
-                          best = map;
-                          break;
-                        }
-                      }
-                      final addr = best?['address']?.toString().trim() ?? '';
-                      return addr;
-                    }
-                    return v.toString().trim();
-                  }
-
-                  final name = pickText([
-                    nameWaiting,
-                    profile['name'],
-                    widget.entry.name,
-                  ]);
-                  final email = pickText([
-                    emailWaiting,
-                    data['userEmail'],
-                    profile['email'],
-                    profile['userEmail'],
-                    widget.entry.email,
-                  ]);
-                  final phone = pickText([
-                    phoneWaiting,
-                    data['contact'],
-                    profile['phone'],
-                    profile['contact'],
-                    widget.entry.phone,
-                  ]);
-                  final address = pickText([
-                    addressWaiting,
-                    resolveAddressLikeUserDetails(data['defaultAddress']),
-                    resolveAddressLikeUserDetails(data['address']),
-                    resolveAddressLikeUserDetails(data['area']),
-                    resolveAddressLikeUserDetails(data['location']),
-                    resolveAddressLikeUserDetails(profile['defaultAddress']),
-                    resolveAddressLikeUserDetails(profile['address']),
-                    resolveAddressLikeUserDetails(profile['area']),
-                    resolveAddressLikeUserDetails(profile['location']),
-                  ]);
-
-                  final verified = (data['verified'] as bool?) == true ||
-                      profile['verifiedAt'] != null;
-                  if (!_seeded) {
-                    _seeded = true;
-                    _verified = verified;
-                  }
-
-                  final displayName = name.isNotEmpty
-                      ? name
-                      : (uid.isNotEmpty ? uid : 'Caregiver');
-
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                  Center(
-                    child: Container(
-                      width: 44,
-                      height: 5,
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.18),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          'Edit verification',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w900,
-                            fontSize: 15,
-                            color: _profileDarkText,
-                          ),
-                        ),
-                      ),
-                      IconButton(
-                        onPressed:
-                            _saving ? null : () => Navigator.of(context).pop(),
-                        icon: const Icon(Icons.close_rounded, size: 20),
-                        splashRadius: 18,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Column(
-                    children: [
-                      DefaultProfileAvatar(
-                        radius: 34,
-                        photoUrl: null,
-                        label: displayName.isNotEmpty ? displayName : '?',
-                      ),
-                      const SizedBox(height: 10),
-                      Text(
-                        displayName,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 15,
-                          color: _profileDarkText,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                      if (uid.isNotEmpty) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          uid,
-                          style: TextStyle(
+                      InputDecoration inputDecoration({
+                        required String labelText,
+                        Widget? suffixIcon,
+                      }) {
+                        return InputDecoration(
+                          labelText: labelText,
+                          labelStyle: TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w700,
                             color: Colors.black.withValues(alpha: 0.55),
                           ),
-                          textAlign: TextAlign.center,
-                        ),
-                      ],
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  TextFormField(
-                    initialValue: uid,
-                    readOnly: true,
-                    showCursor: false,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: _profileDarkText,
-                    ),
-                    decoration: inputDecoration(labelText: 'User ID'),
-                  ),
-                  const SizedBox(height: 14),
-                  const Text(
-                    'Verification details',
-                    style: TextStyle(
-                      fontWeight: FontWeight.w900,
-                      fontSize: 13,
-                      color: _profileDarkText,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextFormField(
-                    initialValue: email.isNotEmpty ? email : 'Unavailable',
-                    readOnly: true,
-                    showCursor: false,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: _profileDarkText,
-                    ),
-                    decoration: inputDecoration(labelText: 'Email'),
-                  ),
-                  const SizedBox(height: 12),
-                  TextFormField(
-                    initialValue: phone.isNotEmpty ? phone : 'Unavailable',
-                    readOnly: true,
-                    showCursor: false,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: _profileDarkText,
-                    ),
-                    decoration: inputDecoration(labelText: 'Contact'),
-                  ),
-                  const SizedBox(height: 12),
-                  TextFormField(
-                    initialValue: address.isNotEmpty ? address : 'Unavailable',
-                    readOnly: true,
-                    showCursor: false,
-                    maxLines: 2,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: _profileDarkText,
-                    ),
-                    decoration: inputDecoration(labelText: 'Address'),
-                  ),
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: _saving || !waitingExists
-                          ? null
-                          : () => _toggleVerified(uid, data),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: activityButtonYellow,
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                      ),
-                      child: _saving
-                          ? const SizedBox(
-                              height: 18,
-                              width: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : Text(
-                              _verified ? 'Unverify caregiver' : 'Verify caregiver',
-                              style: const TextStyle(fontWeight: FontWeight.w800),
+                          filled: true,
+                          fillColor: Colors.white,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 10,
+                          ),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(16),
+                            borderSide: BorderSide(color: Colors.grey[300]!),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(16),
+                            borderSide: BorderSide(color: Colors.grey[300]!),
+                          ),
+                          focusedBorder: const OutlineInputBorder(
+                            borderRadius: BorderRadius.all(Radius.circular(16)),
+                            borderSide: BorderSide(
+                              color: _profileDarkText,
+                              width: 1.1,
                             ),
-                    ),
+                          ),
+                          suffixIcon: suffixIcon,
+                        );
+                      }
+
+                      return FutureBuilder<Map<String, dynamic>>(
+                        future: loadProfile(),
+                        builder: (context, profileSnap) {
+                          final profile =
+                              profileSnap.data ?? const <String, dynamic>{};
+
+                          String pickText(Iterable<dynamic> candidates) {
+                            for (final c in candidates) {
+                              final v = c?.toString().trim() ?? '';
+                              if (v.isNotEmpty) return v;
+                            }
+                            return '';
+                          }
+
+                          String resolveAddressLikeUserDetails(dynamic value) {
+                            final v = value;
+                            if (v == null) return '';
+                            if (v is String) return v.trim();
+                            if (v is List) {
+                              Map<String, dynamic>? best;
+                              for (final entry in v) {
+                                if (entry is! Map) continue;
+                                final map = Map<String, dynamic>.from(entry);
+                                best ??= map;
+                                if (map['isDefault'] == true) {
+                                  best = map;
+                                  break;
+                                }
+                              }
+                              final addr =
+                                  best?['address']?.toString().trim() ?? '';
+                              return addr;
+                            }
+                            return v.toString().trim();
+                          }
+
+                          final name = pickText([
+                            nameWaiting,
+                            profile['name'],
+                            widget.entry.name,
+                          ]);
+                          final email = pickText([
+                            emailWaiting,
+                            data['userEmail'],
+                            profile['email'],
+                            profile['userEmail'],
+                            widget.entry.email,
+                          ]);
+                          final phone = pickText([
+                            phoneWaiting,
+                            data['contact'],
+                            profile['phone'],
+                            profile['contact'],
+                            widget.entry.phone,
+                          ]);
+                          final address = pickText([
+                            addressWaiting,
+                            resolveAddressLikeUserDetails(
+                              data['defaultAddress'],
+                            ),
+                            resolveAddressLikeUserDetails(data['address']),
+                            resolveAddressLikeUserDetails(data['area']),
+                            resolveAddressLikeUserDetails(data['location']),
+                            resolveAddressLikeUserDetails(
+                              profile['defaultAddress'],
+                            ),
+                            resolveAddressLikeUserDetails(profile['address']),
+                            resolveAddressLikeUserDetails(profile['area']),
+                            resolveAddressLikeUserDetails(profile['location']),
+                          ]);
+
+                          final verified =
+                              (data['verified'] as bool?) == true ||
+                              profile['verifiedAt'] != null;
+                          if (!_seeded) {
+                            _seeded = true;
+                            _verified = verified;
+                          }
+
+                          final displayName = name.isNotEmpty
+                              ? name
+                              : (uid.isNotEmpty ? uid : 'Caregiver');
+
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Center(
+                                child: Container(
+                                  width: 44,
+                                  height: 5,
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withValues(alpha: 0.18),
+                                    borderRadius: BorderRadius.circular(999),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              Row(
+                                children: [
+                                  const Expanded(
+                                    child: Text(
+                                      'Edit verification',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w900,
+                                        fontSize: 15,
+                                        color: _profileDarkText,
+                                      ),
+                                    ),
+                                  ),
+                                  IconButton(
+                                    onPressed: _saving
+                                        ? null
+                                        : () => Navigator.of(context).pop(),
+                                    icon: const Icon(
+                                      Icons.close_rounded,
+                                      size: 20,
+                                    ),
+                                    splashRadius: 18,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              Column(
+                                children: [
+                                  DefaultProfileAvatar(
+                                    radius: 34,
+                                    photoUrl: null,
+                                    label: displayName.isNotEmpty
+                                        ? displayName
+                                        : '?',
+                                  ),
+                                  const SizedBox(height: 10),
+                                  Text(
+                                    displayName,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      fontSize: 15,
+                                      color: _profileDarkText,
+                                    ),
+                                    textAlign: TextAlign.center,
+                                  ),
+                                  if (uid.isNotEmpty) ...[
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      uid,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                        color: Colors.black.withValues(
+                                          alpha: 0.55,
+                                        ),
+                                      ),
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  ],
+                                ],
+                              ),
+                              const SizedBox(height: 14),
+                              TextFormField(
+                                initialValue: uid,
+                                readOnly: true,
+                                showCursor: false,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: _profileDarkText,
+                                ),
+                                decoration: inputDecoration(
+                                  labelText: 'User ID',
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              const Text(
+                                'Verification details',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 13,
+                                  color: _profileDarkText,
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              TextFormField(
+                                initialValue: email.isNotEmpty
+                                    ? email
+                                    : 'Unavailable',
+                                readOnly: true,
+                                showCursor: false,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: _profileDarkText,
+                                ),
+                                decoration: inputDecoration(labelText: 'Email'),
+                              ),
+                              const SizedBox(height: 12),
+                              TextFormField(
+                                initialValue: phone.isNotEmpty
+                                    ? phone
+                                    : 'Unavailable',
+                                readOnly: true,
+                                showCursor: false,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: _profileDarkText,
+                                ),
+                                decoration: inputDecoration(
+                                  labelText: 'Contact',
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              TextFormField(
+                                initialValue: address.isNotEmpty
+                                    ? address
+                                    : 'Unavailable',
+                                readOnly: true,
+                                showCursor: false,
+                                maxLines: 2,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: _profileDarkText,
+                                ),
+                                decoration: inputDecoration(
+                                  labelText: 'Address',
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton(
+                                  onPressed: _saving || !waitingExists
+                                      ? null
+                                      : () => _toggleVerified(uid, data),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: activityButtonYellow,
+                                    foregroundColor: Colors.black,
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 12,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(14),
+                                    ),
+                                  ),
+                                  child: _saving
+                                      ? const SizedBox(
+                                          height: 18,
+                                          width: 18,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : Text(
+                                          _verified
+                                              ? 'Unverify caregiver'
+                                              : 'Verify caregiver',
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                        ),
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      );
+                    },
                   ),
                 ],
-                  );
-                },
-              );
-            },
-          ),
-        ),
+              ),
+            ),
+          );
+        },
       ),
-    ),
-  );
+    );
   }
 }
 
@@ -3082,7 +3407,8 @@ class _EditableDocumentFieldState extends State<_EditableDocumentField> {
     _closeVerifiedMenu();
     final overlay = Overlay.of(context);
 
-    final box = _verifiedFieldKey.currentContext?.findRenderObject() as RenderBox?;
+    final box =
+        _verifiedFieldKey.currentContext?.findRenderObject() as RenderBox?;
     if (box == null) return;
     final size = box.size;
 
@@ -3200,15 +3526,12 @@ class _EditableDocumentFieldState extends State<_EditableDocumentField> {
     _closeVerifiedMenu();
 
     try {
-      await doc.reference.set(
-        {
-          'status': option.value,
-          if (option.value) 'verifiedAt': FieldValue.serverTimestamp(),
-          if (!option.value) 'verifiedAt': FieldValue.delete(),
-          'updatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
+      await doc.reference.set({
+        'status': option.value,
+        if (option.value) 'verifiedAt': FieldValue.serverTimestamp(),
+        if (!option.value) 'verifiedAt': FieldValue.delete(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -3355,7 +3678,9 @@ class _EditableDocumentFieldState extends State<_EditableDocumentField> {
                       labelText: 'Verified',
                       suffixIcon: const Icon(Icons.expand_more, size: 18),
                     ),
-                    onTap: (widget.disabled || doc == null) ? null : _toggleVerifiedMenu,
+                    onTap: (widget.disabled || doc == null)
+                        ? null
+                        : _toggleVerifiedMenu,
                   ),
                 ),
               ),
@@ -3466,19 +3791,16 @@ class _DocumentsCard extends StatelessWidget {
     DocumentReference<Map<String, dynamic>> ref,
   ) async {
     try {
-      await ref.set(
-        {
-          'status': true,
-          'verifiedAt': FieldValue.serverTimestamp(),
-          'updatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
+      await ref.set({
+        'status': true,
+        'verifiedAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
       await _maybeApproveCaregiver(caregiverId);
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Document verified.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Document verified.')));
     } catch (_) {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -3516,13 +3838,10 @@ class _DocumentsCard extends StatelessWidget {
     if (!waitingSnap.exists || waitingData == null) return;
     if ((waitingData['verified'] as bool?) == true) {
       // Already migrated once. Ensure the caregiver doc exists and role is correct.
-      await db.collection('caregivers').doc(uid).set(
-        {
-          'forceLogoutAt': FieldValue.serverTimestamp(),
-          'updatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
+      await db.collection('caregivers').doc(uid).set({
+        'forceLogoutAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
       await waitingRef.delete().catchError((_) {});
       await db.collection('users').doc(uid).delete().catchError((_) {});
       return;
@@ -3545,13 +3864,14 @@ class _DocumentsCard extends StatelessWidget {
           (userData?['phone'] as String?)?.toString().trim() ??
           '',
       'defaultAddress': (waitingData['defaultAddress'] as String?)?.trim(),
-      if (safeDouble(waitingData['lat']) != null) 'lat': safeDouble(waitingData['lat']),
-      if (safeDouble(waitingData['lng']) != null) 'lng': safeDouble(waitingData['lng']),
+      if (safeDouble(waitingData['lat']) != null)
+        'lat': safeDouble(waitingData['lat']),
+      if (safeDouble(waitingData['lng']) != null)
+        'lng': safeDouble(waitingData['lng']),
       'servicePreferences': waitingData['servicePreferences'] ?? const [],
-      'photoUrl':
-          ((userData?['photoUrl'] as String?) ?? '').trim().isNotEmpty
-              ? ((userData?['photoUrl'] as String?) ?? '').trim()
-              : '',
+      'photoUrl': ((userData?['photoUrl'] as String?) ?? '').trim().isNotEmpty
+          ? ((userData?['photoUrl'] as String?) ?? '').trim()
+          : '',
       'bio': '',
       'certifications': const [],
       'rating': 0.0,
@@ -3673,17 +3993,18 @@ class _DocumentsCard extends StatelessWidget {
           final updatedAtTs = docData['updatedAt'] as Timestamp?;
           return Column(
             children: [
-                  _DocumentRow(
-                    title: ((docData['name'] as String?) ?? 'Document').trim(),
-                    fileName: ((docData['fileName'] as String?) ?? '').trim(),
-                    updatedAt:
-                        updatedAtTs == null ? '' : _dateFormat.format(updatedAtTs.toDate()),
-                    verified: (docData['status'] as bool?) == true,
-                    onOpen: url.isEmpty ? null : () => _openDocument(context, url),
-                    onVerify: (!canVerify || (docData['status'] as bool?) == true)
-                        ? null
-                        : () => _verifyDocument(context, doc.reference),
-                  ),
+              _DocumentRow(
+                title: ((docData['name'] as String?) ?? 'Document').trim(),
+                fileName: ((docData['fileName'] as String?) ?? '').trim(),
+                updatedAt: updatedAtTs == null
+                    ? ''
+                    : _dateFormat.format(updatedAtTs.toDate()),
+                verified: (docData['status'] as bool?) == true,
+                onOpen: url.isEmpty ? null : () => _openDocument(context, url),
+                onVerify: (!canVerify || (docData['status'] as bool?) == true)
+                    ? null
+                    : () => _verifyDocument(context, doc.reference),
+              ),
               const SizedBox(height: 10),
             ],
           );
@@ -3695,9 +4016,7 @@ class _DocumentsCard extends StatelessWidget {
                 ? const EdgeInsets.fromLTRB(14, 12, 14, 12)
                 : EdgeInsets.zero,
             child: Column(
-              children: [
-                for (final doc in orderedDocs) docItem(doc),
-              ],
+              children: [for (final doc in orderedDocs) docItem(doc)],
             ),
           ),
         );

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -7,6 +8,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../screens/caregiver/sos/caregiver_sos_root_screen.dart';
 import '../screens/user/chat/user_chat_screen.dart';
@@ -17,19 +19,31 @@ class PushService {
   factory PushService() => _instance;
   PushService._internal();
 
+  // Role-based FCM topics to avoid cross-role notifications on the same device.
+  // Backend sends to: user_<uid>, caregiver_<uid>, admin_<uid>.
+  static const String _roleUser = 'user';
+  static const String _roleCaregiver = 'caregiver';
+  static const String _roleAdmin = 'admin';
+
   final FirebaseMessaging _fm = FirebaseMessaging.instance;
   final FlutterLocalNotificationsPlugin _local =
       FlutterLocalNotificationsPlugin();
 
   bool _initialized = false;
+  StreamSubscription<User?>? _authSub;
+  StreamSubscription<String>? _tokenRefreshSub;
+  String? _currentTopic;
+  String _activeRole = _roleUser;
+  bool _updatingToken = false;
+  static const String _tokenResetMarkerFile = '.fcm_token_reset_v1';
 
   static const AndroidNotificationChannel _androidChannel =
       AndroidNotificationChannel(
-    'elderassist_high_importance',
-    'ElderAssist Notifications',
-    description: 'Important updates (SOS, chat, bookings).',
-    importance: Importance.high,
-  );
+        'elderassist_high_importance',
+        'ElderAssist Notifications',
+        description: 'Important updates (SOS, chat, bookings).',
+        importance: Importance.high,
+      );
 
   Future<void> init(GlobalKey<NavigatorState> navigatorKey) async {
     if (_initialized) return;
@@ -37,7 +51,6 @@ class PushService {
 
     await _initLocalNotifications(navigatorKey);
 
-    // iOS permission + allow alerts while app is open.
     if (Platform.isIOS) {
       await _fm.requestPermission(alert: true, badge: true, sound: true);
       await _fm.setForegroundNotificationPresentationOptions(
@@ -46,24 +59,28 @@ class PushService {
         sound: true,
       );
     } else {
-      // Android 13+ runtime notification permission (best-effort).
       try {
         await _local
             .resolvePlatformSpecificImplementation<
-                AndroidFlutterLocalNotificationsPlugin>()
+              AndroidFlutterLocalNotificationsPlugin
+            >()
             ?.requestNotificationsPermission();
       } catch (_) {}
     }
 
-    // get and save token if signed in
-    await _updateToken();
-    FirebaseAuth.instance.authStateChanges().listen((user) async {
-      if (user != null) {
-        await _updateToken();
+    _authSub?.cancel();
+    _authSub = FirebaseAuth.instance.authStateChanges().listen((user) async {
+      if (user == null) {
+        await _handleSignedOut();
+        return;
       }
+      await _ensureTokenAndTopic(user.uid);
     });
+    final current = FirebaseAuth.instance.currentUser;
+    if (current != null) {
+      await _ensureTokenAndTopic(current.uid);
+    }
 
-    // foreground messages
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       if (kDebugMode) {
         debugPrint('FCM onMessage: ${message.data}');
@@ -112,7 +129,8 @@ class PushService {
     try {
       await _local
           .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>()
+            AndroidFlutterLocalNotificationsPlugin
+          >()
           ?.createNotificationChannel(_androidChannel);
     } catch (_) {}
   }
@@ -122,47 +140,162 @@ class PushService {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) return;
 
-      final token = await _fm.getToken();
-      if (token != null) {
-        await _saveToken(user.uid, token);
-      }
+      await _ensureTokenAndTopic(user.uid);
+    } catch (_) {}
+  }
 
-      // Topic subscription enables server-side targeting without storing tokens.
+  void setActiveRole(String role) {
+    final normalized = role.trim().toLowerCase();
+    final next =
+        normalized == _roleAdmin || normalized == _roleCaregiver || normalized == _roleUser
+        ? normalized
+        : _roleUser;
+    if (_activeRole == next) return;
+    _activeRole = next;
+    final uid = FirebaseAuth.instance.currentUser?.uid.trim();
+    if (uid == null || uid.isEmpty) return;
+    unawaited(_ensureTokenAndTopic(uid));
+  }
+
+  String _topicFor(String uid) {
+    final id = uid.trim();
+    if (id.isEmpty) return '';
+    return '${_activeRole}_$id';
+  }
+
+  Future<void> _ensureTokenAndTopic(String uid) async {
+    final trimmedUid = uid.trim();
+    if (trimmedUid.isEmpty) return;
+    if (_updatingToken) return;
+    _updatingToken = true;
+    try {
+      // One-time migration: older builds could leave a device subscribed to
+      // multiple uid topics. Deleting the FCM token clears all topic subscriptions.
+      // We do this once per install to prevent caregiver/admin notifications
+      // leaking into the wrong account on the same device.
       try {
-        await _fm.subscribeToTopic(user.uid);
+        final dir = await getApplicationDocumentsDirectory();
+        final marker = File('${dir.path}${Platform.pathSeparator}$_tokenResetMarkerFile');
+        final alreadyReset = await marker.exists();
+        if (!alreadyReset) {
+          try {
+            await _fm.deleteToken();
+          } catch (_) {}
+          try {
+            await marker.writeAsString(
+              DateTime.now().toIso8601String(),
+              flush: true,
+            );
+          } catch (_) {}
+        }
       } catch (_) {}
 
-      // token refresh
-      FirebaseMessaging.instance.onTokenRefresh.listen((t) async {
-        final currentUid = FirebaseAuth.instance.currentUser?.uid;
-        if (currentUid == null || currentUid.isEmpty) return;
-        await _saveToken(currentUid, t);
+      // If the signed-in account changed on this device, perform a hard reset.
+      // This guarantees the device is not still subscribed to the previous
+      // account topics even if unsubscribe propagation is delayed.
+      final previousTopic = _currentTopic;
+      final nextTopic = _topicFor(trimmedUid);
+      if (previousTopic != null &&
+          previousTopic.trim().isNotEmpty &&
+          nextTopic.isNotEmpty &&
+          previousTopic.trim() != nextTopic) {
         try {
-          await _fm.subscribeToTopic(currentUid);
+          await _tokenRefreshSub?.cancel();
+        } catch (_) {}
+        _tokenRefreshSub = null;
+        try {
+          await _fm.deleteToken();
+        } catch (_) {}
+        _currentTopic = null;
+      }
+
+      final token = await _fm.getToken();
+      if (token != null && token.trim().isNotEmpty) {
+        await _saveToken(trimmedUid, token.trim());
+      }
+
+      // Subscribe only to the currently signed-in uid. This prevents one device
+      // from receiving notifications for multiple accounts.
+      if (nextTopic.isNotEmpty && _currentTopic != nextTopic) {
+        final previous = _currentTopic;
+        _currentTopic = nextTopic;
+        if (previous != null && previous.trim().isNotEmpty) {
+          try {
+            await _fm.unsubscribeFromTopic(previous.trim());
+          } catch (_) {}
+        }
+        try {
+          await _fm.subscribeToTopic(nextTopic);
+        } catch (_) {}
+      }
+
+      // Token refresh: save the refreshed token and re-subscribe to the current uid.
+      _tokenRefreshSub ??= _fm.onTokenRefresh.listen((t) async {
+        final currentUid = FirebaseAuth.instance.currentUser?.uid.trim();
+        if (currentUid == null || currentUid.isEmpty) return;
+        try {
+          await _saveToken(currentUid, t.trim());
+        } catch (_) {}
+        try {
+          final currentTopic = _topicFor(currentUid);
+          if (currentTopic.isNotEmpty && _currentTopic != currentTopic) {
+            final prev = _currentTopic;
+            _currentTopic = currentTopic;
+            if (prev != null && prev.trim().isNotEmpty) {
+              await _fm.unsubscribeFromTopic(prev.trim());
+            }
+          }
+          if (currentTopic.isNotEmpty) {
+            await _fm.subscribeToTopic(currentTopic);
+          }
         } catch (_) {}
       });
+    } finally {
+      _updatingToken = false;
+    }
+  }
+
+  Future<void> _handleSignedOut() async {
+    // The safest way to stop receiving previous account notifications on the same
+    // device is to delete the FCM token (topic subscriptions are token-scoped).
+    try {
+      await _tokenRefreshSub?.cancel();
+    } catch (_) {}
+    _tokenRefreshSub = null;
+
+    final previous = _currentTopic;
+    _currentTopic = null;
+    if (previous != null && previous.trim().isNotEmpty) {
+      try {
+        await _fm.unsubscribeFromTopic(previous.trim());
+      } catch (_) {}
+    }
+    try {
+      await _fm.deleteToken();
     } catch (_) {}
   }
 
   Future<void> _saveToken(String uid, String token) async {
     final firestore = FirebaseFirestore.instance;
-    final adminRef = firestore.collection('admin').doc(uid);
-    final adminSnap = await adminRef.get();
-    if (adminSnap.exists) {
-      await adminRef.set({'fcmToken': token}, SetOptions(merge: true));
+    final role = _activeRole;
+    if (role == _roleAdmin) {
+      await firestore
+          .collection('admin')
+          .doc(uid)
+          .set({'fcmToken': token}, SetOptions(merge: true));
       return;
     }
-    final caregiverRef = firestore.collection('caregivers').doc(uid);
-    final caregiverSnap = await caregiverRef.get();
-    if (caregiverSnap.exists) {
-      await caregiverRef.set({'fcmToken': token}, SetOptions(merge: true));
+    if (role == _roleCaregiver) {
+      await firestore
+          .collection('caregivers')
+          .doc(uid)
+          .set({'fcmToken': token}, SetOptions(merge: true));
       return;
     }
-    final userRef = firestore.collection('users').doc(uid);
-    final userSnap = await userRef.get();
-    if (userSnap.exists) {
-      await userRef.set({'fcmToken': token}, SetOptions(merge: true));
-    }
+    await firestore
+        .collection('users')
+        .doc(uid)
+        .set({'fcmToken': token}, SetOptions(merge: true));
   }
 
   Future<void> _showForegroundNotification(RemoteMessage message) async {
@@ -173,8 +306,8 @@ class PushService {
       final body = message.notification?.body?.trim().isNotEmpty == true
           ? message.notification!.body!.trim()
           : (message.data['body']?.toString().trim().isNotEmpty == true
-              ? message.data['body']!.toString().trim()
-              : null);
+                ? message.data['body']!.toString().trim()
+                : null);
       if (body == null) return;
 
       final payload = message.data.isEmpty ? null : jsonEncode(message.data);
@@ -184,7 +317,7 @@ class PushService {
         channelDescription: _androidChannel.description,
         importance: Importance.high,
         priority: Priority.high,
-        icon: '@mipmap/ic_launcher',
+        icon: 'ic_notification',
       );
       const ios = DarwinNotificationDetails();
 

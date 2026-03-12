@@ -3,28 +3,24 @@ import 'dart:convert';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 
-const String _defaultGoogleMapsApiKey = 'AIzaSyDADYhy-AAeikw72w9jq22FnMDCVXRJark';
+const String _defaultGoogleMapsApiKey =
+    'AIzaSyDADYhy-AAeikw72w9jq22FnMDCVXRJark';
 const String _googleMapsApiEnvName = 'GOOGLE_MAPS_API_KEY';
 
 String get googleMapsApiKey => const String.fromEnvironment(
-      _googleMapsApiEnvName,
-      defaultValue: _defaultGoogleMapsApiKey,
-    );
+  _googleMapsApiEnvName,
+  defaultValue: _defaultGoogleMapsApiKey,
+);
 
-/// Returns the coordinates for [address] using the Google Maps Geocoding API.
 Future<LatLng?> geocodeAddress(String address) async {
   final key = googleMapsApiKey;
   final trimmed = address.trim();
   if (key.isEmpty || trimmed.isEmpty) return null;
 
-  final uri = Uri.https(
-    'maps.googleapis.com',
-    '/maps/api/geocode/json',
-    {
-      'address': trimmed,
-      'key': key,
-    },
-  );
+  final uri = Uri.https('maps.googleapis.com', '/maps/api/geocode/json', {
+    'address': trimmed,
+    'key': key,
+  });
 
   try {
     final response = await http.get(uri);
@@ -45,9 +41,7 @@ Future<LatLng?> geocodeAddress(String address) async {
     if (lat is num && lng is num) {
       return LatLng(lat.toDouble(), lng.toDouble());
     }
-  } catch (_) {
-    // ignoring failures keeps existing data untouched
-  }
+  } catch (_) {}
 
   return null;
 }

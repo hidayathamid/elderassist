@@ -119,10 +119,10 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       const [];
   bool _hasSeenWithdrawServerSnapshot = false;
   Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>>?
-      _legacyPaymentsByBookingFuture;
+  _legacyPaymentsByBookingFuture;
 
   Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>>
-      _loadLegacyPaymentsByBookingId(String userId) async {
+  _loadLegacyPaymentsByBookingId(String userId) async {
     // Some legacy payment docs were created without `payments.userId`.
     // Fallback: resolve payments via the user's bookings (bookingId/toyyibBillCode).
     final bookingsSnap = await FirebaseFirestore.instance
@@ -168,7 +168,10 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     for (final bid in bookingIds) {
       if (scanned >= 40) break;
       scanned += 1;
-      final q = await payments.where('bookingId', isEqualTo: bid).limit(3).get();
+      final q = await payments
+          .where('bookingId', isEqualTo: bid)
+          .limit(3)
+          .get();
       for (final doc in q.docs) {
         results.add(doc);
       }
@@ -307,8 +310,8 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       _historySeenInitialized = true;
       final resolvedSnap = await resolvedRef.get();
       final existingSeen = resolvedSnap.data()?['lastSeenPaymentHistoryAt'];
-      final dismissedNoticesRaw =
-          resolvedSnap.data()?['dismissedPaymentHistoryNotices'];
+      final dismissedNoticesRaw = resolvedSnap
+          .data()?['dismissedPaymentHistoryNotices'];
       if (dismissedNoticesRaw is Iterable) {
         _dismissedPaymentNotices
           ..clear()
@@ -465,12 +468,9 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       }
     });
     if (ref == null) return;
-    await ref.set(
-      {
-        'dismissedPaymentHistoryNotices': FieldValue.arrayUnion([trimmed]),
-      },
-      SetOptions(merge: true),
-    );
+    await ref.set({
+      'dismissedPaymentHistoryNotices': FieldValue.arrayUnion([trimmed]),
+    }, SetOptions(merge: true));
   }
 
   Widget _buildSegmentTabBar() {
@@ -1030,7 +1030,9 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
           final bookingStatus =
               (data['bookingStatus'] as String?)?.trim().toUpperCase() ?? '';
           final isPaid =
-              status == 1 || paymentStatus == 'PAID' || paymentStatus == 'SUCCESS';
+              status == 1 ||
+              paymentStatus == 'PAID' ||
+              paymentStatus == 'SUCCESS';
           final isCancelled =
               bookingStatus.contains('CANCEL') ||
               paymentStatus == 'CANCELLED' ||
@@ -1112,33 +1114,36 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
         if (!_isCaregiverPov &&
             _hasSeenPaymentServerSnapshot &&
             visibleDocs.isEmpty) {
-          _legacyPaymentsByBookingFuture ??=
-              _loadLegacyPaymentsByBookingId(userId);
-          return FutureBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
+          _legacyPaymentsByBookingFuture ??= _loadLegacyPaymentsByBookingId(
+            userId,
+          );
+          return FutureBuilder<
+            List<QueryDocumentSnapshot<Map<String, dynamic>>>
+          >(
             future: _legacyPaymentsByBookingFuture,
             builder: (context, legacySnapshot) {
               if (legacySnapshot.connectionState == ConnectionState.waiting) {
                 return const Center(child: CircularProgressIndicator());
               }
               final legacyDocs = legacySnapshot.data ?? const [];
-              final merged = legacyDocs.where((doc) {
-                if (_hiddenPaymentIds.contains(doc.id)) return false;
-                final data = doc.data();
-                if (_isPaymentHiddenForUser(data, userId)) return false;
-                final status = (data['status'] as num?)?.toInt();
-                final paymentStatus = (data['paymentStatus'] as String?)
-                    ?.trim()
-                    .toUpperCase();
-                return !(status == 3 || paymentStatus == 'FAILED');
-              }).toList()
-                ..sort((a, b) {
-                  final tsA = a.data()['updatedAt'] as Timestamp?;
-                  final tsB = b.data()['updatedAt'] as Timestamp?;
-                  if (tsA == null && tsB == null) return 0;
-                  if (tsA == null) return 1;
-                  if (tsB == null) return -1;
-                  return tsB.compareTo(tsA);
-                });
+              final merged =
+                  legacyDocs.where((doc) {
+                    if (_hiddenPaymentIds.contains(doc.id)) return false;
+                    final data = doc.data();
+                    if (_isPaymentHiddenForUser(data, userId)) return false;
+                    final status = (data['status'] as num?)?.toInt();
+                    final paymentStatus = (data['paymentStatus'] as String?)
+                        ?.trim()
+                        .toUpperCase();
+                    return !(status == 3 || paymentStatus == 'FAILED');
+                  }).toList()..sort((a, b) {
+                    final tsA = a.data()['updatedAt'] as Timestamp?;
+                    final tsB = b.data()['updatedAt'] as Timestamp?;
+                    if (tsA == null && tsB == null) return 0;
+                    if (tsA == null) return 1;
+                    if (tsB == null) return -1;
+                    return tsB.compareTo(tsA);
+                  });
 
               if (merged.isEmpty) {
                 return _historyPlaceholder(
@@ -1214,19 +1219,20 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
             final effectiveWithdrawDocs = _hasSeenWithdrawServerSnapshot
                 ? _withdrawDocsFromServer
                 : (withdrawData?.metadata.isFromCache == true
-                    ? const <QueryDocumentSnapshot<Map<String, dynamic>>>[]
-                    : (List<QueryDocumentSnapshot<Map<String, dynamic>>>.of(
-                        withdrawData?.docs ??
-                            const <QueryDocumentSnapshot<Map<String, dynamic>>>[],
-                      )
-                      ..sort((a, b) {
-                        final aTs = a.data()['requestedAt'] as Timestamp?;
-                        final bTs = b.data()['requestedAt'] as Timestamp?;
-                        if (aTs == null && bTs == null) return 0;
-                        if (aTs == null) return 1;
-                        if (bTs == null) return -1;
-                        return bTs.compareTo(aTs);
-                      })));
+                      ? const <QueryDocumentSnapshot<Map<String, dynamic>>>[]
+                      : (List<QueryDocumentSnapshot<Map<String, dynamic>>>.of(
+                          withdrawData?.docs ??
+                              const <
+                                QueryDocumentSnapshot<Map<String, dynamic>>
+                              >[],
+                        )..sort((a, b) {
+                          final aTs = a.data()['requestedAt'] as Timestamp?;
+                          final bTs = b.data()['requestedAt'] as Timestamp?;
+                          if (aTs == null && bTs == null) return 0;
+                          if (aTs == null) return 1;
+                          if (bTs == null) return -1;
+                          return bTs.compareTo(aTs);
+                        })));
             if (visibleDocs.isEmpty &&
                 effectiveWithdrawDocs.isEmpty &&
                 notices.isEmpty) {
@@ -1294,12 +1300,15 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
   ) {
     final data = doc.data();
     final requestedAt = (data['requestedAt'] as Timestamp?)?.toDate();
-    final normalized = ((data['status'] as String?) ?? 'pending').trim().toLowerCase();
+    final normalized = ((data['status'] as String?) ?? 'pending')
+        .trim()
+        .toLowerCase();
+    final verified = data['verified'] == true;
     final receiptUrl = ((data['receiptUrl'] as String?) ?? '').trim();
     final receiptFileName =
         ((data['receiptFileName'] as String?) ?? '').trim().isNotEmpty
-            ? ((data['receiptFileName'] as String?) ?? '').trim()
-            : 'withdraw-receipt-${doc.id}.pdf';
+        ? ((data['receiptFileName'] as String?) ?? '').trim()
+        : 'withdraw-receipt-${doc.id}.pdf';
     final iconColor = switch (normalized) {
       'approved' => _statusPaid,
       'rejected' => _statusCancelled,
@@ -1312,7 +1321,7 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       statusLabel: _withdrawStatusLabel(data),
       message: _withdrawRequestMessage(data),
       requestedAt: requestedAt,
-      footer: normalized == 'approved' && receiptUrl.isNotEmpty
+      footer: verified && receiptUrl.isNotEmpty
           ? SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
@@ -1359,7 +1368,8 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
   }) {
     if (verified) return 'Refund verified';
     if (paymentStatus == 'REFUNDED') return 'Refund verified';
-    if (paymentStatus == 'REFUND_REQUESTED') return 'Refund verification pending';
+    if (paymentStatus == 'REFUND_REQUESTED')
+      return 'Refund verification pending';
     if (bookingStatus.contains('CANCEL')) return 'Refund verification pending';
     if (paymentStatus == 'CANCELLED' || paymentStatus == 'CANCELED') {
       return 'Cancelled';
@@ -1378,8 +1388,14 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
         (booking['personName'] as String?)?.trim() ??
         (data['personName'] as String?)?.trim() ??
         '';
-    final date = (booking['date'] as String?)?.trim() ?? (data['date'] as String?)?.trim() ?? '';
-    final time = (booking['time'] as String?)?.trim() ?? (data['time'] as String?)?.trim() ?? '';
+    final date =
+        (booking['date'] as String?)?.trim() ??
+        (data['date'] as String?)?.trim() ??
+        '';
+    final time =
+        (booking['time'] as String?)?.trim() ??
+        (data['time'] as String?)?.trim() ??
+        '';
     final amount =
         (data['amount'] as num?)?.toDouble() ??
         (booking['servicePrice'] as num?)?.toDouble() ??
@@ -1397,8 +1413,9 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       if (date.isNotEmpty) date,
       if (time.isNotEmpty) time,
     ];
-    final scheduleLine =
-        scheduleParts.isEmpty ? '' : 'Schedule: ${scheduleParts.join(' • ')}';
+    final scheduleLine = scheduleParts.isEmpty
+        ? ''
+        : 'Schedule: ${scheduleParts.join(' • ')}';
 
     final lines = <String>[
       (data['verified'] == true)
@@ -1427,8 +1444,9 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       paymentStatus: paymentStatus,
       verified: verified,
     );
-    final iconColor =
-        verified || paymentStatus == 'REFUNDED' ? _statusPaid : _accentGold;
+    final iconColor = verified || paymentStatus == 'REFUNDED'
+        ? _statusPaid
+        : _accentGold;
 
     return _HistoryNoticeCard(
       icon: Icons.assignment_return_outlined,
@@ -1439,10 +1457,8 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       footer: SizedBox(
         width: double.infinity,
         child: ElevatedButton.icon(
-          onPressed: () => _openPaymentReceiptSheet(
-            paymentId: doc.id,
-            payment: data,
-          ),
+          onPressed: () =>
+              _openPaymentReceiptSheet(paymentId: doc.id, payment: data),
           icon: const Icon(Icons.remove_red_eye_outlined, size: 18),
           label: const Text(
             'View details',
@@ -1488,8 +1504,8 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       _readMoney(data['approvedAmount']) > 0
           ? _readMoney(data['approvedAmount'])
           : (_readMoney(data['payoutAmount']) > 0
-              ? _readMoney(data['payoutAmount'])
-              : _readMoney(data['thisWeekAmount'])),
+                ? _readMoney(data['payoutAmount'])
+                : _readMoney(data['thisWeekAmount'])),
     );
     switch (normalized) {
       case 'approved':
@@ -1519,7 +1535,9 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
         useRootNavigator: true,
         builder: (ctx) => AlertDialog(
           backgroundColor: Colors.white,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
           title: const Text(
             'Download unavailable',
             textAlign: TextAlign.center,
@@ -1562,7 +1580,9 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
         useRootNavigator: true,
         builder: (ctx) => AlertDialog(
           backgroundColor: Colors.white,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
           title: const Text(
             'Download unavailable',
             textAlign: TextAlign.center,
@@ -1655,8 +1675,9 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       }
 
       final dir = await getApplicationDocumentsDirectory();
-      final safeName =
-          fileName.trim().isNotEmpty ? fileName.trim() : 'withdraw-receipt.pdf';
+      final safeName = fileName.trim().isNotEmpty
+          ? fileName.trim()
+          : 'withdraw-receipt.pdf';
       final path = '${dir.path}/$safeName';
       final file = File(path);
       await file.writeAsBytes(bytes, flush: true);
@@ -1665,9 +1686,9 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
 
       await OpenFilex.open(path);
       if (!mounted) return;
-      ScaffoldMessenger.of(feedbackContext).showSnackBar(
-        const SnackBar(content: Text('Receipt downloaded.')),
-      );
+      ScaffoldMessenger.of(
+        feedbackContext,
+      ).showSnackBar(const SnackBar(content: Text('Receipt downloaded.')));
     } catch (e) {
       closeLoadingIfOpen();
       if (!mounted) return;
@@ -1676,7 +1697,9 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
         useRootNavigator: true,
         builder: (ctx) => AlertDialog(
           backgroundColor: Colors.white,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
           title: const Text(
             'Unable to download receipt',
             textAlign: TextAlign.center,
@@ -1758,8 +1781,10 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
         bookingStatus.contains('CANCEL') || paymentStatus.startsWith('REFUND');
     final String? refundStatusLabel = () {
       if (paymentStatus == 'REFUNDED') return 'Refund verified';
-      if (paymentStatus == 'REFUND_REQUESTED') return 'Refund verification pending';
-      if (bookingStatus.contains('CANCEL')) return 'Refund verification pending';
+      if (paymentStatus == 'REFUND_REQUESTED')
+        return 'Refund verification pending';
+      if (bookingStatus.contains('CANCEL'))
+        return 'Refund verification pending';
       return null;
     }();
 
@@ -1919,7 +1944,10 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                     if (showRefundInProgress)
                       Text(
                         refundStatusLabel ?? 'Refund verification pending',
-                        style: const TextStyle(fontSize: 11, color: Colors.black54),
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.black54,
+                        ),
                       ),
                   ],
                 ),
@@ -1966,21 +1994,26 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     const serviceFee = 1.0;
     final afterServiceFee = (amount - serviceFee).clamp(0.0, double.infinity);
     final platformFee = (afterServiceFee * 0.07).clamp(0.0, double.infinity);
-    final netAmount =
-        (afterServiceFee - platformFee).clamp(0.0, double.infinity);
+    final netAmount = (afterServiceFee - platformFee).clamp(
+      0.0,
+      double.infinity,
+    );
     final displayedAmount = _isCaregiverPov ? netAmount : amount;
     final paymentStatus =
         (data['paymentStatus'] as String?)?.trim().toUpperCase() ?? 'PENDING';
     final bookingStatus =
         (data['bookingStatus'] as String?)?.trim().toUpperCase() ?? '';
-    final bool showRefundNotice = !_isCaregiverPov &&
+    final bool showRefundNotice =
+        !_isCaregiverPov &&
         (paymentStatus == 'REFUND_REQUESTED' ||
             paymentStatus == 'REFUNDED' ||
             bookingStatus.contains('CANCEL'));
     final String? refundNoticeLabel = () {
       if (paymentStatus == 'REFUNDED') return 'Refund verified';
-      if (paymentStatus == 'REFUND_REQUESTED') return 'Refund verification pending';
-      if (bookingStatus.contains('CANCEL')) return 'Refund verification pending';
+      if (paymentStatus == 'REFUND_REQUESTED')
+        return 'Refund verification pending';
+      if (bookingStatus.contains('CANCEL'))
+        return 'Refund verification pending';
       return null;
     }();
 
@@ -2017,7 +2050,7 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                        Row(
+                          Row(
                             children: [
                               Expanded(
                                 child: Text(
@@ -2052,9 +2085,7 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                     ),
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        if (isNew) const _CountPill(count: 1),
-                      ],
+                      children: [if (isNew) const _CountPill(count: 1)],
                     ),
                   ],
                 ),
@@ -2483,6 +2514,28 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     return (fileName: fileName, bytes: base64Decode(pdfBase64));
   }
 
+  Future<({String url, String fileName})?> _adminUploadedReceiptForPayment(
+    String paymentId,
+  ) async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('payments')
+          .doc(paymentId)
+          .get();
+      final data = snap.data();
+      if (data == null) return null;
+      final url = (data['receiptUrl'] as String?)?.trim() ?? '';
+      if (url.isEmpty) return null;
+      final name = ((data['receiptFileName'] as String?) ?? '').trim();
+      final fileName = name.isNotEmpty
+          ? name
+          : 'payment-receipt-$paymentId.pdf';
+      return (url: url, fileName: fileName);
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _downloadReceiptPdf(
     String paymentId,
     BuildContext feedbackContext,
@@ -2620,7 +2673,21 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     );
 
     try {
-      final generated = await _generateReceiptPdf(paymentId: paymentId);
+      final adminReceipt = await _adminUploadedReceiptForPayment(paymentId);
+      final ({String fileName, Uint8List bytes}) generated;
+      if (adminReceipt != null) {
+        final uri = Uri.tryParse(adminReceipt.url);
+        if (uri == null) throw Exception('Invalid receipt URL');
+        final response = await http.get(uri);
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw Exception('Failed to download (${response.statusCode})');
+        }
+        final bytes = response.bodyBytes;
+        if (bytes.isEmpty) throw Exception('Empty file');
+        generated = (fileName: adminReceipt.fileName, bytes: bytes);
+      } else {
+        generated = await _generateReceiptPdf(paymentId: paymentId);
+      }
       final dir = await getApplicationDocumentsDirectory();
       final path = '${dir.path}/${generated.fileName}';
       final file = File(path);
@@ -2850,7 +2917,21 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
     );
 
     try {
-      final generated = await _generateReceiptPdf(paymentId: paymentId);
+      final adminReceipt = await _adminUploadedReceiptForPayment(paymentId);
+      final ({String fileName, Uint8List bytes}) generated;
+      if (adminReceipt != null) {
+        final uri = Uri.tryParse(adminReceipt.url);
+        if (uri == null) throw Exception('Invalid receipt URL');
+        final response = await http.get(uri);
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw Exception('Failed to download (${response.statusCode})');
+        }
+        final bytes = response.bodyBytes;
+        if (bytes.isEmpty) throw Exception('Empty file');
+        generated = (fileName: adminReceipt.fileName, bytes: bytes);
+      } else {
+        generated = await _generateReceiptPdf(paymentId: paymentId);
+      }
       final dir = await getApplicationDocumentsDirectory();
       final path = '${dir.path}/${generated.fileName}';
       final file = File(path);
@@ -2914,6 +2995,19 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
       paymentId: paymentId,
       payment: payment,
     );
+    final normalizedPaymentStatus =
+        (payment['paymentStatus'] as String?)?.trim().toUpperCase() ??
+        'PENDING';
+    final normalizedBookingStatus =
+        (payment['bookingStatus'] as String?)?.trim().toUpperCase() ?? '';
+    final verified = payment['verified'] == true;
+    final refundVerified = verified || normalizedPaymentStatus == 'REFUNDED';
+    final isRefundFlow =
+        normalizedPaymentStatus.startsWith('REFUND') ||
+        normalizedBookingStatus.contains('CANCEL');
+    final hideReceiptActions =
+        normalizedPaymentStatus == 'PENDING' ||
+        (isRefundFlow && !refundVerified);
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -3024,13 +3118,21 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                         final distanceKm = _readMoney(d['distanceKm']);
                         final distanceCharge = _readMoney(d['distanceCharge']);
                         const serviceFee = 1.0;
-                        final afterServiceFee =
-                            (total - serviceFee).clamp(0.0, double.infinity);
-                        final platformFee =
-                            (afterServiceFee * 0.07).clamp(0.0, double.infinity);
-                        final netTotal = (afterServiceFee - platformFee)
-                            .clamp(0.0, double.infinity);
-                        final displayedTotal = _isCaregiverPov ? netTotal : total;
+                        final afterServiceFee = (total - serviceFee).clamp(
+                          0.0,
+                          double.infinity,
+                        );
+                        final platformFee = (afterServiceFee * 0.07).clamp(
+                          0.0,
+                          double.infinity,
+                        );
+                        final netTotal = (afterServiceFee - platformFee).clamp(
+                          0.0,
+                          double.infinity,
+                        );
+                        final displayedTotal = _isCaregiverPov
+                            ? netTotal
+                            : total;
 
                         String scheduleLine() {
                           final parts = <String>[
@@ -3293,17 +3395,21 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                                           _receiptInfoRow(
                                             icon: Icons.remove_circle_outline,
                                             title: 'Payment service charge',
-                                            value: '- RM ${_formatMoney(serviceFee)}',
+                                            value:
+                                                '- RM ${_formatMoney(serviceFee)}',
                                           ),
                                           _receiptInfoRow(
                                             icon: Icons.percent_outlined,
-                                            title: 'Platform payment charge (7%)',
-                                            value: '- RM ${_formatMoney(platformFee)}',
+                                            title:
+                                                'Platform payment charge (7%)',
+                                            value:
+                                                '- RM ${_formatMoney(platformFee)}',
                                           ),
                                           _receiptInfoRow(
                                             icon: Icons.calculate_outlined,
                                             title: 'New total',
-                                            value: 'RM ${_formatMoney(netTotal)}',
+                                            value:
+                                                'RM ${_formatMoney(netTotal)}',
                                             showBorder: false,
                                           ),
                                         ] else
@@ -3324,61 +3430,64 @@ class _ProfilePaymentsScreenState extends State<ProfilePaymentsScreen> {
                       },
                     ),
                   ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
-                    child: Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: _receiptPremiumCardDecoration(),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: OutlinedButton(
-                              onPressed: () =>
-                                  _downloadReceiptPdf(paymentId, sheetContext),
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: Colors.black,
-                                side: BorderSide(
-                                  color: Colors.black.withValues(alpha: 0.12),
+                  if (!hideReceiptActions)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+                      child: Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: _receiptPremiumCardDecoration(),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () => _downloadReceiptPdf(
+                                  paymentId,
+                                  sheetContext,
                                 ),
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 12,
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: Colors.black,
+                                  side: BorderSide(
+                                    color: Colors.black.withValues(alpha: 0.12),
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 12,
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(14),
+                                  ),
                                 ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14),
+                                child: const Text(
+                                  'Download receipt',
+                                  style: TextStyle(fontWeight: FontWeight.w700),
                                 ),
-                              ),
-                              child: const Text(
-                                'Download receipt',
-                                style: TextStyle(fontWeight: FontWeight.w700),
                               ),
                             ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: ElevatedButton(
-                              onPressed: () =>
-                                  _shareReceiptPdf(paymentId, sheetContext),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: _accentGold,
-                                foregroundColor: Colors.black,
-                                elevation: 0,
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 12,
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: ElevatedButton(
+                                onPressed: () =>
+                                    _shareReceiptPdf(paymentId, sheetContext),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: _accentGold,
+                                  foregroundColor: Colors.black,
+                                  elevation: 0,
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 12,
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(14),
+                                  ),
                                 ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14),
+                                child: const Text(
+                                  'Share receipt',
+                                  style: TextStyle(fontWeight: FontWeight.w800),
                                 ),
-                              ),
-                              child: const Text(
-                                'Share receipt',
-                                style: TextStyle(fontWeight: FontWeight.w800),
                               ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -3757,21 +3866,18 @@ class _HistoryNoticeCard extends StatelessWidget {
             message,
             style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
           ),
-           if (dateLabel != null) ...[
-             const SizedBox(height: 6),
-             Text(
-               dateLabel,
-               style: const TextStyle(fontSize: 11, color: Colors.black54),
-             ),
-           ],
-           if (footer != null) ...[
-             const SizedBox(height: 10),
-             footer!,
-           ],
-         ],
-       ),
-     );
-   }
+          if (dateLabel != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              dateLabel,
+              style: const TextStyle(fontSize: 11, color: Colors.black54),
+            ),
+          ],
+          if (footer != null) ...[const SizedBox(height: 10), footer!],
+        ],
+      ),
+    );
+  }
 }
 
 class _CountPill extends StatelessWidget {

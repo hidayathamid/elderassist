@@ -390,29 +390,32 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     _ruleMatrixSub = FirebaseFirestore.instance
         .collection('recommendationRules')
         .snapshots()
-        .listen((snap) {
-          final rules = <_RecommendationMatrixRule>[];
-          for (final doc in snap.docs) {
-            if (doc.id == 'current') continue;
-            final data = doc.data();
-            final rule = _RecommendationMatrixRule.tryParse(data);
-            if (rule != null) rules.add(rule);
-          }
-          rules.sort(_RecommendationMatrixRule.compare);
-          if (!mounted) return;
-          setState(() => _recommendationMatrix = rules);
-          if (_candidateCaregivers.isNotEmpty) {
-            _candidateCaregivers = _lastCaregiverDocs
-                .map(_mapDocToCaregiverOption)
-                .where((c) => c.distanceKm <= _maxSearchDistanceKm)
-                .toList();
-            _rebuildFromCandidates();
-          }
-        }, onError: (e) {
-          debugPrint('Recommendation rules matrix listener error: $e');
-          if (!mounted) return;
-          setState(() => _recommendationMatrix = const []);
-        });
+        .listen(
+          (snap) {
+            final rules = <_RecommendationMatrixRule>[];
+            for (final doc in snap.docs) {
+              if (doc.id == 'current') continue;
+              final data = doc.data();
+              final rule = _RecommendationMatrixRule.tryParse(data);
+              if (rule != null) rules.add(rule);
+            }
+            rules.sort(_RecommendationMatrixRule.compare);
+            if (!mounted) return;
+            setState(() => _recommendationMatrix = rules);
+            if (_candidateCaregivers.isNotEmpty) {
+              _candidateCaregivers = _lastCaregiverDocs
+                  .map(_mapDocToCaregiverOption)
+                  .where((c) => c.distanceKm <= _maxSearchDistanceKm)
+                  .toList();
+              _rebuildFromCandidates();
+            }
+          },
+          onError: (e) {
+            debugPrint('Recommendation rules matrix listener error: $e');
+            if (!mounted) return;
+            setState(() => _recommendationMatrix = const []);
+          },
+        );
   }
 
   Future<void> _loadClientPreferences() async {
@@ -712,9 +715,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       }
       if (best != null) return best.recommendationClass;
     }
-
-    // If the matrix isn't available (not seeded yet), default to Not ideal.
-    // This keeps behavior consistent (matrix-driven) instead of using legacy scoring.
     return 3;
   }
 
@@ -751,14 +751,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
   ) {
     final ranked = List<CaregiverOption>.from(available)
       ..sort(_compareCaregiversForRanking);
-    final qualified =
-        ranked.where((c) => !_shouldExcludeCaregiver(c)).toList();
+    final qualified = ranked.where((c) => !_shouldExcludeCaregiver(c)).toList();
 
-    final byClass = <int, List<CaregiverOption>>{
-      1: [],
-      2: [],
-      3: [],
-    };
+    final byClass = <int, List<CaregiverOption>>{1: [], 2: [], 3: []};
     for (final c in qualified) {
       byClass[(c.recommendationClass).clamp(1, 3)]!.add(c);
     }
@@ -767,10 +762,6 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     final class2 = byClass[2]!;
     final class3 = byClass[3]!;
 
-    // We want the "Recommendation" section ordered by rank:
-    // Class 1 first, then Class 2, then Class 3 (Not ideal).
-    // But we still try to include a Class 3 item (if any) as the last card,
-    // so users can see why something becomes the third tier.
     final result = <CaregiverOption>[];
     final used = <String>{};
 
@@ -861,8 +852,7 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       0,
       preferredDistanceKm - min(distanceKm, preferredDistanceKm),
     );
-    final double distanceScore =
-        normalizedDistance * distanceScoreMultiplier;
+    final double distanceScore = normalizedDistance * distanceScoreMultiplier;
     final double ratingScore = rating * ratingScoreMultiplier;
     final double matchScore = matchCount * matchScoreMultiplier;
     final double serviceScore =
@@ -3088,8 +3078,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                       0,
                       mapBottomPadding,
                     ),
-                    markers:
-                        _markers.isNotEmpty ? _markers : {_selectedMarker()},
+                    markers: _markers.isNotEmpty
+                        ? _markers
+                        : {_selectedMarker()},
                     polylines: _route,
                     onMapCreated: (c) {
                       _mapController = c;
@@ -3099,8 +3090,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                 builder: (context, mapChild) {
                   final t = _panelController.value;
                   final panelHeight = _currentSheetHeight(context);
-                  final backdropOpacity =
-                      (t * 0.22).clamp(0.0, 0.22).toDouble();
+                  final backdropOpacity = (t * 0.22)
+                      .clamp(0.0, 0.22)
+                      .toDouble();
                   final double frontBottom = t > 0.55
                       ? -110.0
                       : (bottomInset + 2)
@@ -3109,157 +3101,164 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                   return Stack(
                     children: [
                       if (mapChild != null) mapChild,
-                  IgnorePointer(
-                    ignoring: true,
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 180),
-                      color: Colors.black.withValues(alpha: backdropOpacity),
-                    ),
-                  ),
-                  IgnorePointer(
-                    ignoring: true,
-                    child: AnimatedOpacity(
-                      duration: const Duration(milliseconds: 160),
-                      curve: Curves.easeOut,
-                      opacity: _modalSheetScrimVisible ? 1 : 0,
-                      child: ColoredBox(
-                        color: Colors.black.withValues(alpha: 0.54),
-                        child: SizedBox.expand(),
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    height: panelHeight,
-                    child: ClipRRect(
-                      borderRadius: panelBorderRadius,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: panelBorderRadius,
-                          border: Border.all(
-                            color: Colors.black12.withValues(alpha: 0.08),
+                      IgnorePointer(
+                        ignoring: true,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          color: Colors.black.withValues(
+                            alpha: backdropOpacity,
                           ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.10),
-                              blurRadius: 18,
-                              offset: const Offset(0, -6),
-                            ),
-                          ],
                         ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.max,
-                          children: [
-                            GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onVerticalDragStart: _enablePanelDragGesture
-                                  ? _onHandleDragStart
-                                  : null,
-                              onVerticalDragUpdate: _enablePanelDragGesture
-                                  ? _onHandleDragUpdate
-                                  : null,
-                              onVerticalDragEnd: _enablePanelDragGesture
-                                  ? _onHandleDragEnd
-                                  : null,
-                              child: SizedBox(
-                                height: 42,
-                                width: double.infinity,
-                                child: Center(
-                                  child: Container(
-                                    width: 38,
-                                    height: 4,
-                                    decoration: BoxDecoration(
-                                      color: Colors.black.withValues(
-                                        alpha: 0.16,
+                      ),
+                      IgnorePointer(
+                        ignoring: true,
+                        child: AnimatedOpacity(
+                          duration: const Duration(milliseconds: 160),
+                          curve: Curves.easeOut,
+                          opacity: _modalSheetScrimVisible ? 1 : 0,
+                          child: ColoredBox(
+                            color: Colors.black.withValues(alpha: 0.54),
+                            child: SizedBox.expand(),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        height: panelHeight,
+                        child: ClipRRect(
+                          borderRadius: panelBorderRadius,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: panelBorderRadius,
+                              border: Border.all(
+                                color: Colors.black12.withValues(alpha: 0.08),
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.10),
+                                  blurRadius: 18,
+                                  offset: const Offset(0, -6),
+                                ),
+                              ],
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.max,
+                              children: [
+                                GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onVerticalDragStart: _enablePanelDragGesture
+                                      ? _onHandleDragStart
+                                      : null,
+                                  onVerticalDragUpdate: _enablePanelDragGesture
+                                      ? _onHandleDragUpdate
+                                      : null,
+                                  onVerticalDragEnd: _enablePanelDragGesture
+                                      ? _onHandleDragEnd
+                                      : null,
+                                  child: SizedBox(
+                                    height: 42,
+                                    width: double.infinity,
+                                    child: Center(
+                                      child: Container(
+                                        width: 38,
+                                        height: 4,
+                                        decoration: BoxDecoration(
+                                          color: Colors.black.withValues(
+                                            alpha: 0.16,
+                                          ),
+                                          borderRadius: BorderRadius.circular(
+                                            24,
+                                          ),
+                                        ),
                                       ),
-                                      borderRadius: BorderRadius.circular(24),
                                     ),
                                   ),
-                              ),
+                                ),
+                                _categoryTabs(show: t > 0.05),
+                                const Divider(height: 1),
+                                Expanded(
+                                  child: NotificationListener<ScrollNotification>(
+                                    onNotification: (notification) {
+                                      if (notification
+                                          is ScrollUpdateNotification) {
+                                        _handleScrollCategoryDetection();
+                                      } else if (notification
+                                              is ScrollEndNotification ||
+                                          (notification
+                                                  is UserScrollNotification &&
+                                              notification.direction ==
+                                                  ScrollDirection.idle)) {
+                                        _handleScrollCategoryDetection();
+                                        _scheduleSnapToNearestTile();
+                                      }
+                                      return false;
+                                    },
+                                    child: ListView(
+                                      key: _listKey,
+                                      controller: _listController,
+                                      padding: EdgeInsets.only(
+                                        left: 12,
+                                        right: 12,
+                                        top: 8,
+                                        bottom:
+                                            MediaQuery.of(
+                                              context,
+                                            ).padding.bottom +
+                                            160,
+                                      ),
+                                      children: [
+                                        if (_loadingCaregivers)
+                                          Padding(
+                                            padding: const EdgeInsets.all(24),
+                                            child: Center(
+                                              child: _buildLoadingHint(
+                                                message: 'No caregivers nearby',
+                                              ),
+                                            ),
+                                          )
+                                        else if (_caregivers.isEmpty)
+                                          Padding(
+                                            padding: const EdgeInsets.all(24),
+                                            child: Center(
+                                              child: _buildNoCaregiversHint(
+                                                message:
+                                                    _errorMessage ??
+                                                    'No caregivers nearby',
+                                              ),
+                                            ),
+                                          )
+                                        else
+                                          ...CaregiverCategory.values.map(
+                                            _categorySection,
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                            _categoryTabs(show: t > 0.05),
-                            const Divider(height: 1),
-                            Expanded(
-                              child: NotificationListener<ScrollNotification>(
-                                onNotification: (notification) {
-                                  if (notification
-                                      is ScrollUpdateNotification) {
-                                    _handleScrollCategoryDetection();
-                                  } else if (notification
-                                          is ScrollEndNotification ||
-                                      (notification is UserScrollNotification &&
-                                          notification.direction ==
-                                              ScrollDirection.idle)) {
-                                    _handleScrollCategoryDetection();
-                                    _scheduleSnapToNearestTile();
-                                  }
-                                  return false;
-                                },
-                                child: ListView(
-                                  key: _listKey,
-                                  controller: _listController,
-                                  padding: EdgeInsets.only(
-                                    left: 12,
-                                    right: 12,
-                                    top: 8,
-                                    bottom:
-                                        MediaQuery.of(context).padding.bottom +
-                                        160,
-                                  ),
-                                  children: [
-                                    if (_loadingCaregivers)
-                                      Padding(
-                                        padding: const EdgeInsets.all(24),
-                                        child: Center(
-                                          child: _buildLoadingHint(
-                                            message: 'No caregivers nearby',
-                                          ),
-                                        ),
-                                      )
-                                    else if (_caregivers.isEmpty)
-                                      Padding(
-                                        padding: const EdgeInsets.all(24),
-                                        child: Center(
-                                          child: _buildNoCaregiversHint(
-                                            message:
-                                                _errorMessage ??
-                                                'No caregivers nearby',
-                                          ),
-                                        ),
-                                      )
-                                    else
-                                      ...CaregiverCategory.values.map(
-                                        _categorySection,
-                                      ),
-                                  ],
-                                ),
-                              ),
+                        ),
+                      ),
+                      AnimatedPositioned(
+                        duration: const Duration(milliseconds: 240),
+                        curve: Curves.easeOut,
+                        left: 8,
+                        right: 8,
+                        bottom: frontBottom,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                              color: Colors.black12.withValues(alpha: 0.08),
                             ),
-                          ],
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: _frontSheet(subtitle),
                         ),
                       ),
-                    ),
-                  ),
-                  AnimatedPositioned(
-                    duration: const Duration(milliseconds: 240),
-                    curve: Curves.easeOut,
-                    left: 8,
-                    right: 8,
-                    bottom: frontBottom,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        border: Border.all(
-                          color: Colors.black12.withValues(alpha: 0.08),
-                        ),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: _frontSheet(subtitle),
-                    ),
-                  ),
                     ],
                   );
                 },
@@ -3347,9 +3346,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                     child: ElevatedButton(
                       onPressed:
                           (_selectedCaregiver != null &&
-                                  _selectedCaregiver?.available == true)
-                              ? _goToSummary
-                              : null,
+                              _selectedCaregiver?.available == true)
+                          ? _goToSummary
+                          : null,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: primary,
                         foregroundColor: const Color.fromARGB(255, 20, 20, 20),
@@ -3664,7 +3663,10 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
       key: _tileKeyFor(caregiver.id, tileCategory),
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 5),
-        constraints: BoxConstraints(minHeight: 92, maxHeight: isRecommendation ? 140 : 124),
+        constraints: BoxConstraints(
+          minHeight: 92,
+          maxHeight: isRecommendation ? 140 : 124,
+        ),
         decoration: BoxDecoration(
           color: isSelected ? const Color(0xFFE8F4FF) : Colors.white,
           borderRadius: BorderRadius.circular(14),
@@ -3743,9 +3745,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                             Row(
                               mainAxisAlignment:
                                   tileCategory ==
-                                          CaregiverCategory.recommendation
-                                      ? MainAxisAlignment.start
-                                      : MainAxisAlignment.center,
+                                      CaregiverCategory.recommendation
+                                  ? MainAxisAlignment.start
+                                  : MainAxisAlignment.center,
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 const Icon(
@@ -3825,17 +3827,17 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
                                           child: Row(
                                             mainAxisAlignment:
                                                 tileCategory ==
-                                                        CaregiverCategory
-                                                            .recommendation
-                                                    ? MainAxisAlignment.start
-                                                    : MainAxisAlignment.center,
+                                                    CaregiverCategory
+                                                        .recommendation
+                                                ? MainAxisAlignment.start
+                                                : MainAxisAlignment.center,
                                             children: reasons
                                                 .map(
                                                   (reason) => Padding(
                                                     padding:
                                                         const EdgeInsets.only(
-                                                      right: 4,
-                                                    ),
+                                                          right: 4,
+                                                        ),
                                                     child: ServiceTagChip(
                                                       label: reason,
                                                       backgroundColor:
@@ -3966,12 +3968,12 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     if (shouldThrottle) {
       _lastTap = now;
     }
-     final cat = sourceCategory ?? CaregiverCategory.forYou;
-     setState(() {
-       _selectedCaregiver = caregiver;
-       _activeCategory = cat;
-       _selectedCategory = cat;
-     });
+    final cat = sourceCategory ?? CaregiverCategory.forYou;
+    setState(() {
+      _selectedCaregiver = caregiver;
+      _activeCategory = cat;
+      _selectedCategory = cat;
+    });
 
     // Smooth snapping: update markers immediately, then debounce the heavy
     // route + camera fitting so the map can "catch up" even if snapping fast.
@@ -4081,21 +4083,21 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
     await _updateSelectedMarkers();
     if (!mounted || requestSeq != _routeRequestSeq) return;
     await _fitMapToPins(_currentLatLng, caregiverLoc, routePoints: points);
-     final bool shouldCollapsePanel = _panelController.value > 0.01;
-     TickerFuture? panelCollapseFuture;
-     if (shouldCollapsePanel) {
-       panelCollapseFuture = _animatePanelTo(0);
-     }
-     if (centerTileAfterCollapse && panelCollapseFuture != null) {
-       try {
-         await panelCollapseFuture;
-       } catch (_) {}
-       if (mounted) {
-         _ensureTileCentered(caregiver.id, cat);
-       }
-     }
-     await _updateSelectedMarkers();
-   }
+    final bool shouldCollapsePanel = _panelController.value > 0.01;
+    TickerFuture? panelCollapseFuture;
+    if (shouldCollapsePanel) {
+      panelCollapseFuture = _animatePanelTo(0);
+    }
+    if (centerTileAfterCollapse && panelCollapseFuture != null) {
+      try {
+        await panelCollapseFuture;
+      } catch (_) {}
+      if (mounted) {
+        _ensureTileCentered(caregiver.id, cat);
+      }
+    }
+    await _updateSelectedMarkers();
+  }
 
   void _ensureTileCentered(
     String caregiverId,
@@ -4638,7 +4640,9 @@ class _BookingCaregiverScreenState extends State<BookingCaregiverScreen>
         if (caregiver.matchCount >= requestedServiceCount) {
           positives.add('Full match');
         } else {
-          positives.add('Matches ${caregiver.matchCount}/$requestedServiceCount');
+          positives.add(
+            'Matches ${caregiver.matchCount}/$requestedServiceCount',
+          );
         }
       } else if (features.matchLevel >= 4) {
         negatives.add('Low match');
@@ -4813,7 +4817,8 @@ class _RecommendationMatrixFeatures {
       if (caregiverPrice <= clientBudget) return 1;
 
       // If above budget, bucket by how much it exceeds the budget.
-      final overPercent = ((caregiverPrice - clientBudget) / clientBudget) * 100.0;
+      final overPercent =
+          ((caregiverPrice - clientBudget) / clientBudget) * 100.0;
       if (overPercent <= 5) return 2;
       if (overPercent <= 15) return 3;
       if (overPercent <= 30) return 4;
@@ -4914,9 +4919,13 @@ class _RecommendationMatrixRule {
     }
 
     final ratingLevel = readInt(data['rating_level'] ?? data['ratingLevel']);
-    final distanceLevel = readInt(data['distance_level'] ?? data['distanceLevel']);
+    final distanceLevel = readInt(
+      data['distance_level'] ?? data['distanceLevel'],
+    );
     final matchLevel = readInt(data['match_level'] ?? data['matchLevel']);
-    final priceGapLevel = readInt(data['price_gap_level'] ?? data['priceGapLevel']);
+    final priceGapLevel = readInt(
+      data['price_gap_level'] ?? data['priceGapLevel'],
+    );
     final serviceCountLevel = readInt(
       data['service_count_level'] ?? data['serviceCountLevel'],
     );

@@ -9,7 +9,7 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
 
     <application
-        android:label="emergencies_disability_assistance_app"
+        android:label="ElderAssist"
         tools:replace="android:label"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">

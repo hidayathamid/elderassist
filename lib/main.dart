@@ -12,15 +12,11 @@ import 'services/push_service.dart';
 import 'widgets/auth_wrapper.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 
-/// =============================
-/// BACKGROUND NOTIFICATION HANDLER
-/// =============================
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 }
 
-/// Global navigator key (used for push navigation)
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> _initFirebaseAppCheck() async {
@@ -47,23 +43,12 @@ Future<void> _initFirebaseAppCheck() async {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // ========================================
-  // INITIALIZE FIREBASE
-  // ========================================
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
-  // ========================================
-  // ?? ACTIVATE APP CHECK (DEV MODE)
-  // ========================================
   await _initFirebaseAppCheck();
 
-  // ========================================
-  // ?? ENSURE USER IS AUTHENTICATED
-  // ========================================
   final auth = FirebaseAuth.instance;
-  // On app start / hot restart FirebaseAuth may take a moment to restore the
-  // persisted session. Avoid signing in anonymously too early (which would
-  // replace an existing caregiver/user session).
+
   User? initialUser;
   try {
     initialUser = await auth.authStateChanges().first.timeout(
@@ -85,9 +70,6 @@ Future<void> main() async {
     }
   }
 
-  // ========================================
-  // FIREBASE CLOUD MESSAGING
-  // ========================================
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
   runApp(const ElderAssistApp());

@@ -19,6 +19,7 @@ import 'package:emergencies_disability_assistance_app/screens/user/profile/profi
 import 'package:emergencies_disability_assistance_app/services/booking_service.dart';
 import 'package:emergencies_disability_assistance_app/services/caregiver_service.dart';
 import 'package:emergencies_disability_assistance_app/services/location_service.dart';
+import 'package:emergencies_disability_assistance_app/services/recommendation_matrix_engine.dart';
 import 'package:emergencies_disability_assistance_app/screens/user/home/all_caregiver_screen.dart';
 import 'package:emergencies_disability_assistance_app/utils/booking_due_status.dart';
 import 'package:emergencies_disability_assistance_app/widgets/safe_network_image.dart';
@@ -476,6 +477,9 @@ class _UserHomeScreenState extends State<UserHomeScreen>
   final Map<String, CaregiverModel> _caregiverCache = {};
   RecommendationRules _recommendationRules = RecommendationRules.defaults();
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _rulesSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _matrixSub;
+  List<RecommendationMatrixRule> _recommendationMatrix = const [];
+  double? _userBudget;
   final Set<String> _autoPromotedBookingIds = <String>{};
 
   AnimationController? _entryController;
@@ -721,6 +725,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     _recommendedCaregiversFuture = _loadRecommendedCaregivers();
     _nearbyCaregiversStream = _caregiverService.streamCaregivers();
     _listenForRecommendationRules();
+    _listenForRecommendationMatrix();
     _loadUserLocation();
     _subscribeToUserDocStream();
     _updateGreeting();
@@ -822,6 +827,8 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     final photoUrl = _normalizePhotoUrl(firestoreData?['photoUrl'] as String?);
     final fallbackPhoto = _normalizePhotoUrl(_auth.currentUser?.photoURL);
     final preferences = _extractPreferences(firestoreData);
+    final budget = _safeDouble(firestoreData?['budget']);
+    _userBudget = (budget != null && budget > 0) ? budget.clamp(10.0, 150.0) : null;
     final addressPosition = _positionsFromDocument(firestoreData);
     final addresses = _extractAddressList(firestoreData);
     final phone = (firestoreData?['phone'] as String?)?.trim();
@@ -1196,6 +1203,25 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     });
   }
 
+  void _listenForRecommendationMatrix() {
+    _matrixSub?.cancel();
+    _matrixSub = FirebaseFirestore.instance
+        .collection('recommendationRules')
+        .snapshots()
+        .listen(
+          (snapshot) {
+            final rules = RecommendationMatrixEngine.parseRulesSnapshot(snapshot);
+            if (!mounted) return;
+            setState(() => _recommendationMatrix = rules);
+          },
+          onError: (e) {
+            debugPrint('Home recommendation matrix listener error: $e');
+            if (!mounted) return;
+            setState(() => _recommendationMatrix = const []);
+          },
+        );
+  }
+
   double _priceValue({required double distanceKm, required bool available}) {
     return (6.0 + distanceKm * 1.6 - (available ? 0 : -2))
         .clamp(0.0, double.infinity);
@@ -1237,22 +1263,6 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     if (rating < _recommendationRules.minAcceptableRating) return true;
     if (distanceKm > _recommendationRules.maxRuleDistanceKm) return true;
     return false;
-  }
-
-  int _recommendationClassFromScore(
-    double score, {
-    required double caregiverRating,
-    required double caregiverDistanceKm,
-  }) {
-    if (_shouldExcludeCaregiver(
-      rating: caregiverRating,
-      distanceKm: caregiverDistanceKm,
-    )) {
-      return 3;
-    }
-    if (score >= _recommendationRules.recommendationTier1MinScore) return 1;
-    if (score >= _recommendationRules.recommendationTier2MinScore) return 2;
-    return 3;
   }
 
   double? _distanceToCaregiver(CaregiverModel model) {
@@ -1488,10 +1498,15 @@ class _UserHomeScreenState extends State<UserHomeScreen>
             serviceCount: model.services.length,
             price: price,
           );
-          final cls = _recommendationClassFromScore(
-            s,
+          final cls = RecommendationMatrixEngine.recommendationClass(
+            rules: _recommendationMatrix,
+            distanceKm: distanceKm,
+            priceValue: price,
+            matchCount: matchedCount,
+            requestedServiceCount: prefs.length,
+            caregiverServiceCount: model.services.length,
             caregiverRating: model.rating,
-            caregiverDistanceKm: distanceKm,
+            clientBudget: (_userBudget ?? 150.0),
           );
           ranked.add((
             profile: _mapModelToProfile(
@@ -1525,11 +1540,9 @@ class _UserHomeScreenState extends State<UserHomeScreen>
           return b.score.compareTo(a.score);
         });
 
-        final class1 = ranked.where((e) => e.cls == 1).toList();
-        final class2 = ranked.where((e) => e.cls == 2).toList();
-        final recommended = [...class1, ...class2];
-        final pool = recommended.isNotEmpty ? recommended : ranked;
-        final caregivers = pool.take(4).map((e) => e.profile).toList();
+        // Always show class 1, 2, and 3 (sorted by class first), so "Not ideal"
+        // can appear below better matches, similar to BookingCaregiverScreen.
+        final caregivers = ranked.take(4).map((e) => e.profile).toList();
         return _CaregiverSection(
           title: 'Recommended For You',
           caregivers: caregivers,
@@ -1917,6 +1930,7 @@ class _UserHomeScreenState extends State<UserHomeScreen>
     _greetingTimer?.cancel();
     _userDocSubscription?.cancel();
     _rulesSub?.cancel();
+    _matrixSub?.cancel();
     widget.tabIndexListenable?.removeListener(_handleTabChange);
     _entryController?.dispose();
     super.dispose();

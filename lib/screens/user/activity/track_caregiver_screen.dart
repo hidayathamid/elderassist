@@ -1186,9 +1186,7 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
       });
       _liveLocationInFlight = false;
       return latLng;
-    } catch (_) {
-      // fallback: direct update so marker still moves even if function isn't deployed yet
-    }
+    } catch (_) {}
     await FirebaseFirestore.instance
         .collection('caregivers')
         .doc(caregiverId.trim())
@@ -1981,71 +1979,72 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                               ],
                             )
                           : (showCameraBesidePrimary
-                              ? Row(
-                                  children: [
-                                    Expanded(
-                                      child: ElevatedButton(
-                                        onPressed: canPress ? onPressed : null,
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: canPress
-                                              ? _routeColor
-                                              : const Color(0xFFCDD1D6),
-                                          foregroundColor: canPress
-                                              ? Colors.black
-                                              : Colors.white70,
-                                          elevation: 0,
-                                          padding: const EdgeInsets.symmetric(
-                                            vertical: 12,
+                                ? Row(
+                                    children: [
+                                      Expanded(
+                                        child: ElevatedButton(
+                                          onPressed: canPress
+                                              ? onPressed
+                                              : null,
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor: canPress
+                                                ? _routeColor
+                                                : const Color(0xFFCDD1D6),
+                                            foregroundColor: canPress
+                                                ? Colors.black
+                                                : Colors.white70,
+                                            elevation: 0,
+                                            padding: const EdgeInsets.symmetric(
+                                              vertical: 12,
+                                            ),
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(18),
+                                            ),
+                                            textStyle: const TextStyle(
+                                              fontSize: 15,
+                                              fontWeight: FontWeight.w900,
+                                            ),
                                           ),
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius:
-                                                BorderRadius.circular(18),
-                                          ),
-                                          textStyle: const TextStyle(
-                                            fontSize: 15,
-                                            fontWeight: FontWeight.w900,
-                                          ),
+                                          child: Text(buttonLabel),
                                         ),
-                                        child: Text(buttonLabel),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      _circleIconButton(
+                                        icon: Icons.photo_camera_rounded,
+                                        background: _accentGreen.withValues(
+                                          alpha: 0.12,
+                                        ),
+                                        iconColor: _accentGreen,
+                                        onTap: canCameraPress
+                                            ? onCameraPressed
+                                            : null,
+                                      ),
+                                    ],
+                                  )
+                                : ElevatedButton(
+                                    onPressed: canPress ? onPressed : null,
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: canPress
+                                          ? _routeColor
+                                          : const Color(0xFFCDD1D6),
+                                      foregroundColor: canPress
+                                          ? Colors.black
+                                          : Colors.white70,
+                                      elevation: 0,
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 12,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(18),
+                                      ),
+                                      textStyle: const TextStyle(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w900,
                                       ),
                                     ),
-                                    const SizedBox(width: 10),
-                                    _circleIconButton(
-                                      icon: Icons.photo_camera_rounded,
-                                      background: _accentGreen.withValues(
-                                        alpha: 0.12,
-                                      ),
-                                      iconColor: _accentGreen,
-                                      onTap: canCameraPress
-                                          ? onCameraPressed
-                                          : null,
-                                    ),
-                                  ],
-                                )
-                              : ElevatedButton(
-                                  onPressed: canPress ? onPressed : null,
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: canPress
-                                        ? _routeColor
-                                        : const Color(0xFFCDD1D6),
-                                    foregroundColor: canPress
-                                        ? Colors.black
-                                        : Colors.white70,
-                                    elevation: 0,
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 12,
-                                    ),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius:
-                                          BorderRadius.circular(18),
-                                    ),
-                                    textStyle: const TextStyle(
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w900,
-                                    ),
-                                  ),
-                                  child: Text(buttonLabel),
-                                )),
+                                    child: Text(buttonLabel),
+                                  )),
                     ),
                   ),
                 ],
@@ -4720,9 +4719,9 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                     buttonLabel: isSosOfferMode
                                         ? 'Accept'
                                         : (!canCompleteNow &&
-                                                needsEvidenceToComplete
-                                            ? 'Upload Evidence'
-                                            : label),
+                                                  needsEvidenceToComplete
+                                              ? 'Upload Evidence'
+                                              : label),
                                     secondaryButtonLabel: isSosOfferMode
                                         ? 'Reject'
                                         : null,
@@ -4772,58 +4771,65 @@ class _TrackCaregiverScreenState extends State<TrackCaregiverScreen>
                                         : (canUpdate
                                               ? (canCompleteNow
                                                     ? () async {
-                                                  final statusValue =
-                                                      statusToSet;
-                                                  final stageValue = stageToSet;
-                                                  final pushedPos =
-                                                      await _pushCaregiverLocationOnce(
-                                                        caregiverId:
-                                                            caregiverId,
-                                                      );
-                                                  await _updateBookingSession(
-                                                    status: statusValue,
-                                                    stage: stageValue,
-                                                    ongoingStatus: label,
-                                                  );
-                                                  if (statusValue ==
-                                                      'ONGOING') {
-                                                    _navigationMode = true;
-                                                    _lastNavigationPos = null;
-                                                    final targetPos =
-                                                        pushedPos ??
-                                                        _latestCaregiverPos;
-                                                    if (isStartSession &&
-                                                        targetPos != null) {
-                                                      await _focusCaregiverSideView(
-                                                        caregiverPos: targetPos,
-                                                        destinationPos:
-                                                            _latestDestinationPos,
-                                                      );
-                                                    } else if (targetPos !=
-                                                        null) {
-                                                      _scheduleNavigationCamera(
-                                                        caregiverPos: targetPos,
-                                                        destinationPos:
-                                                            _latestDestinationPos,
-                                                      );
-                                                    } else {
-                                                      await _recenterOnCaregiver();
-                                                    }
-                                                  }
-                                                  _syncLiveLocationForStatus(
-                                                    status: statusValue,
-                                                    caregiverId: caregiverId,
-                                                  );
-                                                  if (statusValue ==
-                                                      'COMPLETED') {
-                                                    if (!mounted) return;
-                                                    await _showCompletionPopupAndRedirect(
-                                                      caregiverView: true,
-                                                    );
-                                                  }
-                                                }
-                                              : null)
-                                                    : null),
+                                                        final statusValue =
+                                                            statusToSet;
+                                                        final stageValue =
+                                                            stageToSet;
+                                                        final pushedPos =
+                                                            await _pushCaregiverLocationOnce(
+                                                              caregiverId:
+                                                                  caregiverId,
+                                                            );
+                                                        await _updateBookingSession(
+                                                          status: statusValue,
+                                                          stage: stageValue,
+                                                          ongoingStatus: label,
+                                                        );
+                                                        if (statusValue ==
+                                                            'ONGOING') {
+                                                          _navigationMode =
+                                                              true;
+                                                          _lastNavigationPos =
+                                                              null;
+                                                          final targetPos =
+                                                              pushedPos ??
+                                                              _latestCaregiverPos;
+                                                          if (isStartSession &&
+                                                              targetPos !=
+                                                                  null) {
+                                                            await _focusCaregiverSideView(
+                                                              caregiverPos:
+                                                                  targetPos,
+                                                              destinationPos:
+                                                                  _latestDestinationPos,
+                                                            );
+                                                          } else if (targetPos !=
+                                                              null) {
+                                                            _scheduleNavigationCamera(
+                                                              caregiverPos:
+                                                                  targetPos,
+                                                              destinationPos:
+                                                                  _latestDestinationPos,
+                                                            );
+                                                          } else {
+                                                            await _recenterOnCaregiver();
+                                                          }
+                                                        }
+                                                        _syncLiveLocationForStatus(
+                                                          status: statusValue,
+                                                          caregiverId:
+                                                              caregiverId,
+                                                        );
+                                                        if (statusValue ==
+                                                            'COMPLETED') {
+                                                          if (!mounted) return;
+                                                          await _showCompletionPopupAndRedirect(
+                                                            caregiverView: true,
+                                                          );
+                                                        }
+                                                      }
+                                                    : null)
+                                              : null),
                                     onSecondaryPressed: isSosOfferMode
                                         ? () async {
                                             try {

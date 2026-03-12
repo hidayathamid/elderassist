@@ -1,0 +1,11 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- Simple "E" mark for notification small icon (solid white). -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M6,5h12v2H8v4h8v2H8v4h10v2H6z" />
+</vector>

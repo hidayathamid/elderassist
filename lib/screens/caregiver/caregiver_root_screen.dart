@@ -53,6 +53,12 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
   String? _activeBookingId;
   bool _locationInFlight = false;
   String? _lastLiveLocLogKey;
+  DateTime? _lastLiveLocSentAt;
+  Position? _lastLiveLocSentPos;
+
+  static const Duration _liveLocInterval = Duration(seconds: 20);
+  static const double _liveLocMinMoveMeters = 10.0;
+  static const Duration _liveLocMaxSilence = Duration(minutes: 1);
 
   @override
   void initState() {
@@ -158,6 +164,8 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
     _activeBookingId = null;
     _locationTimer?.cancel();
     _locationTimer = null;
+    _lastLiveLocSentAt = null;
+    _lastLiveLocSentPos = null;
     if (kDebugMode) {
       debugPrint('[LiveLoc] stopped (no ongoing booking).');
     }
@@ -178,11 +186,38 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
     unawaited(
       _pushLocationOnce(caregiverId: caregiverId, bookingId: bookingId),
     );
-    _locationTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+    _locationTimer = Timer.periodic(_liveLocInterval, (_) {
       unawaited(
         _pushLocationOnce(caregiverId: caregiverId, bookingId: bookingId),
       );
     });
+  }
+
+  bool _shouldSendLocation(Position pos) {
+    final lastAt = _lastLiveLocSentAt;
+    final lastPos = _lastLiveLocSentPos;
+    if (lastAt == null || lastPos == null) return true;
+
+    final now = DateTime.now();
+    final since = now.difference(lastAt);
+    if (since >= _liveLocMaxSilence) return true;
+
+    try {
+      final movedMeters = Geolocator.distanceBetween(
+        lastPos.latitude,
+        lastPos.longitude,
+        pos.latitude,
+        pos.longitude,
+      );
+      return movedMeters >= _liveLocMinMoveMeters;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  void _markLocationSent(Position pos) {
+    _lastLiveLocSentAt = DateTime.now();
+    _lastLiveLocSentPos = pos;
   }
 
   Future<void> _pushLocationOnce({
@@ -203,6 +238,8 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
         desiredAccuracy: LocationAccuracy.high,
         timeLimit: const Duration(seconds: 10),
       );
+      if (!_shouldSendLocation(pos)) return;
+
       final logKey =
           '$bookingId|${pos.latitude.toStringAsFixed(5)},${pos.longitude.toStringAsFixed(5)}';
       if (kDebugMode && _lastLiveLocLogKey != logKey) {
@@ -218,30 +255,26 @@ class _CaregiverRootScreenState extends State<CaregiverRootScreen> {
           'lng': pos.longitude,
           'bookingId': bookingId,
         });
+        _markLocationSent(pos);
         if (kDebugMode) {
           debugPrint('[LiveLoc] updated via cloud function.');
         }
         return;
-      } catch (_) {
-        // fallback to direct update
-      }
+      } catch (_) {}
       final caregiverRef = _db.collection('caregivers').doc(caregiverId);
       final caregiverSnap = await caregiverRef.get();
       if (!caregiverSnap.exists) return;
-      await caregiverRef.set(
-        {
-          'lat': pos.latitude,
-          'lng': pos.longitude,
-          'location': GeoPoint(pos.latitude, pos.longitude),
-          'locationUpdatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
+      await caregiverRef.set({
+        'lat': pos.latitude,
+        'lng': pos.longitude,
+        'location': GeoPoint(pos.latitude, pos.longitude),
+        'locationUpdatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      _markLocationSent(pos);
       if (kDebugMode) {
         debugPrint('[LiveLoc] updated caregiver doc directly.');
       }
     } catch (_) {
-      // silent: do not spam UI while caregiver navigates
     } finally {
       _locationInFlight = false;
     }

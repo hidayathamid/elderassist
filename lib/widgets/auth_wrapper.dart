@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../services/auth_notice.dart';
 import '../services/post_login_action.dart';
+import '../services/push_service.dart';
 import '../screens/auth/touchdown_screen.dart';
 import '../screens/admin/admin_root_screen.dart';
 import '../screens/caregiver/caregiver_root_screen.dart';
@@ -115,9 +116,11 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
             if (adminExists) {
               PostLoginAction.take();
+              PushService().setActiveRole('admin');
               return const AdminRootScreen();
             }
             if (caregiverExists) {
+              PushService().setActiveRole('caregiver');
               return _PostLoginActionGate(
                 isCaregiver: true,
                 child: _ForceLogoutGate(
@@ -127,6 +130,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
               );
             }
             if (userExists) {
+              PushService().setActiveRole('user');
               return _PostLoginActionGate(
                 isCaregiver: false,
                 child: _ForceLogoutGate(

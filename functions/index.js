@@ -1058,7 +1058,6 @@ exports.sendSosWhatsAppToEmergencyContacts = functions
     return { ok: true, sent, failed, failures: failures.slice(0, 5) };
   });
 
-// Auto-notify emergency contacts when SOS is first created (WhatsApp preferred, SMS fallback).
 exports.notifySosActivatedViaTwilio = functions
   .region("asia-southeast1")
   .firestore.document("sos/{sosId}")
@@ -2513,7 +2512,7 @@ exports.notifyBookingUpdates = functions
       const msg = ongoingStatusToClientMessage(afterOngoing);
       if (msg) {
         await sendTopicNotification({
-          topic: userId,
+          topic: userTopic(userId),
           title: "Booking Update",
           body: msg,
           data: {
@@ -2530,7 +2529,7 @@ exports.notifyBookingUpdates = functions
       if (afterStatus === BOOKING_ASSIGNED_STATUS) {
         if (userId) {
           await sendTopicNotification({
-            topic: userId,
+            topic: userTopic(userId),
             title: "Booking Active",
             body: `${caregiverName} is assigned to your booking.`,
             data: { type: "booking_status", bookingId, status: afterStatus },
@@ -2539,7 +2538,7 @@ exports.notifyBookingUpdates = functions
         }
         if (caregiverId) {
           await sendTopicNotification({
-            topic: caregiverId,
+            topic: caregiverTopic(caregiverId),
             title: "Booking Active",
             body: `You have an active booking with ${personName}.`,
             data: { type: "booking_status", bookingId, status: afterStatus },
@@ -2549,7 +2548,7 @@ exports.notifyBookingUpdates = functions
       } else if (afterStatus === BOOKING_CANCELLED_STATUS) {
         if (userId) {
           await sendTopicNotification({
-            topic: userId,
+            topic: userTopic(userId),
             title: "Booking Cancelled",
             body: "Your booking has been cancelled.",
             data: { type: "booking_status", bookingId, status: afterStatus },
@@ -2558,7 +2557,7 @@ exports.notifyBookingUpdates = functions
         }
         if (caregiverId) {
           await sendTopicNotification({
-            topic: caregiverId,
+            topic: caregiverTopic(caregiverId),
             title: "Booking Cancelled",
             body: `Booking with ${personName} has been cancelled.`,
             data: { type: "booking_status", bookingId, status: afterStatus },
@@ -2568,7 +2567,7 @@ exports.notifyBookingUpdates = functions
       } else if (afterStatus === BOOKING_COMPLETED_STATUS) {
         if (userId) {
           await sendTopicNotification({
-            topic: userId,
+            topic: userTopic(userId),
             title: "Booking Completed",
             body: "Your booking has been completed.",
             data: { type: "booking_status", bookingId, status: afterStatus },
@@ -2577,7 +2576,7 @@ exports.notifyBookingUpdates = functions
         }
         if (caregiverId) {
           await sendTopicNotification({
-            topic: caregiverId,
+            topic: caregiverTopic(caregiverId),
             title: "Booking Completed",
             body: `Booking with ${personName} has been completed.`,
             data: { type: "booking_status", bookingId, status: afterStatus },
@@ -2634,7 +2633,7 @@ exports.sendBookingReminders30m = functions
 
       if (!userSentAt) {
         await sendTopicNotification({
-          topic: userId,
+          topic: userTopic(userId),
           title: "Booking Reminder",
           body: buildBookingReminderBody(booking),
           data: { type: "booking_reminder", bookingId: doc.id, minutes: "30" },
@@ -2649,7 +2648,7 @@ exports.sendBookingReminders30m = functions
 
       if (!caregiverSentAt) {
         await sendTopicNotification({
-          topic: caregiverId,
+          topic: caregiverTopic(caregiverId),
           title: "Booking Reminder",
           body: buildCaregiverReminderBody(booking),
           data: { type: "booking_reminder", bookingId: doc.id, minutes: "30" },
@@ -2716,7 +2715,7 @@ exports.notifyPaymentStatus = functions
     }
 
     await sendTopicNotification({
-      topic: userId,
+      topic: userTopic(userId),
       title,
       body,
       data: {
@@ -2763,7 +2762,7 @@ exports.notifyWithdrawRequestStatus = functions
     }
 
     await sendTopicNotification({
-      topic: caregiverId,
+      topic: caregiverTopic(caregiverId),
       title,
       body,
       data: {
@@ -2803,7 +2802,7 @@ exports.notifyDocumentVerification = functions
       : `${docName} has been marked unverified.`;
 
     await sendTopicNotification({
-      topic: caregiverId,
+      topic: caregiverTopic(caregiverId),
       title,
       body,
       data: {
@@ -2929,7 +2928,7 @@ exports.notifyUserAccountUpdates = functions
     const body = buildAccountUpdateMessage({ profileChanges, addressDiff }) || "Your account was updated.";
 
     await sendTopicNotification({
-      topic: userId,
+      topic: userTopic(userId),
       title,
       body,
       data: {
@@ -2984,7 +2983,7 @@ exports.notifyCaregiverAccountUpdates = functions
     const body = `Your caregiver profile was updated: ${profileChanges.join(", ")}.`;
 
     await sendTopicNotification({
-      topic: caregiverId,
+      topic: caregiverTopic(caregiverId),
       title,
       body,
       data: {
@@ -3014,7 +3013,7 @@ async function notifyAdmins({ title, body, data, regionLabel }) {
   await Promise.all(
     adminIds.map((id) =>
       sendTopicNotification({
-        topic: id,
+        topic: adminTopic(id),
         title,
         body,
         data,
@@ -3037,7 +3036,7 @@ exports.notifyPasswordResetRequested = functions
     }
 
     await sendTopicNotification({
-      topic: uid,
+      topic: userTopic(uid),
       title: "Security Update",
       body: "A password reset link was requested for your account.",
       data: {
@@ -3470,8 +3469,9 @@ exports.sendChatNotification = functions
     const message = snapshot.data();
     if (!message) return null;
 
+    const receiverTopic = await resolveReceiverTopic(message.receiverId);
     await admin.messaging().send({
-      topic: message.receiverId,
+      topic: receiverTopic,
       notification: {
         title: "New Message",
         body: message.text?.slice(0, 50) || "",
@@ -3499,7 +3499,7 @@ exports.notifySosActivated = functions
 
     try {
       await admin.messaging().send({
-        topic: userId,
+        topic: userTopic(userId),
         notification: {
           title: "SOS Activated",
           body: `Searching caregiver for ${personName}.`,
@@ -3543,7 +3543,7 @@ exports.notifySosOffer = functions
 
     try {
       await admin.messaging().send({
-        topic: caregiverId,
+        topic: caregiverTopic(caregiverId),
         notification: {
           title: "New SOS Request",
           body,
@@ -3575,6 +3575,38 @@ function normalizePushData(raw) {
   return out;
 }
 
+function userTopic(uid) {
+  const id = String(uid || "").trim();
+  return id ? `user_${id}` : "";
+}
+
+function caregiverTopic(uid) {
+  const id = String(uid || "").trim();
+  return id ? `caregiver_${id}` : "";
+}
+
+function adminTopic(uid) {
+  const id = String(uid || "").trim();
+  return id ? `admin_${id}` : "";
+}
+
+async function resolveReceiverTopic(uid) {
+  const id = String(uid || "").trim();
+  if (!id) return "";
+  try {
+    const [adminSnap, caregiverSnap, userSnap] = await Promise.all([
+      db.collection("admin").doc(id).get(),
+      db.collection("caregivers").doc(id).get(),
+      db.collection("users").doc(id).get(),
+    ]);
+    if (adminSnap.exists) return adminTopic(id);
+    if (caregiverSnap.exists) return caregiverTopic(id);
+    if (userSnap.exists) return userTopic(id);
+  } catch (_) {}
+  // Default: assume user uid if unknown.
+  return userTopic(id);
+}
+
 async function sendTopicNotification({
   topic,
   title,
@@ -3600,7 +3632,7 @@ async function sendTopicNotification({
       apns: { headers: { "apns-priority": "10" } },
     });
   } catch (err) {
-    console.error(`${regionLabel} notification failed`, normalizedTopic, err);
+      console.error(`${regionLabel} notification failed`, normalizedTopic, err);
   }
 }
 
@@ -3654,7 +3686,7 @@ exports.notifySosStatus = functions
     }
 
     await sendTopicNotification({
-      topic: userId,
+      topic: userTopic(userId),
       title,
       body,
       data: {
@@ -3689,7 +3721,7 @@ exports.notifySosStatus = functions
       await Promise.all(
         caregiverTargets.map((targetId) =>
           sendTopicNotification({
-            topic: targetId,
+            topic: caregiverTopic(targetId),
             title: "SOS Cancelled",
             body: `Client marked safe. The SOS request for ${personName} has been cancelled.`,
             data: {

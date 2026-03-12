@@ -939,8 +939,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
         name: fullName,
         email: email,
         password: pwd,
-        // Caregiver applicants are registered as normal users first. Their
-        // caregiver application stays in `waitinglist` until verified.
         role: 'user',
         phone: _fullPhoneNumber,
         defaultAddress: trimmedAddress.isNotEmpty ? trimmedAddress : null,
@@ -955,8 +953,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
       final uid = FirebaseAuth.instance.currentUser!.uid;
       final userRef = FirebaseFirestore.instance.collection('users').doc(uid);
-      final waitingRef =
-          FirebaseFirestore.instance.collection('waitinglist').doc(uid);
+      final waitingRef = FirebaseFirestore.instance
+          .collection('waitinglist')
+          .doc(uid);
       final extras = <String, dynamic>{
         'servicePreferences': _selectedServices,
         'phoneVerified': true,
@@ -965,22 +964,19 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
       if (_selectedRole == 'caregiver') {
         await userRef.update(extras);
-        await waitingRef.set(
-          {
-            'userId': uid,
-            'name': fullName,
-            'email': email,
-            'phone': _fullPhoneNumber,
-            'defaultAddress': trimmedAddress.isNotEmpty ? trimmedAddress : null,
-            if (coords?.latitude != null) 'lat': coords!.latitude,
-            if (coords?.longitude != null) 'lng': coords!.longitude,
-            'servicePreferences': _selectedServices,
-            'verified': false,
-            'createdAt': FieldValue.serverTimestamp(),
-            'updatedAt': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
+        await waitingRef.set({
+          'userId': uid,
+          'name': fullName,
+          'email': email,
+          'phone': _fullPhoneNumber,
+          'defaultAddress': trimmedAddress.isNotEmpty ? trimmedAddress : null,
+          if (coords?.latitude != null) 'lat': coords!.latitude,
+          if (coords?.longitude != null) 'lng': coords!.longitude,
+          'servicePreferences': _selectedServices,
+          'verified': false,
+          'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
         await _uploadCaregiverIdentityDocuments(uid);
       } else {
         final budget = double.tryParse(_budgetCtrl.text.trim());

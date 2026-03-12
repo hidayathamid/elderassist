@@ -3243,6 +3243,14 @@ class _AdminUserDetailsSheetState extends State<_AdminUserDetailsSheet> {
                                     : entry.defaultAddress);
 
                           final ownerName = displayName;
+                          final ownerPhotoUrl =
+                              _string(data['profile_photo']).isNotEmpty
+                              ? _string(data['profile_photo'])
+                              : (_string(data['photoUrl']).isNotEmpty
+                                    ? _string(data['photoUrl'])
+                                    : (_string(data['imageUrl']).isNotEmpty
+                                          ? _string(data['imageUrl'])
+                                          : (entry.photoUrl ?? '')));
                           final ownerPhone = phone.trim().isNotEmpty
                               ? phone.trim()
                               : '—';
@@ -3280,6 +3288,11 @@ class _AdminUserDetailsSheetState extends State<_AdminUserDetailsSheet> {
                             children: [
                               const _UsersDetailsSectionHeader(
                                 title: 'Client details',
+                              ),
+                              const SizedBox(height: 4),
+                              _UsersDetailsAvatar(
+                                label: ownerName,
+                                photoUrl: ownerPhotoUrl,
                               ),
                               _UsersDetailsTabContent(
                                 children: [

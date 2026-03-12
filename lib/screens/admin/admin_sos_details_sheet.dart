@@ -1,8 +1,10 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 
 import '../../utils/service_preferences.dart';
 import '../../widgets/default_profile_avatar.dart';
+import '../../widgets/safe_network_image.dart';
 import '../user/activity/activity_screen.dart' show activityButtonYellow;
 
 const Color _profileDarkText = Color(0xFF1B1D29);
@@ -71,6 +73,7 @@ class AdminSosDetailsSheet extends StatefulWidget {
 class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
   static const labels = <String>[
     'SOS details',
+    'Booking summary',
     'Caregiver details',
     'Client details',
     'Emergency contact',
@@ -891,6 +894,330 @@ class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
     );
   }
 
+  static const Color _bookingSummaryCardBorderStrong = Color(0xFFE1E4EA);
+  static const Color _bookingSummaryCardShadow = Color(0x1A0B0C10);
+
+  BoxDecoration _bookingSummaryCardDecoration({double radius = 18}) {
+    return BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(radius),
+      border: Border.all(color: _bookingSummaryCardBorderStrong),
+      boxShadow: const [
+        BoxShadow(
+          color: _bookingSummaryCardShadow,
+          blurRadius: 12,
+          offset: Offset(0, 6),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildBookingSummaryTab(Map<String, dynamic> sos) {
+    final bookingId = _text(sos['bookingId']);
+    if (bookingId.isEmpty) {
+      return _buildUnavailablePlaceholder(
+        message: 'Booking summary unavailable',
+        explanation: 'No booking is linked to this SOS record yet.',
+        centerVertically: true,
+      );
+    }
+
+    final bookingRef = FirebaseFirestore.instance
+        .collection('bookings')
+        .doc(bookingId);
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: bookingRef.snapshots(),
+      builder: (context, snap) {
+        final booking = snap.data?.data();
+        if (booking == null) {
+          return _buildUnavailablePlaceholder(
+            message: 'Booking summary unavailable',
+            explanation: 'Unable to load the booking record.',
+            centerVertically: true,
+          );
+        }
+        return _buildBookingSummaryContent(booking);
+      },
+    );
+  }
+
+  Widget _buildBookingSummaryContent(Map<String, dynamic> booking) {
+    final stageSnapshots = _extractStageSnapshots(booking);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildSectionHeader(
+            title: 'Stage photos',
+            hint: 'Captured during the caregiver session.',
+          ),
+          if (stageSnapshots.isEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(6, 0, 6, 14),
+              child: Text(
+                'No stage photos available yet.',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.black.withValues(alpha: 0.62),
+                  height: 1.25,
+                ),
+              ),
+            )
+          else
+            Padding(
+              padding: const EdgeInsets.fromLTRB(6, 0, 6, 14),
+              child: GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: stageSnapshots.length,
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  crossAxisSpacing: 12,
+                  mainAxisSpacing: 12,
+                  childAspectRatio: 0.96,
+                ),
+                itemBuilder: (context, index) {
+                  final entry = stageSnapshots[index];
+                  final stageRaw = (entry['stage']?.toString() ?? '').trim();
+                  final stageLabel = _formatStageSnapshotStage(stageRaw);
+                  final ts = entry['createdAt'];
+                  final dt = ts is Timestamp ? ts.toDate() : null;
+                  final timeLabel = dt == null ? '-' : _formatSnapshotTime(dt);
+                  final photoUrl = (entry['photoUrl']?.toString() ?? '').trim();
+
+                  return InkWell(
+                    borderRadius: BorderRadius.circular(16),
+                    onTap: photoUrl.isEmpty
+                        ? null
+                        : () => _openStagePhotoPreview(
+                            context,
+                            photoUrl,
+                            title: stageLabel,
+                            subtitle: timeLabel,
+                          ),
+                    child: Container(
+                      decoration: _bookingSummaryCardDecoration(radius: 16),
+                      clipBehavior: Clip.antiAlias,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            child: photoUrl.isEmpty
+                                ? Container(
+                                    color: Colors.black.withValues(alpha: 0.04),
+                                    child: const Center(
+                                      child: Icon(
+                                        Icons.photo_outlined,
+                                        color: Colors.black26,
+                                        size: 26,
+                                      ),
+                                    ),
+                                  )
+                                : SafeNetworkImage(
+                                    photoUrl,
+                                    fit: BoxFit.cover,
+                                    placeholder: const SizedBox.shrink(),
+                                    errorWidget: Container(
+                                      color: Colors.black.withValues(
+                                        alpha: 0.04,
+                                      ),
+                                      child: const Center(
+                                        child: Icon(
+                                          Icons.broken_image_outlined,
+                                          color: Colors.black26,
+                                          size: 26,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  stageLabel,
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w900,
+                                    color: _profileDarkText,
+                                    height: 1.1,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  timeLabel,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.black.withValues(alpha: 0.6),
+                                    height: 1.1,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  List<Map<String, dynamic>> _extractStageSnapshots(
+    Map<String, dynamic> booking,
+  ) {
+    final raw = booking['stageSnapshots'];
+    if (raw is! List) return const <Map<String, dynamic>>[];
+    final entries = raw
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList(growable: false);
+    final sorted = entries.toList(growable: true);
+    sorted.sort((a, b) {
+      final aTs = a['createdAt'];
+      final bTs = b['createdAt'];
+      final aDt = aTs is Timestamp ? aTs.toDate() : null;
+      final bDt = bTs is Timestamp ? bTs.toDate() : null;
+      if (aDt == null && bDt == null) return 0;
+      if (aDt == null) return 1;
+      if (bDt == null) return -1;
+      return aDt.compareTo(bDt);
+    });
+    return sorted;
+  }
+
+  String _formatStageSnapshotStage(String raw) {
+    final normalized = raw
+        .trim()
+        .toUpperCase()
+        .replaceAll(' ', '_')
+        .replaceAll('-', '_')
+        .replaceAll('__', '_');
+    switch (normalized) {
+      case 'START_SESSION':
+        return 'Start session';
+      case 'ARRIVED':
+        return 'Arrived';
+      case 'PROVIDE_SERVICES':
+        return 'Provide services';
+      case 'JOBS_DONE':
+        return 'Jobs done';
+      case 'COMPLETED':
+        return 'Completed';
+      default:
+        if (normalized.isEmpty) return 'Stage';
+        final words = normalized.split('_').where((w) => w.isNotEmpty).toList();
+        if (words.isEmpty) return 'Stage';
+        return words
+            .map((w) => '${w[0]}${w.substring(1).toLowerCase()}')
+            .join(' ');
+    }
+  }
+
+  String _formatSnapshotTime(DateTime dt) {
+    return DateFormat('d MMM yyyy • h:mm a').format(dt);
+  }
+
+  Future<void> _openStagePhotoPreview(
+    BuildContext context,
+    String photoUrl, {
+    String title = '',
+    String subtitle = '',
+  }) async {
+    final safeUrl = photoUrl.trim();
+    if (safeUrl.isEmpty) return;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        return Dialog(
+          backgroundColor: Colors.white,
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 18,
+            vertical: 18,
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (title.trim().isNotEmpty)
+                        Text(
+                          title.trim(),
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w900,
+                            color: _profileDarkText,
+                          ),
+                        ),
+                      if (subtitle.trim().isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          subtitle.trim(),
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.black.withValues(alpha: 0.62),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                AspectRatio(
+                  aspectRatio: 1,
+                  child: SafeNetworkImage(
+                    safeUrl,
+                    fit: BoxFit.cover,
+                    placeholder: const Center(
+                      child: SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
+                    errorWidget: Container(
+                      color: Colors.black.withValues(alpha: 0.04),
+                      child: const Center(
+                        child: Icon(
+                          Icons.broken_image_outlined,
+                          color: Colors.black38,
+                          size: 28,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
@@ -929,8 +1256,9 @@ class _AdminSosDetailsSheetState extends State<AdminSosDetailsSheet> {
                   Widget tabContent() {
                     final idx = _selectedTabIndex.clamp(0, labels.length - 1);
                     if (idx == 0) return _buildSosTab(sos);
-                    if (idx == 1) return _buildCaregiverTab(sos);
-                    if (idx == 2) return _buildClientTab(sos);
+                    if (idx == 1) return _buildBookingSummaryTab(sos);
+                    if (idx == 2) return _buildCaregiverTab(sos);
+                    if (idx == 3) return _buildClientTab(sos);
                     return _buildEmergencyContactsTab(sos);
                   }
 

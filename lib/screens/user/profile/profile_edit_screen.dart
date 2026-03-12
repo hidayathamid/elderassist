@@ -1142,12 +1142,12 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
                               enabled: true,
                               readOnly: true,
                               enableInteractiveSelection: false,
-                              suffixIcon: _compactEditButton(
-                                onPressed: _isAdmin
-                                    ? null
-                                    : _openEmailEditScreen,
-                                tooltip: 'Edit email',
-                              ),
+                              suffixIcon: _isAdmin
+                                  ? null
+                                  : _compactEditButton(
+                                      onPressed: _openEmailEditScreen,
+                                      tooltip: 'Edit email',
+                                    ),
                             ),
                             const SizedBox(height: 10),
                             if (!_hidePhone) _phoneField(),

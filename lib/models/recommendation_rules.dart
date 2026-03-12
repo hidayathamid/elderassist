@@ -80,23 +80,44 @@ class RecommendationRules {
       maxRuleDistanceKm: d('maxRuleDistanceKm', base.maxRuleDistanceKm),
       preferredDistanceKm: d('preferredDistanceKm', base.preferredDistanceKm),
       minAcceptableRating: d('minAcceptableRating', base.minAcceptableRating),
-      ratingPenaltyThreshold:
-          d('ratingPenaltyThreshold', base.ratingPenaltyThreshold),
+      ratingPenaltyThreshold: d(
+        'ratingPenaltyThreshold',
+        base.ratingPenaltyThreshold,
+      ),
       ratingPenaltyValue: d('ratingPenaltyValue', base.ratingPenaltyValue),
-      recommendationTier1MinScore:
-          d('recommendationTier1MinScore', base.recommendationTier1MinScore),
-      recommendationTier2MinScore:
-          d('recommendationTier2MinScore', base.recommendationTier2MinScore),
-      distanceScoreMultiplier:
-          d('distanceScoreMultiplier', base.distanceScoreMultiplier),
-      ratingScoreMultiplier: d('ratingScoreMultiplier', base.ratingScoreMultiplier),
-      matchScoreMultiplier: d('matchScoreMultiplier', base.matchScoreMultiplier),
-      serviceScoreMultiplier:
-          d('serviceScoreMultiplier', base.serviceScoreMultiplier),
+      recommendationTier1MinScore: d(
+        'recommendationTier1MinScore',
+        base.recommendationTier1MinScore,
+      ),
+      recommendationTier2MinScore: d(
+        'recommendationTier2MinScore',
+        base.recommendationTier2MinScore,
+      ),
+      distanceScoreMultiplier: d(
+        'distanceScoreMultiplier',
+        base.distanceScoreMultiplier,
+      ),
+      ratingScoreMultiplier: d(
+        'ratingScoreMultiplier',
+        base.ratingScoreMultiplier,
+      ),
+      matchScoreMultiplier: d(
+        'matchScoreMultiplier',
+        base.matchScoreMultiplier,
+      ),
+      serviceScoreMultiplier: d(
+        'serviceScoreMultiplier',
+        base.serviceScoreMultiplier,
+      ),
       serviceScoreCap: i('serviceScoreCap', base.serviceScoreCap),
-      priceScoreMultiplier: d('priceScoreMultiplier', base.priceScoreMultiplier),
-      distancePenaltyMultiplier:
-          d('distancePenaltyMultiplier', base.distancePenaltyMultiplier),
+      priceScoreMultiplier: d(
+        'priceScoreMultiplier',
+        base.priceScoreMultiplier,
+      ),
+      distancePenaltyMultiplier: d(
+        'distancePenaltyMultiplier',
+        base.distancePenaltyMultiplier,
+      ),
     );
   }
 }
